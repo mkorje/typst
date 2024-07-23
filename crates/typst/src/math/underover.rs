@@ -15,8 +15,8 @@ const BRACKET_GAP: Em = Em::new(0.25);
 const PAREN_GAP: Em = Em::new(0.25);
 const SHELL_GAP: Em = Em::new(0.25);
 
-/// A marker to distinguish under- vs. overlines.
-enum LineKind {
+/// A marker to distinguish under- vs. over-.
+enum Position {
     Over,
     Under,
 }
@@ -36,7 +36,7 @@ pub struct UnderlineElem {
 impl LayoutMath for Packed<UnderlineElem> {
     #[typst_macros::time(name = "math.underline", span = self.span())]
     fn layout_math(&self, ctx: &mut MathContext, styles: StyleChain) -> SourceResult<()> {
-        layout_underoverline(ctx, styles, self.body(), self.span(), LineKind::Under)
+        layout_underoverline(ctx, styles, self.body(), self.span(), Position::Under)
     }
 }
 
@@ -55,7 +55,7 @@ pub struct OverlineElem {
 impl LayoutMath for Packed<OverlineElem> {
     #[typst_macros::time(name = "math.overline", span = self.span())]
     fn layout_math(&self, ctx: &mut MathContext, styles: StyleChain) -> SourceResult<()> {
-        layout_underoverline(ctx, styles, self.body(), self.span(), LineKind::Over)
+        layout_underoverline(ctx, styles, self.body(), self.span(), Position::Over)
     }
 }
 
@@ -65,11 +65,11 @@ fn layout_underoverline(
     styles: StyleChain,
     body: &Content,
     span: Span,
-    line: LineKind,
+    position: Position,
 ) -> SourceResult<()> {
     let (extra_height, content, line_pos, content_pos, baseline, bar_height);
-    match line {
-        LineKind::Under => {
+    match position {
+        Position::Under => {
             let sep = scaled!(ctx, styles, underbar_extra_descender);
             bar_height = scaled!(ctx, styles, underbar_rule_thickness);
             let gap = scaled!(ctx, styles, underbar_vertical_gap);
@@ -81,7 +81,7 @@ fn layout_underoverline(
             content_pos = Point::zero();
             baseline = content.ascent()
         }
-        LineKind::Over => {
+        Position::Over => {
             let sep = scaled!(ctx, styles, overbar_extra_ascender);
             bar_height = scaled!(ctx, styles, overbar_rule_thickness);
             let gap = scaled!(ctx, styles, overbar_vertical_gap);
@@ -121,12 +121,6 @@ fn layout_underoverline(
     Ok(())
 }
 
-/// A marker to distinguish over- vs. underbrace-like content.
-enum BraceKind {
-    Over,
-    Under,
-}
-
 /// A horizontal brace under content, with an optional annotation below.
 ///
 /// ```example
@@ -153,7 +147,7 @@ impl LayoutMath for Packed<UnderbraceElem> {
             &self.annotation(styles),
             '⏟',
             BRACE_GAP,
-            BraceKind::Under,
+            Position::Under,
             self.span(),
         )
     }
@@ -185,7 +179,7 @@ impl LayoutMath for Packed<OverbraceElem> {
             &self.annotation(styles),
             '⏞',
             BRACE_GAP,
-            BraceKind::Over,
+            Position::Over,
             self.span(),
         )
     }
@@ -217,7 +211,7 @@ impl LayoutMath for Packed<UnderbracketElem> {
             &self.annotation(styles),
             '⎵',
             BRACKET_GAP,
-            BraceKind::Under,
+            Position::Under,
             self.span(),
         )
     }
@@ -249,7 +243,7 @@ impl LayoutMath for Packed<OverbracketElem> {
             &self.annotation(styles),
             '⎴',
             BRACKET_GAP,
-            BraceKind::Over,
+            Position::Over,
             self.span(),
         )
     }
@@ -281,7 +275,7 @@ impl LayoutMath for Packed<UnderparenElem> {
             &self.annotation(styles),
             '⏝',
             PAREN_GAP,
-            BraceKind::Under,
+            Position::Under,
             self.span(),
         )
     }
@@ -313,7 +307,7 @@ impl LayoutMath for Packed<OverparenElem> {
             &self.annotation(styles),
             '⏜',
             PAREN_GAP,
-            BraceKind::Over,
+            Position::Over,
             self.span(),
         )
     }
@@ -345,7 +339,7 @@ impl LayoutMath for Packed<UndershellElem> {
             &self.annotation(styles),
             '⏡',
             SHELL_GAP,
-            BraceKind::Under,
+            Position::Under,
             self.span(),
         )
     }
@@ -377,7 +371,7 @@ impl LayoutMath for Packed<OvershellElem> {
             &self.annotation(styles),
             '⏠',
             SHELL_GAP,
-            BraceKind::Over,
+            Position::Over,
             self.span(),
         )
     }
@@ -392,7 +386,7 @@ fn layout_underoverspreader(
     annotation: &Option<Content>,
     c: char,
     gap: Em,
-    brace: BraceKind,
+    position: Position,
     span: Span,
 ) -> SourceResult<()> {
     let font_size = scaled_font_size(ctx, styles);
@@ -406,12 +400,12 @@ fn layout_underoverspreader(
     let mut rows = vec![MathRun::new(vec![body]), stretched.into()];
 
     let (sub_style, super_style);
-    let row_styles = match brace {
-        BraceKind::Under => {
+    let row_styles = match position {
+        Position::Under => {
             sub_style = style_for_subscript(styles);
             styles.chain(&sub_style)
         }
-        BraceKind::Over => {
+        Position::Over => {
             super_style = style_for_superscript(styles);
             styles.chain(&super_style)
         }
@@ -424,9 +418,9 @@ fn layout_underoverspreader(
             .transpose()?,
     );
 
-    let baseline = match brace {
-        BraceKind::Under => 0,
-        BraceKind::Over => {
+    let baseline = match position {
+        Position::Under => 0,
+        Position::Over => {
             rows.reverse();
             rows.len() - 1
         }
