@@ -10,10 +10,7 @@ use crate::syntax::Span;
 use crate::text::TextElem;
 use crate::visualize::{FixedStroke, Geometry};
 
-const BRACE_GAP: Em = Em::new(0.25);
-const BRACKET_GAP: Em = Em::new(0.25);
-const PAREN_GAP: Em = Em::new(0.25);
-const SHELL_GAP: Em = Em::new(0.25);
+const GAP: Em = Em::new(0.25);
 
 /// A marker to distinguish under- vs. over-.
 enum Position {
@@ -121,261 +118,112 @@ fn layout_underoverline(
     Ok(())
 }
 
-/// A horizontal brace under content, with an optional annotation below.
-///
-/// ```example
-/// $ underbrace(1 + 2 + ... + 5, "numbers") $
-/// ```
-#[elem(LayoutMath)]
-pub struct UnderbraceElem {
-    /// The content above the brace.
-    #[required]
-    pub body: Content,
+macro_rules! underover_elem {
+    ($typst:literal, $long:literal, $short:literal, $c:literal, $elem:ident, Position::Under) => {
+        underover_elem!($typst, $long, $short, $c, $elem, Position::Under, "under", "above", "below");
+    };
+    ($typst:literal, $long:literal, $short:literal, $c:literal, $elem:ident, Position::Over) => {
+        underover_elem!($typst, $long, $short, $c, $elem, Position::Over, "over", "below", "above");
+    };
+    ($typst:literal, $long:literal, $short:literal, $c:literal, $elem:ident, $position:expr, $pos:literal, $a:literal, $b:literal) => {
+        #[doc = concat!("A horizontal ", $long, " ", $pos, " content, with an optional annotation ", $b, ".")]
+        #[doc = ""]
+        #[doc = "```example"]
+        #[doc = concat!("$ ", $pos, $short, "(1 + 2 + ... + 5, \"numbers\") $")]
+        #[doc = "```"]
+        #[elem(LayoutMath)]
+        pub struct $elem {
+            #[doc = concat!("The content ", $a, " the ", $long, ".")]
+            #[required]
+            pub body: Content,
 
-    /// The optional content below the brace.
-    #[positional]
-    pub annotation: Option<Content>,
+            #[doc = concat!("The optional content ", $b, " the ", $long, ".")]
+            #[positional]
+            pub annotation: Option<Content>,
+        }
+
+        impl LayoutMath for Packed<$elem> {
+            #[typst_macros::time(name = $typst, span = self.span())]
+            fn layout_math(&self, ctx: &mut MathContext, styles: StyleChain) -> SourceResult<()> {
+                layout_underoverspreader(
+                    ctx,
+                    styles,
+                    self.body(),
+                    &self.annotation(styles),
+                    $c,
+                    GAP,
+                    $position,
+                    self.span(),
+                )
+            }
+        }
+    };
 }
 
-impl LayoutMath for Packed<UnderbraceElem> {
-    #[typst_macros::time(name = "math.underbrace", span = self.span())]
-    fn layout_math(&self, ctx: &mut MathContext, styles: StyleChain) -> SourceResult<()> {
-        layout_underoverspreader(
-            ctx,
-            styles,
-            self.body(),
-            &self.annotation(styles),
-            '⏟',
-            BRACE_GAP,
-            Position::Under,
-            self.span(),
-        )
-    }
-}
+underover_elem!(
+    "math.underbrace",
+    "brace",
+    "brace",
+    '⏟',
+    UnderbraceElem,
+    Position::Under
+);
 
-/// A horizontal brace over content, with an optional annotation above.
-///
-/// ```example
-/// $ overbrace(1 + 2 + ... + 5, "numbers") $
-/// ```
-#[elem(LayoutMath)]
-pub struct OverbraceElem {
-    /// The content below the brace.
-    #[required]
-    pub body: Content,
+underover_elem!("math.overbrace", "brace", "brace", '⏞', OverbraceElem, Position::Over);
 
-    /// The optional content above the brace.
-    #[positional]
-    pub annotation: Option<Content>,
-}
+underover_elem!(
+    "math.underbracket",
+    "bracket",
+    "bracket",
+    '⎵',
+    UnderbracketElem,
+    Position::Under
+);
 
-impl LayoutMath for Packed<OverbraceElem> {
-    #[typst_macros::time(name = "math.overbrace", span = self.span())]
-    fn layout_math(&self, ctx: &mut MathContext, styles: StyleChain) -> SourceResult<()> {
-        layout_underoverspreader(
-            ctx,
-            styles,
-            self.body(),
-            &self.annotation(styles),
-            '⏞',
-            BRACE_GAP,
-            Position::Over,
-            self.span(),
-        )
-    }
-}
+underover_elem!(
+    "math.overbracket",
+    "bracket",
+    "bracket",
+    '⎴',
+    OverbracketElem,
+    Position::Over
+);
 
-/// A horizontal bracket under content, with an optional annotation below.
-///
-/// ```example
-/// $ underbracket(1 + 2 + ... + 5, "numbers") $
-/// ```
-#[elem(LayoutMath)]
-pub struct UnderbracketElem {
-    /// The content above the bracket.
-    #[required]
-    pub body: Content,
+underover_elem!(
+    "math.underparen",
+    "parenthesis",
+    "paren",
+    '⏝',
+    UnderparenElem,
+    Position::Under
+);
 
-    /// The optional content below the bracket.
-    #[positional]
-    pub annotation: Option<Content>,
-}
+underover_elem!(
+    "math.overparen",
+    "parenthesis",
+    "paren",
+    '⏜',
+    OverparenElem,
+    Position::Over
+);
 
-impl LayoutMath for Packed<UnderbracketElem> {
-    #[typst_macros::time(name = "math.underbrace", span = self.span())]
-    fn layout_math(&self, ctx: &mut MathContext, styles: StyleChain) -> SourceResult<()> {
-        layout_underoverspreader(
-            ctx,
-            styles,
-            self.body(),
-            &self.annotation(styles),
-            '⎵',
-            BRACKET_GAP,
-            Position::Under,
-            self.span(),
-        )
-    }
-}
+underover_elem!(
+    "math.undershell",
+    "tortoise shell bracket",
+    "shell",
+    '⏡',
+    UndershellElem,
+    Position::Under
+);
 
-/// A horizontal bracket over content, with an optional annotation above.
-///
-/// ```example
-/// $ overbracket(1 + 2 + ... + 5, "numbers") $
-/// ```
-#[elem(LayoutMath)]
-pub struct OverbracketElem {
-    /// The content below the bracket.
-    #[required]
-    pub body: Content,
-
-    /// The optional content above the bracket.
-    #[positional]
-    pub annotation: Option<Content>,
-}
-
-impl LayoutMath for Packed<OverbracketElem> {
-    #[typst_macros::time(name = "math.overbracket", span = self.span())]
-    fn layout_math(&self, ctx: &mut MathContext, styles: StyleChain) -> SourceResult<()> {
-        layout_underoverspreader(
-            ctx,
-            styles,
-            self.body(),
-            &self.annotation(styles),
-            '⎴',
-            BRACKET_GAP,
-            Position::Over,
-            self.span(),
-        )
-    }
-}
-
-/// A horizontal parenthesis under content, with an optional annotation below.
-///
-/// ```example
-/// $ underparen(1 + 2 + ... + 5, "numbers") $
-/// ```
-#[elem(LayoutMath)]
-pub struct UnderparenElem {
-    /// The content above the parenthesis.
-    #[required]
-    pub body: Content,
-
-    /// The optional content below the parenthesis.
-    #[positional]
-    pub annotation: Option<Content>,
-}
-
-impl LayoutMath for Packed<UnderparenElem> {
-    #[typst_macros::time(name = "math.underparen", span = self.span())]
-    fn layout_math(&self, ctx: &mut MathContext, styles: StyleChain) -> SourceResult<()> {
-        layout_underoverspreader(
-            ctx,
-            styles,
-            self.body(),
-            &self.annotation(styles),
-            '⏝',
-            PAREN_GAP,
-            Position::Under,
-            self.span(),
-        )
-    }
-}
-
-/// A horizontal parenthesis over content, with an optional annotation above.
-///
-/// ```example
-/// $ overparen(1 + 2 + ... + 5, "numbers") $
-/// ```
-#[elem(LayoutMath)]
-pub struct OverparenElem {
-    /// The content below the parenthesis.
-    #[required]
-    pub body: Content,
-
-    /// The optional content above the parenthesis.
-    #[positional]
-    pub annotation: Option<Content>,
-}
-
-impl LayoutMath for Packed<OverparenElem> {
-    #[typst_macros::time(name = "math.overparen", span = self.span())]
-    fn layout_math(&self, ctx: &mut MathContext, styles: StyleChain) -> SourceResult<()> {
-        layout_underoverspreader(
-            ctx,
-            styles,
-            self.body(),
-            &self.annotation(styles),
-            '⏜',
-            PAREN_GAP,
-            Position::Over,
-            self.span(),
-        )
-    }
-}
-
-/// A horizontal tortoise shell bracket under content, with an optional annotation below.
-///
-/// ```example
-/// $ undershell(1 + 2 + ... + 5, "numbers") $
-/// ```
-#[elem(LayoutMath)]
-pub struct UndershellElem {
-    /// The content above the tortoise shell bracket.
-    #[required]
-    pub body: Content,
-
-    /// The optional content below the tortoise shell bracket.
-    #[positional]
-    pub annotation: Option<Content>,
-}
-
-impl LayoutMath for Packed<UndershellElem> {
-    #[typst_macros::time(name = "math.undershell", span = self.span())]
-    fn layout_math(&self, ctx: &mut MathContext, styles: StyleChain) -> SourceResult<()> {
-        layout_underoverspreader(
-            ctx,
-            styles,
-            self.body(),
-            &self.annotation(styles),
-            '⏡',
-            SHELL_GAP,
-            Position::Under,
-            self.span(),
-        )
-    }
-}
-
-/// A horizontal tortoise shell bracket over content, with an optional annotation above.
-///
-/// ```example
-/// $ overshell(1 + 2 + ... + 5, "numbers") $
-/// ```
-#[elem(LayoutMath)]
-pub struct OvershellElem {
-    /// The content below the tortoise shell bracket.
-    #[required]
-    pub body: Content,
-
-    /// The optional content above the tortoise shell bracket.
-    #[positional]
-    pub annotation: Option<Content>,
-}
-
-impl LayoutMath for Packed<OvershellElem> {
-    #[typst_macros::time(name = "math.overshell", span = self.span())]
-    fn layout_math(&self, ctx: &mut MathContext, styles: StyleChain) -> SourceResult<()> {
-        layout_underoverspreader(
-            ctx,
-            styles,
-            self.body(),
-            &self.annotation(styles),
-            '⏠',
-            SHELL_GAP,
-            Position::Over,
-            self.span(),
-        )
-    }
-}
+underover_elem!(
+    "math.overshell",
+    "tortoise shell bracket",
+    "shell",
+    '⏠',
+    OvershellElem,
+    Position::Over
+);
 
 /// Layout an over- or underbrace-like object.
 #[allow(clippy::too_many_arguments)]
