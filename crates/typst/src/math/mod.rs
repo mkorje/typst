@@ -172,7 +172,8 @@ pub fn module() -> Module {
     math.define_elem::<AccentElem>();
     math.define_elem::<UnderlineElem>();
     math.define_elem::<OverlineElem>();
-    math.define_elem::<UnderoverElem>();
+    math.define_elem::<UnderElem>();
+    math.define_elem::<OverElem>();
     math.define_elem::<CancelElem>();
     math.define_elem::<FracElem>();
     math.define_elem::<BinomElem>();
@@ -190,6 +191,14 @@ pub fn module() -> Module {
     math.define_func::<upright>();
     math.define_func::<bold>();
     math.define_func::<italic>();
+    math.define_func::<underbrace>();
+    math.define_func::<overbrace>();
+    math.define_func::<underbracket>();
+    math.define_func::<overbracket>();
+    math.define_func::<underparen>();
+    math.define_func::<overparen>();
+    math.define_func::<undershell>();
+    math.define_func::<overshell>();
     math.define_func::<serif>();
     math.define_func::<sans>();
     math.define_func::<cal>();

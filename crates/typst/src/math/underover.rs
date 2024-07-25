@@ -1,5 +1,5 @@
-use crate::diag::{bail, SourceResult};
-use crate::foundations::{cast, elem, Content, Packed, StyleChain, Value};
+use crate::diag::SourceResult;
+use crate::foundations::{elem, func, Content, NativeElement, Packed, StyleChain};
 use crate::layout::{Abs, Em, FixedAlignment, Frame, FrameItem, Point, Size};
 use crate::math::{
     alignments, scaled_font_size, style_cramped, style_for_subscript,
@@ -14,8 +14,8 @@ const GAP: Em = Em::new(0.25);
 
 /// A marker to distinguish under- vs. over-.
 enum Position {
-    Over,
     Under,
+    Over,
 }
 
 /// A horizontal line under content.
@@ -120,179 +120,126 @@ fn layout_underoverline(
 
 ///
 #[elem(LayoutMath)]
-pub struct UnderoverElem {
+pub struct UnderElem {
     ///
     #[required]
     pub body: Content,
 
     ///
     #[required]
-    pub delimiter: Delimiter,
+    pub delimiter: char,
 
     ///
     #[positional]
     pub annotation: Option<Content>,
 }
 
-impl LayoutMath for Packed<UnderoverElem> {
-    #[typst_macros::time(name = "math.underover", span = self.span())]
+impl LayoutMath for Packed<UnderElem> {
+    #[typst_macros::time(name = "math.under", span = self.span())]
     fn layout_math(&self, ctx: &mut MathContext, styles: StyleChain) -> SourceResult<()> {
-        let font_size = scaled_font_size(ctx, styles);
-        let gap = GAP.at(font_size);
-        let body = ctx.layout_into_run(self.body(), styles)?;
-        let body_class = body.class();
-        let body = body.into_fragment(ctx, styles);
-        let Delimiter(c) = self.delimiter();
-        let glyph = GlyphFragment::new(ctx, styles, *c, self.span());
-        let stretched = glyph.stretch_horizontal(ctx, body.width(), Abs::zero());
-
-        let mut rows = vec![MathRun::new(vec![body]), stretched.into()];
-
-        let position = Position::Under;
-        let (sub_style, super_style);
-        let row_styles = match position {
-            Position::Under => {
-                sub_style = style_for_subscript(styles);
-                styles.chain(&sub_style)
-            }
-            Position::Over => {
-                super_style = style_for_superscript(styles);
-                styles.chain(&super_style)
-            }
-        };
-
-        let annotation = &self.annotation(styles);
-        rows.extend(
-            annotation
-                .as_ref()
-                .map(|annotation| ctx.layout_into_run(annotation, row_styles))
-                .transpose()?,
-        );
-
-        let baseline = match position {
-            Position::Under => 0,
-            Position::Over => {
-                rows.reverse();
-                rows.len() - 1
-            }
-        };
-
-        let frame = stack(
-            rows,
-            FixedAlignment::Center,
-            gap,
-            baseline,
-            LeftRightAlternator::Right,
-            None,
-        );
-        ctx.push(FrameFragment::new(ctx, styles, frame).with_class(body_class));
-
-        Ok(())
+        layout_underoverspreader(
+            ctx,
+            styles,
+            self.body(),
+            *self.delimiter(),
+            &self.annotation(styles),
+            Position::Under,
+            self.span(),
+        )
     }
 }
 
-/// A delimiter character.
-#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct Delimiter(char);
+///
+#[elem(LayoutMath)]
+pub struct OverElem {
+    ///
+    #[required]
+    pub body: Content,
 
-impl Delimiter {
-    /// Normalize a character into a delimiter.
-    pub fn new(c: char) -> Self {
-        Self(Self::combine(c).unwrap_or(c))
-    }
+    ///
+    #[required]
+    pub delimiter: char,
 
-    /// Normalize a delimiter to a combining one.
-    pub fn combine(c: char) -> Option<char> {
-        Some(match c {
-            '⏜' => '⏜',
-            '⏝' => '⏝',
-            _ => return None,
-        })
+    ///
+    #[positional]
+    pub annotation: Option<Content>,
+}
+
+impl LayoutMath for Packed<OverElem> {
+    #[typst_macros::time(name = "math.over", span = self.span())]
+    fn layout_math(&self, ctx: &mut MathContext, styles: StyleChain) -> SourceResult<()> {
+        layout_underoverspreader(
+            ctx,
+            styles,
+            self.body(),
+            *self.delimiter(),
+            &self.annotation(styles),
+            Position::Over,
+            self.span(),
+        )
     }
 }
 
-cast! {
-    Delimiter,
-    self => self.0.into_value(),
-    v: char => Self::new(v),
-    v: Content => match v.to_packed::<TextElem>() {
-        Some(elem) => Value::Str(elem.text().clone().into()).cast()?,
-        None => bail!("expected text"),
-    },
+/// Layout an over- or underbrace-like object.
+#[allow(clippy::too_many_arguments)]
+fn layout_underoverspreader(
+    ctx: &mut MathContext,
+    styles: StyleChain,
+    body: &Content,
+    delimiter: char,
+    annotation: &Option<Content>,
+    position: Position,
+    span: Span,
+) -> SourceResult<()> {
+    let font_size = scaled_font_size(ctx, styles);
+    let gap = GAP.at(font_size);
+    let body = ctx.layout_into_run(body, styles)?;
+    let body_class = body.class();
+    let body = body.into_fragment(ctx, styles);
+    let glyph = GlyphFragment::new(ctx, styles, delimiter, span);
+    let stretched = glyph.stretch_horizontal(ctx, body.width(), Abs::zero());
+
+    let mut rows = vec![MathRun::new(vec![body]), stretched.into()];
+
+    let (sub_style, super_style);
+    let row_styles = match position {
+        Position::Under => {
+            sub_style = style_for_subscript(styles);
+            styles.chain(&sub_style)
+        }
+        Position::Over => {
+            super_style = style_for_superscript(styles);
+            styles.chain(&super_style)
+        }
+    };
+
+    rows.extend(
+        annotation
+            .as_ref()
+            .map(|annotation| ctx.layout_into_run(annotation, row_styles))
+            .transpose()?,
+    );
+
+    let baseline = match position {
+        Position::Under => 0,
+        Position::Over => {
+            rows.reverse();
+            rows.len() - 1
+        }
+    };
+
+    let frame = stack(
+        rows,
+        FixedAlignment::Center,
+        gap,
+        baseline,
+        LeftRightAlternator::Right,
+        None,
+    );
+    ctx.push(FrameFragment::new(ctx, styles, frame).with_class(body_class));
+
+    Ok(())
 }
-
-// layout_underoverspreader(
-//     ctx,
-//     styles,
-//     self.body(),
-//     &self.annotation(styles),
-//     '⏝',
-//     GAP,
-//     Position::Under,
-//     self.span(),
-// )
-
-// /// Layout an over- or underbrace-like object.
-// #[allow(clippy::too_many_arguments)]
-// fn layout_underoverspreader(
-//     ctx: &mut MathContext,
-//     styles: StyleChain,
-//     body: &Content,
-//     annotation: &Option<Content>,
-//     c: char,
-//     gap: Em,
-//     position: Position,
-//     span: Span,
-// ) -> SourceResult<()> {
-//     let font_size = scaled_font_size(ctx, styles);
-//     let gap = gap.at(font_size);
-//     let body = ctx.layout_into_run(body, styles)?;
-//     let body_class = body.class();
-//     let body = body.into_fragment(ctx, styles);
-//     let glyph = GlyphFragment::new(ctx, styles, c, span);
-//     let stretched = glyph.stretch_horizontal(ctx, body.width(), Abs::zero());
-
-//     let mut rows = vec![MathRun::new(vec![body]), stretched.into()];
-
-//     let (sub_style, super_style);
-//     let row_styles = match position {
-//         Position::Under => {
-//             sub_style = style_for_subscript(styles);
-//             styles.chain(&sub_style)
-//         }
-//         Position::Over => {
-//             super_style = style_for_superscript(styles);
-//             styles.chain(&super_style)
-//         }
-//     };
-
-//     rows.extend(
-//         annotation
-//             .as_ref()
-//             .map(|annotation| ctx.layout_into_run(annotation, row_styles))
-//             .transpose()?,
-//     );
-
-//     let baseline = match position {
-//         Position::Under => 0,
-//         Position::Over => {
-//             rows.reverse();
-//             rows.len() - 1
-//         }
-//     };
-
-//     let frame = stack(
-//         rows,
-//         FixedAlignment::Center,
-//         gap,
-//         baseline,
-//         LeftRightAlternator::Right,
-//         None,
-//     );
-//     ctx.push(FrameFragment::new(ctx, styles, frame).with_class(body_class));
-
-//     Ok(())
-// }
 
 /// Stack rows on top of each other.
 ///
@@ -339,4 +286,154 @@ pub(super) fn stack(
     }
 
     frame
+}
+
+/// A horizontal brace under content, with an optional annotation below.
+///
+/// ```example
+/// $ underbrace(1 + 2 + ... + 5, "numbers") $
+/// ```
+#[func]
+pub fn underbrace(
+    /// The content above the brace.
+    body: Content,
+    /// The optional content below the brace.
+    #[default]
+    annotation: Option<Content>,
+) -> Content {
+    under(body, '⏟', annotation)
+}
+
+/// A horizontal brace over content, with an optional annotation above.
+///
+/// ```example
+/// $ overbrace(1 + 2 + ... + 5, "numbers") $
+/// ```
+#[func]
+pub fn overbrace(
+    /// The content below the brace.
+    body: Content,
+    /// The optional content above the brace.
+    #[default]
+    annotation: Option<Content>,
+) -> Content {
+    over(body, '⏞', annotation)
+}
+
+/// A horizontal bracket under content, with an optional annotation below.
+///
+/// ```example
+/// $ underbracket(1 + 2 + ... + 5, "numbers") $
+/// ```
+#[func]
+pub fn underbracket(
+    /// The content above the bracket.
+    body: Content,
+    /// The optional content below the bracket.
+    #[default]
+    annotation: Option<Content>,
+) -> Content {
+    under(body, '⎵', annotation)
+}
+
+/// A horizontal bracket over content, with an optional annotation above.
+///
+/// ```example
+/// $ overbracket(1 + 2 + ... + 5, "numbers") $
+/// ```
+#[func]
+pub fn overbracket(
+    /// The content below the bracket.
+    body: Content,
+    /// The optional content above the bracket.
+    #[default]
+    annotation: Option<Content>,
+) -> Content {
+    over(body, '⎴', annotation)
+}
+
+/// A horizontal parenthesis under content, with an optional annotation below.
+///
+/// ```example
+/// $ underparen(1 + 2 + ... + 5, "numbers") $
+/// ```
+#[func]
+pub fn underparen(
+    /// The content above the parenthesis.
+    body: Content,
+    /// The optional content below the parenthesis.
+    #[default]
+    annotation: Option<Content>,
+) -> Content {
+    under(body, '⏝', annotation)
+}
+
+/// A horizontal parenthesis over content, with an optional annotation above.
+///
+/// ```example
+/// $ overparen(1 + 2 + ... + 5, "numbers") $
+/// ```
+#[func]
+pub fn overparen(
+    /// The content below the parenthesis.
+    body: Content,
+    /// The optional content above the parenthesis.
+    #[default]
+    annotation: Option<Content>,
+) -> Content {
+    over(body, '⏜', annotation)
+}
+
+/// A horizontal tortoise shell bracket under content, with an optional annotation below.
+///
+/// ```example
+/// $ undershell(1 + 2 + ... + 5, "numbers") $
+/// ```
+#[func]
+pub fn undershell(
+    /// The content above the tortoise shell bracket.
+    body: Content,
+    /// The optional content below the tortoise shell bracket.
+    #[default]
+    annotation: Option<Content>,
+) -> Content {
+    under(body, '⏡', annotation)
+}
+
+/// A horizontal tortoise shell bracket over content, with an optional annotation above.
+///
+/// ```example
+/// $ overshell(1 + 2 + ... + 5, "numbers") $
+/// ```
+#[func]
+pub fn overshell(
+    /// The content below the tortoise shell bracket.
+    body: Content,
+    /// The optional content above the tortoise shell bracket.
+    #[default]
+    annotation: Option<Content>,
+) -> Content {
+    over(body, '⏠', annotation)
+}
+
+fn under(
+    body: Content,
+    c: char,
+    annotation: Option<Content>,
+) -> Content {
+    let span = body.span();
+    let mut elem = UnderElem::new(body, c);
+    elem.push_annotation(annotation);
+    elem.pack().spanned(span)
+}
+
+fn over(
+    body: Content,
+    c: char,
+    annotation: Option<Content>,
+) -> Content {
+    let span = body.span();
+    let mut elem = OverElem::new(body, c);
+    elem.push_annotation(annotation);
+    elem.pack().spanned(span)
 }

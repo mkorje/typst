@@ -42,7 +42,16 @@
   filter: [
     "underline",
     "overline",
-    "underover",
+    "under",
+    "over",
+    "underbrace",
+    "overbrace",
+    "underbracket",
+    "overbracket",
+    "underparen",
+    "overparen",
+    "undershell",
+    "overshell",
   ]
   details: |
     Delimiters above or below parts of an equation.
