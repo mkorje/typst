@@ -1,5 +1,5 @@
-use crate::diag::SourceResult;
-use crate::foundations::{elem, Content, Packed, StyleChain};
+use crate::diag::{bail, SourceResult};
+use crate::foundations::{cast, elem, Content, Packed, StyleChain, Value};
 use crate::layout::{Abs, Em, FixedAlignment, Frame, FrameItem, Point, Size};
 use crate::math::{
     alignments, scaled_font_size, style_cramped, style_for_subscript,
@@ -118,174 +118,181 @@ fn layout_underoverline(
     Ok(())
 }
 
-macro_rules! underover_elem {
-    ($typst:literal, $long:literal, $short:literal, $c:literal, $elem:ident, Position::Under) => {
-        underover_elem!($typst, $long, $short, $c, $elem, Position::Under, "under", "above", "below");
-    };
-    ($typst:literal, $long:literal, $short:literal, $c:literal, $elem:ident, Position::Over) => {
-        underover_elem!($typst, $long, $short, $c, $elem, Position::Over, "over", "below", "above");
-    };
-    ($typst:literal, $long:literal, $short:literal, $c:literal, $elem:ident, $position:expr, $pos:literal, $a:literal, $b:literal) => {
-        #[doc = concat!("A horizontal ", $long, " ", $pos, " content, with an optional annotation ", $b, ".")]
-        #[doc = ""]
-        #[doc = "```example"]
-        #[doc = concat!("$ ", $pos, $short, "(1 + 2 + ... + 5, \"numbers\") $")]
-        #[doc = "```"]
-        #[elem(LayoutMath)]
-        pub struct $elem {
-            #[doc = concat!("The content ", $a, " the ", $long, ".")]
-            #[required]
-            pub body: Content,
+///
+#[elem(LayoutMath)]
+pub struct UnderoverElem {
+    ///
+    #[required]
+    pub body: Content,
 
-            #[doc = concat!("The optional content ", $b, " the ", $long, ".")]
-            #[positional]
-            pub annotation: Option<Content>,
-        }
+    ///
+    #[required]
+    pub delimiter: Delimiter,
 
-        impl LayoutMath for Packed<$elem> {
-            #[typst_macros::time(name = $typst, span = self.span())]
-            fn layout_math(&self, ctx: &mut MathContext, styles: StyleChain) -> SourceResult<()> {
-                layout_underoverspreader(
-                    ctx,
-                    styles,
-                    self.body(),
-                    &self.annotation(styles),
-                    $c,
-                    GAP,
-                    $position,
-                    self.span(),
-                )
+    ///
+    #[positional]
+    pub annotation: Option<Content>,
+}
+
+impl LayoutMath for Packed<UnderoverElem> {
+    #[typst_macros::time(name = "math.underover", span = self.span())]
+    fn layout_math(&self, ctx: &mut MathContext, styles: StyleChain) -> SourceResult<()> {
+        let font_size = scaled_font_size(ctx, styles);
+        let gap = GAP.at(font_size);
+        let body = ctx.layout_into_run(self.body(), styles)?;
+        let body_class = body.class();
+        let body = body.into_fragment(ctx, styles);
+        let Delimiter(c) = self.delimiter();
+        let glyph = GlyphFragment::new(ctx, styles, *c, self.span());
+        let stretched = glyph.stretch_horizontal(ctx, body.width(), Abs::zero());
+
+        let mut rows = vec![MathRun::new(vec![body]), stretched.into()];
+
+        let position = Position::Under;
+        let (sub_style, super_style);
+        let row_styles = match position {
+            Position::Under => {
+                sub_style = style_for_subscript(styles);
+                styles.chain(&sub_style)
             }
-        }
-    };
+            Position::Over => {
+                super_style = style_for_superscript(styles);
+                styles.chain(&super_style)
+            }
+        };
+
+        let annotation = &self.annotation(styles);
+        rows.extend(
+            annotation
+                .as_ref()
+                .map(|annotation| ctx.layout_into_run(annotation, row_styles))
+                .transpose()?,
+        );
+
+        let baseline = match position {
+            Position::Under => 0,
+            Position::Over => {
+                rows.reverse();
+                rows.len() - 1
+            }
+        };
+
+        let frame = stack(
+            rows,
+            FixedAlignment::Center,
+            gap,
+            baseline,
+            LeftRightAlternator::Right,
+            None,
+        );
+        ctx.push(FrameFragment::new(ctx, styles, frame).with_class(body_class));
+
+        Ok(())
+    }
 }
 
-underover_elem!(
-    "math.underbrace",
-    "brace",
-    "brace",
-    '⏟',
-    UnderbraceElem,
-    Position::Under
-);
+/// A delimiter character.
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct Delimiter(char);
 
-underover_elem!("math.overbrace", "brace", "brace", '⏞', OverbraceElem, Position::Over);
+impl Delimiter {
+    /// Normalize a character into a delimiter.
+    pub fn new(c: char) -> Self {
+        Self(Self::combine(c).unwrap_or(c))
+    }
 
-underover_elem!(
-    "math.underbracket",
-    "bracket",
-    "bracket",
-    '⎵',
-    UnderbracketElem,
-    Position::Under
-);
-
-underover_elem!(
-    "math.overbracket",
-    "bracket",
-    "bracket",
-    '⎴',
-    OverbracketElem,
-    Position::Over
-);
-
-underover_elem!(
-    "math.underparen",
-    "parenthesis",
-    "paren",
-    '⏝',
-    UnderparenElem,
-    Position::Under
-);
-
-underover_elem!(
-    "math.overparen",
-    "parenthesis",
-    "paren",
-    '⏜',
-    OverparenElem,
-    Position::Over
-);
-
-underover_elem!(
-    "math.undershell",
-    "tortoise shell bracket",
-    "shell",
-    '⏡',
-    UndershellElem,
-    Position::Under
-);
-
-underover_elem!(
-    "math.overshell",
-    "tortoise shell bracket",
-    "shell",
-    '⏠',
-    OvershellElem,
-    Position::Over
-);
-
-/// Layout an over- or underbrace-like object.
-#[allow(clippy::too_many_arguments)]
-fn layout_underoverspreader(
-    ctx: &mut MathContext,
-    styles: StyleChain,
-    body: &Content,
-    annotation: &Option<Content>,
-    c: char,
-    gap: Em,
-    position: Position,
-    span: Span,
-) -> SourceResult<()> {
-    let font_size = scaled_font_size(ctx, styles);
-    let gap = gap.at(font_size);
-    let body = ctx.layout_into_run(body, styles)?;
-    let body_class = body.class();
-    let body = body.into_fragment(ctx, styles);
-    let glyph = GlyphFragment::new(ctx, styles, c, span);
-    let stretched = glyph.stretch_horizontal(ctx, body.width(), Abs::zero());
-
-    let mut rows = vec![MathRun::new(vec![body]), stretched.into()];
-
-    let (sub_style, super_style);
-    let row_styles = match position {
-        Position::Under => {
-            sub_style = style_for_subscript(styles);
-            styles.chain(&sub_style)
-        }
-        Position::Over => {
-            super_style = style_for_superscript(styles);
-            styles.chain(&super_style)
-        }
-    };
-
-    rows.extend(
-        annotation
-            .as_ref()
-            .map(|annotation| ctx.layout_into_run(annotation, row_styles))
-            .transpose()?,
-    );
-
-    let baseline = match position {
-        Position::Under => 0,
-        Position::Over => {
-            rows.reverse();
-            rows.len() - 1
-        }
-    };
-
-    let frame = stack(
-        rows,
-        FixedAlignment::Center,
-        gap,
-        baseline,
-        LeftRightAlternator::Right,
-        None,
-    );
-    ctx.push(FrameFragment::new(ctx, styles, frame).with_class(body_class));
-
-    Ok(())
+    /// Normalize a delimiter to a combining one.
+    pub fn combine(c: char) -> Option<char> {
+        Some(match c {
+            '⏜' => '⏜',
+            '⏝' => '⏝',
+            _ => return None,
+        })
+    }
 }
+
+cast! {
+    Delimiter,
+    self => self.0.into_value(),
+    v: char => Self::new(v),
+    v: Content => match v.to_packed::<TextElem>() {
+        Some(elem) => Value::Str(elem.text().clone().into()).cast()?,
+        None => bail!("expected text"),
+    },
+}
+
+// layout_underoverspreader(
+//     ctx,
+//     styles,
+//     self.body(),
+//     &self.annotation(styles),
+//     '⏝',
+//     GAP,
+//     Position::Under,
+//     self.span(),
+// )
+
+// /// Layout an over- or underbrace-like object.
+// #[allow(clippy::too_many_arguments)]
+// fn layout_underoverspreader(
+//     ctx: &mut MathContext,
+//     styles: StyleChain,
+//     body: &Content,
+//     annotation: &Option<Content>,
+//     c: char,
+//     gap: Em,
+//     position: Position,
+//     span: Span,
+// ) -> SourceResult<()> {
+//     let font_size = scaled_font_size(ctx, styles);
+//     let gap = gap.at(font_size);
+//     let body = ctx.layout_into_run(body, styles)?;
+//     let body_class = body.class();
+//     let body = body.into_fragment(ctx, styles);
+//     let glyph = GlyphFragment::new(ctx, styles, c, span);
+//     let stretched = glyph.stretch_horizontal(ctx, body.width(), Abs::zero());
+
+//     let mut rows = vec![MathRun::new(vec![body]), stretched.into()];
+
+//     let (sub_style, super_style);
+//     let row_styles = match position {
+//         Position::Under => {
+//             sub_style = style_for_subscript(styles);
+//             styles.chain(&sub_style)
+//         }
+//         Position::Over => {
+//             super_style = style_for_superscript(styles);
+//             styles.chain(&super_style)
+//         }
+//     };
+
+//     rows.extend(
+//         annotation
+//             .as_ref()
+//             .map(|annotation| ctx.layout_into_run(annotation, row_styles))
+//             .transpose()?,
+//     );
+
+//     let baseline = match position {
+//         Position::Under => 0,
+//         Position::Over => {
+//             rows.reverse();
+//             rows.len() - 1
+//         }
+//     };
+
+//     let frame = stack(
+//         rows,
+//         FixedAlignment::Center,
+//         gap,
+//         baseline,
+//         LeftRightAlternator::Right,
+//         None,
+//     );
+//     ctx.push(FrameFragment::new(ctx, styles, frame).with_class(body_class));
+
+//     Ok(())
+// }
 
 /// Stack rows on top of each other.
 ///
