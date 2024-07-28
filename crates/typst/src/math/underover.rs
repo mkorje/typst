@@ -12,7 +12,10 @@ use crate::visualize::{FixedStroke, Geometry};
 
 const GAP: Em = Em::new(0.25);
 
+use std::collections::HashSet;
+
 /// A marker to distinguish under- vs. over-.
+#[derive(Copy, Clone)]
 enum Position {
     Under,
     Over,
@@ -118,20 +121,42 @@ fn layout_underoverline(
     Ok(())
 }
 
+/// A horizontal delimiter under content, with an optional annotation below.
 ///
+/// ```example
+/// $ under(1 + 2 + ... + 5, ->, "numbers") $
+/// ```
 #[elem(LayoutMath)]
 pub struct UnderElem {
-    ///
+    /// The content above the delimiter.
     #[required]
     pub body: Content,
 
-    ///
+    /// The delimiter.
     #[required]
     pub delimiter: char,
 
-    ///
+    /// The optional content below the delimiter.
     #[positional]
     pub annotation: Option<Content>,
+
+    /// Whether to fit to the content of the formula.
+    #[parse(
+        let fit_content = args.named("fit-content")?;
+        fit_content
+    )]
+    #[default(true)]
+    pub fit_content: bool,
+
+    /// Whether to fit to the width of the formula.
+    #[parse(args.named("fit-width")?.or(fit_content))]
+    #[default(true)]
+    pub fit_width: bool,
+
+    /// Whether to fit to the height of the formula.
+    #[parse(args.named("fit-height")?.or(fit_content))]
+    #[default(true)]
+    pub fit_height: bool,
 }
 
 impl LayoutMath for Packed<UnderElem> {
@@ -145,24 +170,48 @@ impl LayoutMath for Packed<UnderElem> {
             &self.annotation(styles),
             Position::Under,
             self.span(),
+            self.fit_width(styles),
+            self.fit_height(styles),
         )
     }
 }
 
+/// A horizontal delimiter over content, with an optional annotation above.
 ///
+/// ```example
+/// $ over(1 + 2 + ... + 5, <-, "numbers") $
+/// ```
 #[elem(LayoutMath)]
 pub struct OverElem {
-    ///
+    /// The content below the delimiter.
     #[required]
     pub body: Content,
 
-    ///
+    /// The delimiter.
     #[required]
     pub delimiter: char,
 
-    ///
+    /// The optional content above the delimiter.
     #[positional]
     pub annotation: Option<Content>,
+
+    /// Whether to fit to the content of the formula.
+    #[parse(
+        let fit_content = args.named("fit-content")?;
+        fit_content
+    )]
+    #[default(true)]
+    pub fit_content: bool,
+
+    /// Whether to fit to the width of the formula.
+    #[parse(args.named("fit-width")?.or(fit_content))]
+    #[default(true)]
+    pub fit_width: bool,
+
+    /// Whether to fit to the height of the formula.
+    #[parse(args.named("fit-height")?.or(fit_content))]
+    #[default(true)]
+    pub fit_height: bool,
 }
 
 impl LayoutMath for Packed<OverElem> {
@@ -176,6 +225,8 @@ impl LayoutMath for Packed<OverElem> {
             &self.annotation(styles),
             Position::Over,
             self.span(),
+            self.fit_width(styles),
+            self.fit_height(styles),
         )
     }
 }
@@ -190,6 +241,8 @@ fn layout_underoverspreader(
     annotation: &Option<Content>,
     position: Position,
     span: Span,
+    fit_width: bool,
+    fit_height: bool,
 ) -> SourceResult<()> {
     let font_size = scaled_font_size(ctx, styles);
     let gap = GAP.at(font_size);
@@ -228,6 +281,18 @@ fn layout_underoverspreader(
         }
     };
 
+    let ignore_width = match (fit_width, position) {
+        (true, Position::Under) => (1..rows.len()).collect(),
+        (true, Position::Over) => (0..rows.len() - 2).collect(),
+        (false, _) => HashSet::new(),
+    };
+
+    let ignore_height = match (fit_height, position) {
+        (true, Position::Under) => (1..rows.len()).collect(),
+        (true, Position::Over) => (0..rows.len() - 1).collect(),
+        (false, _) => HashSet::new(),
+    };
+
     let frame = stack(
         rows,
         FixedAlignment::Center,
@@ -235,6 +300,8 @@ fn layout_underoverspreader(
         baseline,
         LeftRightAlternator::Right,
         None,
+        ignore_width,
+        ignore_height,
     );
     ctx.push(FrameFragment::new(ctx, styles, frame).with_class(body_class));
 
@@ -246,6 +313,7 @@ fn layout_underoverspreader(
 /// Add a `gap` between each row and uses the baseline of the `baseline`-th
 /// row for the whole frame. `alternator` controls the left/right alternating
 /// alignment behavior of `AlignPointElem` in the rows.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn stack(
     rows: Vec<MathRun>,
     align: FixedAlignment,
@@ -253,9 +321,19 @@ pub(super) fn stack(
     baseline: usize,
     alternator: LeftRightAlternator,
     minimum_ascent_descent: Option<(Abs, Abs)>,
+    ignore_width: HashSet<usize>,
+    ignore_height: HashSet<usize>,
 ) -> Frame {
     let rows: Vec<_> = rows.into_iter().flat_map(|r| r.rows()).collect();
-    let AlignmentResult { points, width } = alignments(&rows);
+    let AlignmentResult { points, width } = alignments(
+        &rows
+            .clone()
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| !ignore_width.contains(i))
+            .map(|(_, r)| r)
+            .collect::<Vec<_>>(),
+    );
     let rows: Vec<_> = rows
         .into_iter()
         .map(|row| row.into_line_frame(&points, alternator))
@@ -267,8 +345,12 @@ pub(super) fn stack(
 
     let mut frame = Frame::soft(Size::new(
         width,
-        rows.iter().map(|row| padded_height(row.height())).sum::<Abs>()
-            + rows.len().saturating_sub(1) as f64 * gap,
+        rows.iter()
+            .enumerate()
+            .filter(|(i, _)| !ignore_height.contains(i))
+            .map(|(_, row)| row.height())
+            .sum::<Abs>()
+            + rows.len().saturating_sub(ignore_height.len() + 1) as f64 * gap,
     ));
 
     let mut y = Abs::zero();
@@ -416,22 +498,14 @@ pub fn overshell(
     over(body, '⏠', annotation)
 }
 
-fn under(
-    body: Content,
-    c: char,
-    annotation: Option<Content>,
-) -> Content {
+fn under(body: Content, c: char, annotation: Option<Content>) -> Content {
     let span = body.span();
     let mut elem = UnderElem::new(body, c);
     elem.push_annotation(annotation);
     elem.pack().spanned(span)
 }
 
-fn over(
-    body: Content,
-    c: char,
-    annotation: Option<Content>,
-) -> Content {
+fn over(body: Content, c: char, annotation: Option<Content>) -> Content {
     let span = body.span();
     let mut elem = OverElem::new(body, c);
     elem.push_annotation(annotation);

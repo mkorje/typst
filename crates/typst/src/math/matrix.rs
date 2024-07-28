@@ -27,6 +27,8 @@ const DEFAULT_COL_GAP: Em = Em::new(0.5);
 const VERTICAL_PADDING: Ratio = Ratio::new(0.1);
 const DEFAULT_STROKE_THICKNESS: Em = Em::new(0.05);
 
+use std::collections::HashSet;
+
 /// A column vector.
 ///
 /// Content in the vector's elements can be aligned with the `&` symbol.
@@ -446,7 +448,7 @@ fn layout_vec_body(
     // way too big.
     let paren =
         GlyphFragment::new(ctx, styles.chain(&denom_style), '(', Span::detached());
-    Ok(stack(flat, align, gap, 0, alternator, Some((paren.ascent, paren.descent))))
+    Ok(stack(flat, align, gap, 0, alternator, Some((paren.ascent, paren.descent)), HashSet::new(), HashSet::new()))
 }
 
 /// Layout the inner contents of a matrix.
