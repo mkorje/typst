@@ -448,7 +448,7 @@ fn layout_vec_body(
     // way too big.
     let paren =
         GlyphFragment::new(ctx, styles.chain(&denom_style), '(', Span::detached());
-    Ok(stack(flat, align, gap, 0, alternator, Some((paren.ascent, paren.descent)), HashSet::new(), HashSet::new()))
+    Ok(stack(flat, align, gap, 0, alternator, Some((paren.ascent, paren.descent)), HashSet::new()))
 }
 
 /// Layout the inner contents of a matrix.

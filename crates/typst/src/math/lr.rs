@@ -53,6 +53,7 @@ impl LayoutMath for Packed<LrElem> {
         let axis = scaled!(ctx, styles, axis_height);
         let max_extent = fragments
             .iter()
+            .filter(|fragment| !fragment.is_underover())
             .map(|fragment| (fragment.ascent() - axis).max(fragment.descent() + axis))
             .max()
             .unwrap_or_default();

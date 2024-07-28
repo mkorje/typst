@@ -78,6 +78,13 @@ impl MathFragment {
         }
     }
 
+    pub fn is_underover(&self) -> bool {
+        match self {
+            Self::Frame(fragment) => fragment.underover,
+            _ => false,
+        }
+    }
+
     pub fn class(&self) -> MathClass {
         match self {
             Self::Glyph(glyph) => glyph.class,
@@ -449,6 +456,7 @@ pub struct FrameFragment {
     pub accent_attach: Abs,
     pub text_like: bool,
     pub ignorant: bool,
+    pub underover: bool,
 }
 
 impl FrameFragment {
@@ -468,6 +476,7 @@ impl FrameFragment {
             accent_attach,
             text_like: false,
             ignorant: false,
+            underover: false,
         }
     }
 
@@ -501,6 +510,10 @@ impl FrameFragment {
 
     pub fn with_ignorant(self, ignorant: bool) -> Self {
         Self { ignorant, ..self }
+    }
+
+    pub fn with_underover(self, underover: bool) -> Self {
+        Self { underover, ..self }
     }
 }
 

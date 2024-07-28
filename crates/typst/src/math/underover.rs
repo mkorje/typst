@@ -140,23 +140,10 @@ pub struct UnderElem {
     #[positional]
     pub annotation: Option<Content>,
 
-    /// Whether to fit to the content of the formula.
-    #[parse(
-        let fit_content = args.named("fit-content")?;
-        fit_content
-    )]
-    #[default(true)]
-    pub fit_content: bool,
-
     /// Whether to fit to the width of the formula.
-    #[parse(args.named("fit-width")?.or(fit_content))]
+    #[parse(args.named("fit-width")?)]
     #[default(true)]
     pub fit_width: bool,
-
-    /// Whether to fit to the height of the formula.
-    #[parse(args.named("fit-height")?.or(fit_content))]
-    #[default(true)]
-    pub fit_height: bool,
 }
 
 impl LayoutMath for Packed<UnderElem> {
@@ -171,7 +158,6 @@ impl LayoutMath for Packed<UnderElem> {
             Position::Under,
             self.span(),
             self.fit_width(styles),
-            self.fit_height(styles),
         )
     }
 }
@@ -195,23 +181,10 @@ pub struct OverElem {
     #[positional]
     pub annotation: Option<Content>,
 
-    /// Whether to fit to the content of the formula.
-    #[parse(
-        let fit_content = args.named("fit-content")?;
-        fit_content
-    )]
-    #[default(true)]
-    pub fit_content: bool,
-
     /// Whether to fit to the width of the formula.
-    #[parse(args.named("fit-width")?.or(fit_content))]
+    #[parse(args.named("fit-width")?)]
     #[default(true)]
     pub fit_width: bool,
-
-    /// Whether to fit to the height of the formula.
-    #[parse(args.named("fit-height")?.or(fit_content))]
-    #[default(true)]
-    pub fit_height: bool,
 }
 
 impl LayoutMath for Packed<OverElem> {
@@ -226,7 +199,6 @@ impl LayoutMath for Packed<OverElem> {
             Position::Over,
             self.span(),
             self.fit_width(styles),
-            self.fit_height(styles),
         )
     }
 }
@@ -242,7 +214,6 @@ fn layout_underoverspreader(
     position: Position,
     span: Span,
     fit_width: bool,
-    fit_height: bool,
 ) -> SourceResult<()> {
     let font_size = scaled_font_size(ctx, styles);
     let gap = GAP.at(font_size);
@@ -287,12 +258,6 @@ fn layout_underoverspreader(
         (false, _) => HashSet::new(),
     };
 
-    let ignore_height = match (fit_height, position) {
-        (true, Position::Under) => (1..rows.len()).collect(),
-        (true, Position::Over) => (0..rows.len() - 1).collect(),
-        (false, _) => HashSet::new(),
-    };
-
     let frame = stack(
         rows,
         FixedAlignment::Center,
@@ -301,9 +266,8 @@ fn layout_underoverspreader(
         LeftRightAlternator::Right,
         None,
         ignore_width,
-        ignore_height,
     );
-    ctx.push(FrameFragment::new(ctx, styles, frame).with_class(body_class));
+    ctx.push(FrameFragment::new(ctx, styles, frame).with_class(body_class).with_underover(true));
 
     Ok(())
 }
@@ -322,7 +286,6 @@ pub(super) fn stack(
     alternator: LeftRightAlternator,
     minimum_ascent_descent: Option<(Abs, Abs)>,
     ignore_width: HashSet<usize>,
-    ignore_height: HashSet<usize>,
 ) -> Frame {
     let rows: Vec<_> = rows.into_iter().flat_map(|r| r.rows()).collect();
     let AlignmentResult { points, width } = alignments(
@@ -346,11 +309,9 @@ pub(super) fn stack(
     let mut frame = Frame::soft(Size::new(
         width,
         rows.iter()
-            .enumerate()
-            .filter(|(i, _)| !ignore_height.contains(i))
-            .map(|(_, row)| row.height())
+            .map(|row| row.height())
             .sum::<Abs>()
-            + rows.len().saturating_sub(ignore_height.len() + 1) as f64 * gap,
+            + rows.len().saturating_sub(1) as f64 * gap,
     ));
 
     let mut y = Abs::zero();
