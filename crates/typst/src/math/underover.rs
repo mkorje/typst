@@ -4,7 +4,7 @@ use crate::layout::{Abs, Em, FixedAlignment, Frame, FrameItem, Point, Size};
 use crate::math::{
     alignments, scaled_font_size, style_cramped, style_for_subscript,
     style_for_superscript, AlignmentResult, FrameFragment, GlyphFragment, LayoutMath,
-    LeftRightAlternator, MathContext, MathRun, Scaled,
+    LeftRightAlternator, MathContext, MathFragment, MathRun, Scaled,
 };
 use crate::syntax::Span;
 use crate::text::TextElem;
@@ -135,6 +135,19 @@ pub struct UnderbraceElem {
     /// The optional content below the brace.
     #[positional]
     pub annotation: Option<Content>,
+
+    /// Whether delimiters enclosing this element should ignore the brace and
+    /// optional content below it when their size is scaled.
+    ///
+    /// ```example
+    /// #set math.underbrace(delim-ignore: false)
+    /// $ [underbrace(
+    ///   (overbrace(x + y, "nums")) + z,
+    ///   "numbers",
+    /// )] $
+    /// ```
+    #[default(true)]
+    pub delim_ignore: bool,
 }
 
 impl LayoutMath for Packed<UnderbraceElem> {
@@ -145,6 +158,7 @@ impl LayoutMath for Packed<UnderbraceElem> {
             styles,
             self.body(),
             &self.annotation(styles),
+            self.delim_ignore(styles),
             '⏟',
             BRACE_GAP,
             Position::Under,
@@ -167,6 +181,19 @@ pub struct OverbraceElem {
     /// The optional content above the brace.
     #[positional]
     pub annotation: Option<Content>,
+
+    /// Whether delimiters enclosing this element should ignore the brace and
+    /// optional content above it when their size is scaled.
+    ///
+    /// ```example
+    /// #set math.overbrace(delim-ignore: false)
+    /// $ [underbrace(
+    ///   (overbrace(x + y, "nums")) + z,
+    ///   "numbers",
+    /// )] $
+    /// ```
+    #[default(true)]
+    pub delim_ignore: bool,
 }
 
 impl LayoutMath for Packed<OverbraceElem> {
@@ -177,6 +204,7 @@ impl LayoutMath for Packed<OverbraceElem> {
             styles,
             self.body(),
             &self.annotation(styles),
+            self.delim_ignore(styles),
             '⏞',
             BRACE_GAP,
             Position::Over,
@@ -199,6 +227,19 @@ pub struct UnderbracketElem {
     /// The optional content below the bracket.
     #[positional]
     pub annotation: Option<Content>,
+
+    /// Whether delimiters enclosing this element should ignore the bracket
+    /// and optional content below it when their size is scaled.
+    ///
+    /// ```example
+    /// #set math.underbracket(delim-ignore: false)
+    /// $ [underbracket(
+    ///   (overbracket(x + y, "nums")) + z,
+    ///   "numbers",
+    /// )] $
+    /// ```
+    #[default(true)]
+    pub delim_ignore: bool,
 }
 
 impl LayoutMath for Packed<UnderbracketElem> {
@@ -209,6 +250,7 @@ impl LayoutMath for Packed<UnderbracketElem> {
             styles,
             self.body(),
             &self.annotation(styles),
+            self.delim_ignore(styles),
             '⎵',
             BRACKET_GAP,
             Position::Under,
@@ -231,6 +273,19 @@ pub struct OverbracketElem {
     /// The optional content above the bracket.
     #[positional]
     pub annotation: Option<Content>,
+
+    /// Whether delimiters enclosing this element should ignore the bracket
+    /// and optional content above it when their size is scaled.
+    ///
+    /// ```example
+    /// #set math.overbracket(delim-ignore: false)
+    /// $ [underbracket(
+    ///   (overbracket(x + y, "nums")) + z,
+    ///   "numbers",
+    /// )] $
+    /// ```
+    #[default(true)]
+    pub delim_ignore: bool,
 }
 
 impl LayoutMath for Packed<OverbracketElem> {
@@ -241,6 +296,7 @@ impl LayoutMath for Packed<OverbracketElem> {
             styles,
             self.body(),
             &self.annotation(styles),
+            self.delim_ignore(styles),
             '⎴',
             BRACKET_GAP,
             Position::Over,
@@ -263,6 +319,19 @@ pub struct UnderparenElem {
     /// The optional content below the parenthesis.
     #[positional]
     pub annotation: Option<Content>,
+
+    /// Whether delimiters enclosing this element should ignore the
+    /// parenthesis and optional content below it when their size is scaled.
+    ///
+    /// ```example
+    /// #set math.underparen(delim-ignore: false)
+    /// $ [underparen(
+    ///   (overparen(x + y, "nums")) + z,
+    ///   "numbers",
+    /// )] $
+    /// ```
+    #[default(true)]
+    pub delim_ignore: bool,
 }
 
 impl LayoutMath for Packed<UnderparenElem> {
@@ -273,6 +342,7 @@ impl LayoutMath for Packed<UnderparenElem> {
             styles,
             self.body(),
             &self.annotation(styles),
+            self.delim_ignore(styles),
             '⏝',
             PAREN_GAP,
             Position::Under,
@@ -295,6 +365,19 @@ pub struct OverparenElem {
     /// The optional content above the parenthesis.
     #[positional]
     pub annotation: Option<Content>,
+
+    /// Whether delimiters enclosing this element should ignore the
+    /// parenthesis and optional content above it when their size is scaled.
+    ///
+    /// ```example
+    /// #set math.overparen(delim-ignore: false)
+    /// $ [underparen(
+    ///   (overparen(x + y, "nums")) + z,
+    ///   "numbers",
+    /// )] $
+    /// ```
+    #[default(true)]
+    pub delim_ignore: bool,
 }
 
 impl LayoutMath for Packed<OverparenElem> {
@@ -305,6 +388,7 @@ impl LayoutMath for Packed<OverparenElem> {
             styles,
             self.body(),
             &self.annotation(styles),
+            self.delim_ignore(styles),
             '⏜',
             PAREN_GAP,
             Position::Over,
@@ -327,6 +411,20 @@ pub struct UndershellElem {
     /// The optional content below the tortoise shell bracket.
     #[positional]
     pub annotation: Option<Content>,
+
+    /// Whether delimiters enclosing this element should ignore the
+    /// tortoise shell bracket and optional content below it when their size
+    /// is scaled.
+    ///
+    /// ```example
+    /// #set math.undershell(delim-ignore: false)
+    /// $ [undershell(
+    ///   (overshell(x + y, "nums")) + z,
+    ///   "numbers",
+    /// )] $
+    /// ```
+    #[default(true)]
+    pub delim_ignore: bool,
 }
 
 impl LayoutMath for Packed<UndershellElem> {
@@ -337,6 +435,7 @@ impl LayoutMath for Packed<UndershellElem> {
             styles,
             self.body(),
             &self.annotation(styles),
+            self.delim_ignore(styles),
             '⏡',
             SHELL_GAP,
             Position::Under,
@@ -359,6 +458,20 @@ pub struct OvershellElem {
     /// The optional content above the tortoise shell bracket.
     #[positional]
     pub annotation: Option<Content>,
+
+    /// Whether delimiters enclosing this element should ignore the
+    /// tortoise shell bracket and optional content above it when their size
+    /// is scaled.
+    ///
+    /// ```example
+    /// #set math.overshell(delim-ignore: false)
+    /// $ [undershell(
+    ///   (overshell(x + y, "nums")) + z,
+    ///   "numbers",
+    /// )] $
+    /// ```
+    #[default(true)]
+    pub delim_ignore: bool,
 }
 
 impl LayoutMath for Packed<OvershellElem> {
@@ -369,11 +482,42 @@ impl LayoutMath for Packed<OvershellElem> {
             styles,
             self.body(),
             &self.annotation(styles),
+            self.delim_ignore(styles),
             '⏠',
             SHELL_GAP,
             Position::Over,
             self.span(),
         )
+    }
+}
+
+/// Get the ascent value which ignores over- or underbrace-like object's
+/// annotations.
+pub fn max_underover_ascent(fragments: &[MathFragment]) -> Option<Abs> {
+    let frame = fragments.iter().map(|x| x.ascent()).max();
+    let underover = fragments
+        .iter()
+        .map(|x| x.underover_ascent().unwrap_or_else(|| x.ascent()))
+        .max();
+
+    match (frame, underover) {
+        (Some(frame), Some(underover)) => (underover < frame).then_some(underover),
+        _ => None,
+    }
+}
+
+/// Get the descent value which ignores over- or underbrace-like object's
+/// annotations.
+pub fn max_underover_descent(fragments: &[MathFragment]) -> Option<Abs> {
+    let frame = fragments.iter().map(|x| x.descent()).max();
+    let underover = fragments
+        .iter()
+        .map(|x| x.underover_descent().unwrap_or_else(|| x.descent()))
+        .max();
+
+    match (frame, underover) {
+        (Some(frame), Some(underover)) => (underover < frame).then_some(underover),
+        _ => None,
     }
 }
 
@@ -384,6 +528,7 @@ fn layout_underoverspreader(
     styles: StyleChain,
     body: &Content,
     annotation: &Option<Content>,
+    delim_ignore: bool,
     c: char,
     gap: Em,
     position: Position,
@@ -391,15 +536,26 @@ fn layout_underoverspreader(
 ) -> SourceResult<()> {
     let font_size = scaled_font_size(ctx, styles);
     let gap = gap.at(font_size);
-    let body = ctx.layout_into_run(body, styles)?;
+
+    // The broken up layouting here is needed to get the max underover_ascent
+    // and underover_descent among all the body elements, which is passed on
+    // to the frame fragment created.
+    let body = ctx.layout_into_fragments(body, styles)?;
+    let mut ascent = max_underover_ascent(&body);
+    let mut descent = max_underover_descent(&body);
+    let body = MathRun::new(body);
+
     let body_class = body.class();
     let body = body.into_fragment(ctx, styles);
+    let body_ascent = body.ascent();
+    let body_descent = body.descent();
     let glyph = GlyphFragment::new(ctx, styles, c, span);
     let stretched = glyph.stretch_horizontal(ctx, body.width(), Abs::zero());
 
     let mut rows = vec![MathRun::new(vec![body])];
     let baseline = match position {
         Position::Under => {
+            descent = delim_ignore.then(|| descent.unwrap_or(body_descent));
             rows.push(stretched.into());
             if let Some(annotation) = annotation {
                 let under_style = style_for_subscript(styles);
@@ -409,6 +565,7 @@ fn layout_underoverspreader(
             0
         }
         Position::Over => {
+            ascent = delim_ignore.then(|| ascent.unwrap_or(body_ascent));
             rows.insert(0, stretched.into());
             if let Some(annotation) = annotation {
                 let over_style = style_for_superscript(styles);
@@ -427,7 +584,12 @@ fn layout_underoverspreader(
         LeftRightAlternator::Right,
         None,
     );
-    ctx.push(FrameFragment::new(ctx, styles, frame).with_class(body_class));
+    ctx.push(
+        FrameFragment::new(ctx, styles, frame)
+            .with_class(body_class)
+            .with_underover_ascent(ascent)
+            .with_underover_descent(descent),
+    );
 
     Ok(())
 }

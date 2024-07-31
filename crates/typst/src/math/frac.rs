@@ -2,8 +2,9 @@ use crate::diag::{bail, SourceResult};
 use crate::foundations::{elem, Content, Packed, StyleChain, Value};
 use crate::layout::{Em, Frame, FrameItem, Point, Size};
 use crate::math::{
-    scaled_font_size, style_for_denominator, style_for_numerator, FrameFragment,
-    GlyphFragment, LayoutMath, MathContext, Scaled, DELIM_SHORT_FALL,
+    max_underover_ascent, max_underover_descent, scaled_font_size, style_for_denominator,
+    style_for_numerator, FrameFragment, GlyphFragment, LayoutMath, MathContext, MathRun,
+    Scaled, DELIM_SHORT_FALL,
 };
 use crate::syntax::{Span, Spanned};
 use crate::text::TextElem;
@@ -117,17 +118,31 @@ fn layout(
         display: fraction_denom_display_style_gap_min,
     );
 
+    // The broken up layouting here is needed to get the max underover_ascent
+    // among all the num elements, which is passed on to the frame fragment
+    // created.
     let num_style = style_for_numerator(styles);
-    let num = ctx.layout_into_frame(num, styles.chain(&num_style))?;
+    let num = ctx.layout_into_fragments(num, styles.chain(&num_style))?;
+    let ascent = max_underover_ascent(&num);
+    let num = MathRun::new(num)
+        .into_fragment(ctx, styles.chain(&num_style))
+        .into_frame();
 
+    // The broken up layouting here is needed to get the max underover_descent
+    // among all the denom elements, which is passed on to the frame fragment
+    // created.
     let denom_style = style_for_denominator(styles);
-    let denom = ctx.layout_into_frame(
+    let denom = ctx.layout_into_fragments(
         &Content::sequence(
             // Add a comma between each element.
             denom.iter().flat_map(|a| [TextElem::packed(','), a.clone()]).skip(1),
         ),
         styles.chain(&denom_style),
     )?;
+    let descent = max_underover_descent(&denom);
+    let denom = MathRun::new(denom)
+        .into_fragment(ctx, styles.chain(&denom_style))
+        .into_frame();
 
     let around = FRAC_AROUND.at(font_size);
     let num_gap = (shift_up - axis - num.descent()).max(num_min + thickness / 2.0);
@@ -142,6 +157,20 @@ fn layout(
         Point::new((width - line_width) / 2.0, num.height() + num_gap + thickness / 2.0);
     let denom_pos = Point::new((width - denom.width()) / 2.0, height - denom.height());
     let baseline = line_pos.y + axis;
+
+    // Propagate the ascent/descent that should be used, only if an
+    // underbrace/overbrace are present in the num/denom.
+    let ascent = (ascent.is_some())
+        .then(|| ascent.unwrap() + num.descent() + num_gap + thickness / 2.0 + axis);
+    let descent = (descent.is_some()).then(|| {
+        num.height()
+            + num_gap
+            + thickness
+            + denom_gap
+            + denom.baseline()
+            + descent.unwrap()
+            - baseline
+    });
 
     let mut frame = Frame::soft(size);
     frame.set_baseline(baseline);
@@ -171,7 +200,11 @@ fn layout(
                 span,
             ),
         );
-        ctx.push(FrameFragment::new(ctx, styles, frame));
+        ctx.push(
+            FrameFragment::new(ctx, styles, frame)
+                .with_underover_ascent(ascent)
+                .with_underover_descent(descent),
+        );
     }
 
     Ok(())

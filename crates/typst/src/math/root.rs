@@ -2,8 +2,8 @@ use crate::diag::SourceResult;
 use crate::foundations::{elem, func, Content, NativeElement, Packed, StyleChain};
 use crate::layout::{Abs, Frame, FrameItem, Point, Size};
 use crate::math::{
-    style_cramped, EquationElem, FrameFragment, GlyphFragment, LayoutMath, MathContext,
-    MathSize, Scaled,
+    max_underover_descent, style_cramped, EquationElem, FrameFragment, GlyphFragment,
+    LayoutMath, MathContext, MathRun, MathSize, Scaled,
 };
 use crate::syntax::Span;
 use crate::text::TextElem;
@@ -70,11 +70,26 @@ fn layout(
     let raise_factor = percent!(ctx, radical_degree_bottom_raise_percent);
 
     // Layout radicand.
+    // The broken up layouting here is needed to get the max underover_descent
+    // among all the radicand elements, which is used to ensure that the root
+    // symbol is laid out properly and underover_descent is passed on to the
+    // frame fragment created.
     let cramped = style_cramped();
-    let radicand = ctx.layout_into_frame(radicand, styles.chain(&cramped))?;
+    let radicand = ctx.layout_into_fragments(radicand, styles.chain(&cramped))?;
+    let max_underover_descent = max_underover_descent(&radicand);
+    let radicand = MathRun::new(radicand)
+        .into_fragment(ctx, styles.chain(&cramped))
+        .into_frame();
+
+    // Update radicand height, only if an underbrace is present in the
+    // radicand.
+    let mut radicand_height = radicand.height();
+    if let Some(x) = max_underover_descent {
+        radicand_height += x - radicand.descent();
+    }
 
     // Layout root symbol.
-    let target = radicand.height() + thickness + gap;
+    let target = radicand_height + thickness + gap;
     let sqrt = GlyphFragment::new(ctx, styles, '√', span)
         .stretch_vertical(ctx, target, Abs::zero())
         .frame;
@@ -88,7 +103,7 @@ fn layout(
     // TeXbook, page 443, item 11
     // Keep original gap, and then distribute any remaining free space
     // equally above and below.
-    let gap = gap.max((sqrt.height() - thickness - radicand.height() + gap) / 2.0);
+    let gap = gap.max((sqrt.height() - thickness - radicand_height + gap) / 2.0);
 
     let sqrt_ascent = radicand.ascent() + gap + thickness;
     let descent = sqrt.height() - sqrt_ascent;
@@ -113,7 +128,11 @@ fn layout(
     let radicand_x = sqrt_offset + sqrt.width();
     let radicand_y = ascent - radicand.ascent();
     let width = radicand_x + radicand.width();
-    let size = Size::new(width, ascent + descent);
+    // If an underbrace is present in the radicand, `descent` will not take
+    // its size into account. Thus, `radicand.descent()` is used instead.
+    let frame_descent =
+        if max_underover_descent.is_some() { radicand.descent() } else { descent };
+    let size = Size::new(width, ascent + frame_descent);
 
     // The extra "- thickness" comes from the fact that the sqrt is placed
     // in `push_frame` with respect to its top, not its baseline.
@@ -143,8 +162,14 @@ fn layout(
         ),
     );
 
+    // Propagate descent that should be used, only if an underbrace is present
+    // in the radicand.
+    let underover_descent = (max_underover_descent.is_some()).then_some(descent);
+
     frame.push_frame(radicand_pos, radicand);
-    ctx.push(FrameFragment::new(ctx, styles, frame));
+    ctx.push(
+        FrameFragment::new(ctx, styles, frame).with_underover_descent(underover_descent),
+    );
 
     Ok(())
 }

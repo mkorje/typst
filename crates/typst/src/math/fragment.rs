@@ -78,6 +78,20 @@ impl MathFragment {
         }
     }
 
+    pub fn underover_ascent(&self) -> Option<Abs> {
+        match self {
+            Self::Frame(fragment) => fragment.underover_ascent,
+            _ => None,
+        }
+    }
+
+    pub fn underover_descent(&self) -> Option<Abs> {
+        match self {
+            Self::Frame(fragment) => fragment.underover_descent,
+            _ => None,
+        }
+    }
+
     pub fn class(&self) -> MathClass {
         match self {
             Self::Glyph(glyph) => glyph.class,
@@ -449,6 +463,8 @@ pub struct FrameFragment {
     pub accent_attach: Abs,
     pub text_like: bool,
     pub ignorant: bool,
+    pub underover_ascent: Option<Abs>,
+    pub underover_descent: Option<Abs>,
 }
 
 impl FrameFragment {
@@ -468,6 +484,8 @@ impl FrameFragment {
             accent_attach,
             text_like: false,
             ignorant: false,
+            underover_ascent: None,
+            underover_descent: None,
         }
     }
 
@@ -501,6 +519,14 @@ impl FrameFragment {
 
     pub fn with_ignorant(self, ignorant: bool) -> Self {
         Self { ignorant, ..self }
+    }
+
+    pub fn with_underover_ascent(self, underover_ascent: Option<Abs>) -> Self {
+        Self { underover_ascent, ..self }
+    }
+
+    pub fn with_underover_descent(self, underover_descent: Option<Abs>) -> Self {
+        Self { underover_descent, ..self }
     }
 }
 
