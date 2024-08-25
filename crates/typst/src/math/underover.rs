@@ -104,7 +104,6 @@ fn layout_underoverline(
     let line_width = width + line_adjust;
 
     let content_class = content.class();
-    let content_is_text_like = content.is_text_like();
     let content_italics_correction = content.italics_correction();
     let mut frame = Frame::soft(size);
     frame.set_baseline(baseline);
@@ -124,7 +123,6 @@ fn layout_underoverline(
     ctx.push(
         FrameFragment::new(ctx, styles, frame)
             .with_class(content_class)
-            .with_text_like(content_is_text_like)
             .with_italics_correction(content_italics_correction),
     );
 

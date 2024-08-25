@@ -4,8 +4,8 @@ use crate::diag::SourceResult;
 use crate::foundations::{elem, Content, Packed, StyleChain};
 use crate::layout::{Abs, Frame, Point, Size};
 use crate::math::{
-    style_for_subscript, style_for_superscript, EquationElem, FrameFragment, LayoutMath,
-    MathContext, MathFragment, MathSize, Scaled,
+    style_for_subscript, style_for_superscript, AccentElem, CancelElem, EquationElem, FrameFragment, LayoutMath,
+    MathContext, MathFragment, MathSize, OpElem, OverlineElem, UnderlineElem, Scaled, SequenceElem, LrElem, StyledElem, HElem, SpaceElem, BoxElem,
 };
 use crate::text::TextElem;
 
@@ -52,6 +52,7 @@ pub struct AttachElem {
 impl LayoutMath for Packed<AttachElem> {
     #[typst_macros::time(name = "math.attach", span = self.span())]
     fn layout_math(&self, ctx: &mut MathContext, styles: StyleChain) -> SourceResult<()> {
+        let is_text_like = is_text_like(self.base());
         let base = ctx.layout_into_fragment(self.base(), styles)?;
 
         let sup_style = style_for_superscript(styles);
@@ -92,7 +93,7 @@ impl LayoutMath for Packed<AttachElem> {
             layout!(br, sub_style_chain)?,
         ];
 
-        layout_attachments(ctx, styles, base, fragments)
+        layout_attachments(ctx, styles, base, is_text_like, fragments)
     }
 }
 
@@ -143,7 +144,7 @@ impl LayoutMath for Packed<PrimesElem> {
                         prime.clone(),
                     )
                 }
-                ctx.push(FrameFragment::new(ctx, styles, frame).with_text_like(true));
+                ctx.push(FrameFragment::new(ctx, styles, frame));
             }
         }
         Ok(())
@@ -259,12 +260,13 @@ fn layout_attachments(
     ctx: &mut MathContext,
     styles: StyleChain,
     base: MathFragment,
+    is_text_like: bool,
     [tl, t, tr, bl, b, br]: [Option<MathFragment>; 6],
 ) -> SourceResult<()> {
     let (shift_up, shift_down) = if [&tl, &tr, &bl, &br].iter().all(|e| e.is_none()) {
         (Abs::zero(), Abs::zero())
     } else {
-        compute_shifts_up_and_down(ctx, styles, &base, [&tl, &tr, &bl, &br])
+        compute_shifts_up_and_down(ctx, styles, &base, is_text_like, [&tl, &tr, &bl, &br])
     };
 
     let sup_delta = Abs::zero();
@@ -403,6 +405,7 @@ fn compute_shifts_up_and_down(
     ctx: &MathContext,
     styles: StyleChain,
     base: &MathFragment,
+    is_text_like: bool,
     [tl, tr, bl, br]: [&Option<MathFragment>; 4],
 ) -> (Abs, Abs) {
     let sup_shift_up = if EquationElem::cramped_in(styles) {
@@ -422,7 +425,6 @@ fn compute_shifts_up_and_down(
 
     let mut shift_up = Abs::zero();
     let mut shift_down = Abs::zero();
-    let is_text_like = base.is_text_like();
 
     if tl.is_some() || tr.is_some() {
         let ascent = match &base {
@@ -468,4 +470,97 @@ fn compute_shifts_up_and_down(
 /// Determines if the character is one of a variety of integral signs
 fn is_integral_char(c: char) -> bool {
     ('∫'..='∳').contains(&c) || ('⨋'..='⨜').contains(&c)
+}
+
+fn is_text_like(base: &Content) -> bool {
+    // println!("{:?}", base);
+
+    if let Some(elem) = base.to_packed::<EquationElem>() {
+        return is_text_like(elem.body())
+    }
+    if let Some(elem) = base.to_packed::<LrElem>() {
+        return is_text_like(elem.body())
+    }
+    if let Some(elem) = base.to_packed::<ScriptsElem>() {
+        return is_text_like(elem.body())
+    }
+    if let Some(elem) = base.to_packed::<LimitsElem>() {
+        return is_text_like(elem.body())
+    }
+    if let Some(elem) = base.to_packed::<StyledElem>() {
+        return is_text_like(&elem.child)
+    }
+    // https://github.com/typst/typst/pull/3059
+    if let Some(elem) = base.to_packed::<AccentElem>() {
+        return is_text_like(elem.base())
+    }
+    if let Some(elem) = base.to_packed::<CancelElem>() {
+        return is_text_like(elem.body())
+    }
+    if let Some(elem) = base.to_packed::<OpElem>() {
+        return is_text_like(elem.text())
+    }
+    if let Some(elem) = base.to_packed::<TextElem>() {
+        if elem.text().chars().any(|c| unicode_math_class::class(c) == Some(MathClass::Large)) {
+            return false
+        }
+        // "[∫]"_1 not being treated as text_like - due to the integral in the middle, which is small, not big.
+        //
+        // Text(∫) Text(∑) not text_like
+        // Text(⟘)
+        // Text(⨊)
+        // Text(⨝)
+        return true
+        // let chars = elem.text().chars();
+        // if let Some(mut glyph) = chars
+        //     .next()
+        //     .filter(|_| chars.next().is_none())
+        //     .map(|c| styled_char(styles, c, true))
+        //     .and_then(|c| GlyphFragment::try_new(self, styles, c, span))
+        // {
+        // above is when _not_ text_like
+
+        // let text = elem.text();
+        // if text.chars().all(|c| c.is_ascii_digit() || c == '.') {
+    }
+    
+    // https://github.com/typst/typst/pull/4695
+    if let Some(elem) = base.to_packed::<UnderlineElem>() {
+        return is_text_like(elem.body())
+    }
+    if let Some(elem) = base.to_packed::<OverlineElem>() {
+        return is_text_like(elem.body())
+    }
+    
+    // https://github.com/typst/typst/pull/4525
+    if let Some(elem) = base.to_packed::<PrimesElem>() {
+        return true
+    }
+
+    // https://github.com/typst/typst/pull/4545
+    if let Some(elem) = base.to_packed::<SequenceElem>() {
+        // println!("{:?}", elem.children.iter().map(|x| is_text_like(x)).collect::<Vec<bool>>());
+        // println!("{:?}", elem);
+        if elem.children.iter().all(|x| is_text_like(x)) {
+            return true
+        }
+    }
+
+    if base.is::<SpaceElem>() {
+        return true
+    }
+
+    if let Some(elem) = base.to_packed::<HElem>() {
+        return true
+    }
+
+    // boxelem
+    //tagelem
+    // // Fragments without a math_size are ignored: the notion of size do not
+    // // apply to them, so their text-likeness is meaningless.
+    // let text_like = self
+    //     .iter()
+    //     .filter(|e| e.math_size().is_some())
+    //     .all(|e| e.is_text_like());
+    false
 }

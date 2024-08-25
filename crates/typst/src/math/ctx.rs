@@ -251,7 +251,7 @@ impl<'a, 'b, 'v> MathContext<'a, 'b, 'v> {
                 fragments.push(GlyphFragment::new(self, styles, c, span).into());
             }
             let frame = MathRun::new(fragments).into_frame(self, styles);
-            FrameFragment::new(self, styles, frame).with_text_like(true).into()
+            FrameFragment::new(self, styles, frame).into()
         } else {
             let local = [
                 TextElem::set_top_edge(TopEdge::Metric(TopEdgeMetric::Bounds)),
@@ -312,7 +312,6 @@ impl<'a, 'b, 'v> MathContext<'a, 'b, 'v> {
 
         Ok(FrameFragment::new(self, styles, frame)
             .with_class(MathClass::Alphabetic)
-            .with_text_like(true)
             .with_spaced(spaced))
     }
 }

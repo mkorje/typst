@@ -39,14 +39,12 @@ impl LayoutMath for Packed<OpElem> {
         let fragment = ctx.layout_into_fragment(self.text(), styles)?;
         let italics = fragment.italics_correction();
         let accent_attach = fragment.accent_attach();
-        let text_like = fragment.is_text_like();
 
         ctx.push(
             FrameFragment::new(ctx, styles, fragment.into_frame())
                 .with_class(MathClass::Large)
                 .with_italics_correction(italics)
                 .with_accent_attach(accent_attach)
-                .with_text_like(text_like)
                 .with_limits(if self.limits(styles) {
                     Limits::Display
                 } else {
