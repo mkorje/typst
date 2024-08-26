@@ -109,6 +109,9 @@ pub enum Expr<'a> {
     Link(Link<'a>),
     /// A label: `<intro>`.
     Label(Label<'a>),
+    /// A do not label marker: `<*>`.
+    /// For now, this is only used in Math.
+    NoLabel(NoLabel<'a>),
     /// A reference: `@target`, `@target[..]`.
     Ref(Ref<'a>),
     /// A section heading: `= Introduction`.
@@ -226,6 +229,7 @@ impl<'a> AstNode<'a> for Expr<'a> {
             SyntaxKind::Raw => node.cast().map(Self::Raw),
             SyntaxKind::Link => node.cast().map(Self::Link),
             SyntaxKind::Label => node.cast().map(Self::Label),
+            SyntaxKind::NoLabel => node.cast().map(Self::NoLabel),
             SyntaxKind::Ref => node.cast().map(Self::Ref),
             SyntaxKind::Heading => node.cast().map(Self::Heading),
             SyntaxKind::ListItem => node.cast().map(Self::List),
@@ -290,6 +294,7 @@ impl<'a> AstNode<'a> for Expr<'a> {
             Self::Raw(v) => v.to_untyped(),
             Self::Link(v) => v.to_untyped(),
             Self::Label(v) => v.to_untyped(),
+            Self::NoLabel(v) => v.to_untyped(),
             Self::Ref(v) => v.to_untyped(),
             Self::Heading(v) => v.to_untyped(),
             Self::List(v) => v.to_untyped(),
@@ -581,6 +586,12 @@ impl<'a> Label<'a> {
     pub fn get(self) -> &'a str {
         self.0.text().trim_start_matches('<').trim_end_matches('>')
     }
+}
+
+node! {
+    /// A do not label marker: `<*>`.
+    /// For now, this is only used in Math.
+    NoLabel
 }
 
 node! {

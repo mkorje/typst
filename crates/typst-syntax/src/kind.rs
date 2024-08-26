@@ -48,6 +48,9 @@ pub enum SyntaxKind {
     Link,
     /// A label: `<intro>`.
     Label,
+    /// A do not label marker: `<*>`.
+    /// For now, this is only used in Math.
+    NoLabel,
     /// A reference: `@target`, `@target[..]`.
     Ref,
     /// Introduces a reference: `@target`.
@@ -389,6 +392,7 @@ impl SyntaxKind {
             Self::RawDelim => "raw delimiter",
             Self::Link => "link",
             Self::Label => "label",
+            Self::NoLabel => "no label",
             Self::Ref => "reference",
             Self::RefMarker => "reference marker",
             Self::Heading => "heading",

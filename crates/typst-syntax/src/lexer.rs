@@ -563,6 +563,9 @@ impl Lexer<'_> {
             '&' => SyntaxKind::MathAlignPoint,
             '√' | '∛' | '∜' => SyntaxKind::Root,
 
+            '<' if self.s.eat_if("*>") => SyntaxKind::NoLabel,
+            '<' if self.s.at(is_id_continue) => self.label(),
+
             // Identifiers.
             c if is_math_id_start(c) && self.s.at(is_math_id_continue) => {
                 self.s.eat_while(is_math_id_continue);

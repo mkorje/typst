@@ -13,6 +13,7 @@ mod class_;
 mod equation;
 mod frac;
 mod fragment;
+mod inline_equation;
 mod lr;
 mod matrix;
 mod op;
@@ -30,6 +31,7 @@ pub use self::cancel::*;
 pub use self::class_::*;
 pub use self::equation::*;
 pub use self::frac::*;
+pub use self::inline_equation::*;
 pub use self::lr::*;
 pub use self::matrix::*;
 pub use self::op::*;
@@ -162,6 +164,7 @@ pub fn module() -> Module {
     let mut math = Scope::deduplicating();
     math.category(MATH);
     math.define_elem::<EquationElem>();
+    math.define_elem::<InlineEquationElem>();
     math.define_elem::<TextElem>();
     math.define_elem::<LrElem>();
     math.define_elem::<MidElem>();
@@ -233,6 +236,10 @@ impl LayoutMath for Content {
         // $ my r^2 $
         // ```
         if let Some(elem) = self.to_packed::<EquationElem>() {
+            return elem.layout_math(ctx, styles);
+        }
+
+        if let Some(elem) = self.to_packed::<InlineEquationElem>() {
             return elem.layout_math(ctx, styles);
         }
 

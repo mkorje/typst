@@ -5,10 +5,12 @@ use unicode_math_class::MathClass;
 use crate::diag::{bail, SourceResult};
 use crate::engine::Engine;
 use crate::foundations::{
-    elem, Content, NativeElement, Packed, Resolve, Show, ShowSet, Smart, StyleChain,
-    Styles, Synthesize,
+    elem, Cast, Content, NativeElement, Packed, Resolve, Show, ShowSet, Smart,
+    StyleChain, Styles, Synthesize,
 };
-use crate::introspection::{Count, Counter, CounterUpdate, Locatable, Locator};
+use crate::introspection::{
+    Count, Counter, CounterUpdate, Locatable, Locator, SplitLocator,
+};
 use crate::layout::{
     layout_frame, Abs, AlignElem, Alignment, Axes, BlockElem, Em, FixedAlignment,
     Fragment, Frame, InlineElem, InlineItem, OuterHAlignment, Point, Region, Regions,
@@ -24,6 +26,8 @@ use crate::text::{
 };
 use crate::utils::{NonZeroExt, Numeric};
 use crate::World;
+
+const NUMBER_GUTTER: Em = Em::new(0.5);
 
 /// A mathematical equation.
 ///
@@ -70,6 +74,10 @@ pub struct EquationElem {
     /// ```
     #[borrowed]
     pub numbering: Option<Numbering>,
+
+    ///
+    #[default(NumberingMode::Equation)]
+    pub numbering_mode: NumberingMode,
 
     /// The alignment of the equation numbering.
     ///
@@ -265,6 +273,20 @@ impl LayoutMath for Packed<EquationElem> {
     }
 }
 
+/// The mode for equation numbering.
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Hash, Cast)]
+pub enum NumberingMode {
+    /// Every equation is numbered.
+    #[default]
+    Equation,
+    /// Every line is numbered.
+    Line,
+    /// Only labelled equations or labelled lines have a number. if both a line and an equation have a label, the line wins I guess.
+    Label,
+    /// Only includes things actually referenced in the document in the numbering
+    Reference,
+}
+
 /// Layout an inline equation (in a paragraph).
 #[typst_macros::time(span = elem.span())]
 fn layout_equation_inline(
@@ -335,6 +357,11 @@ fn layout_equation_block(
     let can_break =
         BlockElem::breakable_in(styles) && full_equation_builder.frames.len() > 1;
 
+    // println!("---\n{:?}\n---", full_equation_builder.frames);
+
+    // Check if the equation is breakable. If not, equation_builders is a vector with a single
+    // element (full_equation_builder). Otherwise, here we break it up into multiple regions
+    // a return a vector of them.
     let equation_builders = if can_break {
         let mut rows = full_equation_builder.frames.into_iter().peekable();
         let mut equation_builders = vec![];
@@ -393,7 +420,7 @@ fn layout_equation_block(
         vec![full_equation_builder]
     };
 
-    let Some(numbering) = (**elem).numbering(styles) else {
+    if (**elem).numbering(styles).is_none() {
         let frames = equation_builders
             .into_iter()
             .map(MathRunFrameBuilder::build)
@@ -401,42 +428,36 @@ fn layout_equation_block(
         return Ok(Fragment::frames(frames));
     };
 
-    let pod = Region::new(regions.base(), Axes::splat(false));
-    let counter = Counter::of(EquationElem::elem())
-        .display_at_loc(engine, elem.location().unwrap(), styles, numbering)?
-        .spanned(span);
-    let number = layout_frame(engine, &counter, locator.next(&()), styles, pod)?;
-
-    static NUMBER_GUTTER: Em = Em::new(0.5);
-    let full_number_width = number.width() + NUMBER_GUTTER.resolve(styles);
-
+    let numbering_mode = elem.numbering_mode(styles);
     let number_align = match elem.number_align(styles) {
         SpecificAlignment::H(h) => SpecificAlignment::Both(h, VAlignment::Horizon),
         SpecificAlignment::V(v) => SpecificAlignment::Both(OuterHAlignment::End, v),
         SpecificAlignment::Both(h, v) => SpecificAlignment::Both(h, v),
     };
 
-    // Add equation numbers to each equation region.
-    let region_count = equation_builders.len();
-    let frames = equation_builders
-        .into_iter()
-        .map(|builder| {
-            if builder.frames.is_empty() && region_count > 1 {
-                // Don't number empty regions, but do number empty equations.
-                return builder.build();
-            }
-            add_equation_number(
-                builder,
-                number.clone(),
-                number_align.resolve(styles),
-                AlignElem::alignment_in(styles).resolve(styles).x,
-                regions.size.x,
-                full_number_width,
-            )
-        })
-        .collect();
-
-    Ok(Fragment::frames(frames))
+    match numbering_mode {
+        NumberingMode::Equation => numbering_by_equation(
+            elem,
+            engine,
+            locator,
+            styles,
+            regions,
+            equation_builders,
+            number_align.resolve(styles),
+            AlignElem::alignment_in(styles).resolve(styles).x,
+        ),
+        NumberingMode::Line => numbering_by_line(
+            elem,
+            engine,
+            locator,
+            styles,
+            regions,
+            equation_builders,
+            number_align.resolve(styles),
+            AlignElem::alignment_in(styles).resolve(styles).x,
+        ),
+        _ => unreachable!(),
+    }
 }
 
 fn find_math_font(
@@ -457,29 +478,93 @@ fn find_math_font(
     Ok(font)
 }
 
-fn add_equation_number(
-    equation_builder: MathRunFrameBuilder,
-    number: Frame,
+/// For NumberingMode::Line.
+fn numbering_by_line(
+    elem: &Packed<EquationElem>,
+    engine: &mut Engine,
+    mut locator: SplitLocator,
+    styles: StyleChain,
+    regions: Regions,
+    equation_builders: Vec<MathRunFrameBuilder>,
     number_align: Axes<FixedAlignment>,
     equation_align: FixedAlignment,
-    region_size_x: Abs,
-    full_number_width: Abs,
-) -> Frame {
-    let first =
-        equation_builder.frames.first().map_or(
-            (equation_builder.size, Point::zero(), Abs::zero()),
-            |(frame, pos)| (frame.size(), *pos, frame.baseline()),
-        );
-    let last =
-        equation_builder.frames.last().map_or(
-            (equation_builder.size, Point::zero(), Abs::zero()),
-            |(frame, pos)| (frame.size(), *pos, frame.baseline()),
-        );
-    let line_count = equation_builder.frames.len();
-    let mut equation = equation_builder.build();
+) -> SourceResult<Fragment> {
+    let numbering = (**elem).numbering(styles).as_ref().unwrap();
 
-    let width = if region_size_x.is_finite() {
-        region_size_x
+    // Add equation numbers to each equation region.
+    let mut frames = vec![];
+    let region_count = equation_builders.len();
+    for builder in equation_builders {
+        let frame = if builder.frames.is_empty() && region_count > 1 {
+            // Don't number empty regions, but do number empty equations.
+            builder.build()
+        } else {
+            numbering_by_line_helper(
+                elem,
+                engine,
+                locator.next(&()),
+                styles,
+                regions,
+                builder,
+                number_align,
+                equation_align,
+                numbering,
+            )?
+        };
+        frames.push(frame);
+    }
+
+    Ok(Fragment::frames(frames))
+}
+
+fn numbering_by_line_helper(
+    elem: &Packed<EquationElem>,
+    engine: &mut Engine,
+    locator: Locator,
+    styles: StyleChain,
+    regions: Regions,
+    builder: MathRunFrameBuilder,
+    number_align: Axes<FixedAlignment>,
+    equation_align: FixedAlignment,
+    numbering: &Numbering,
+) -> SourceResult<Frame> {
+    let first = builder
+        .frames
+        .first()
+        .map_or((builder.size, Point::zero(), Abs::zero()), |(frame, pos)| {
+            (frame.size(), *pos, frame.baseline())
+        });
+    let last = builder
+        .frames
+        .last()
+        .map_or((builder.size, Point::zero(), Abs::zero()), |(frame, pos)| {
+            (frame.size(), *pos, frame.baseline())
+        });
+    let line_count = builder.frames.len();
+
+    let number_first = Counter::of(EquationElem::elem())
+        .display_at_loc(engine, elem.location().unwrap(), styles, numbering)?
+        .spanned(elem.span());
+    let pod = Region::new(regions.base(), Axes::splat(false));
+    let number = layout_frame(engine, &number_first, locator, styles, pod)?;
+    let full_number_width = number.width() + NUMBER_GUTTER.resolve(styles);
+
+    let mut numbers = vec![number_first];
+    for _i in 0..line_count {
+        Counter::of(EquationElem::elem())
+            .update(elem.span(), CounterUpdate::Step(NonZeroUsize::ONE));
+        let num = Counter::of(EquationElem::elem())
+            .display_at_loc(engine, elem.location().unwrap(), styles, numbering)?
+            .spanned(elem.span());
+        numbers.push(num);
+    }
+
+    println!("{:?}", numbers);
+
+    let mut equation = builder.build();
+
+    let width = if regions.size.x.is_finite() {
+        regions.size.x
     } else {
         equation.width() + 2.0 * full_number_width
     };
@@ -519,11 +604,107 @@ fn add_equation_number(
         }
     };
 
-    equation.push_frame(Point::new(x, y), number);
-    equation
+    equation.push_frame(Point::new(x, y), number.clone());
+    Ok(equation)
 }
 
-/// Resize the equation's frame accordingly so that it emcompasses the number.
+/// For NumberingMode::Equation.
+fn numbering_by_equation(
+    elem: &Packed<EquationElem>,
+    engine: &mut Engine,
+    mut locator: SplitLocator,
+    styles: StyleChain,
+    regions: Regions,
+    equation_builders: Vec<MathRunFrameBuilder>,
+    number_align: Axes<FixedAlignment>,
+    equation_align: FixedAlignment,
+) -> SourceResult<Fragment> {
+    let numbering = (**elem).numbering(styles).as_ref().unwrap();
+    let counter = Counter::of(EquationElem::elem())
+        .display_at_loc(engine, elem.location().unwrap(), styles, numbering)?
+        .spanned(elem.span());
+
+    let pod = Region::new(regions.base(), Axes::splat(false));
+    let number = layout_frame(engine, &counter, locator.next(&()), styles, pod)?;
+
+    let full_number_width = number.width() + NUMBER_GUTTER.resolve(styles);
+
+    // Add equation numbers to each equation region.
+    let region_count = equation_builders.len();
+    let frames = equation_builders
+        .into_iter()
+        .map(|builder| {
+            if builder.frames.is_empty() && region_count > 1 {
+                // Don't number empty regions, but do number empty equations.
+                return builder.build();
+            }
+
+            let first =
+                builder.frames.first().map_or(
+                    (builder.size, Point::zero(), Abs::zero()),
+                    |(frame, pos)| (frame.size(), *pos, frame.baseline()),
+                );
+            let last =
+                builder.frames.last().map_or(
+                    (builder.size, Point::zero(), Abs::zero()),
+                    |(frame, pos)| (frame.size(), *pos, frame.baseline()),
+                );
+            let line_count = builder.frames.len();
+            let mut equation = builder.build();
+
+            let width = if regions.size.x.is_finite() {
+                regions.size.x
+            } else {
+                equation.width() + 2.0 * full_number_width
+            };
+
+            let is_multiline = line_count >= 2;
+            let resizing_offset = resize_equation(
+                &mut equation,
+                &number,
+                number_align,
+                equation_align,
+                width,
+                is_multiline,
+                [first, last],
+            );
+            equation.translate(Point::with_x(match (equation_align, number_align.x) {
+                (FixedAlignment::Start, FixedAlignment::Start) => full_number_width,
+                (FixedAlignment::End, FixedAlignment::End) => -full_number_width,
+                _ => Abs::zero(),
+            }));
+
+            let x = match number_align.x {
+                FixedAlignment::Start => Abs::zero(),
+                FixedAlignment::End => equation.width() - number.width(),
+                _ => unreachable!(),
+            };
+            let y = {
+                let align_baselines =
+                    |(_, pos, baseline): (_, Point, Abs), number: &Frame| {
+                        resizing_offset.y + pos.y + baseline - number.baseline()
+                    };
+                match number_align.y {
+                    FixedAlignment::Start => align_baselines(first, &number),
+                    FixedAlignment::Center if !is_multiline => {
+                        align_baselines(first, &number)
+                    }
+                    // In this case, the center lines (not baselines) of the number frame
+                    // and the equation frame shall be aligned.
+                    FixedAlignment::Center => (equation.height() - number.height()) / 2.0,
+                    FixedAlignment::End => align_baselines(last, &number),
+                }
+            };
+
+            equation.push_frame(Point::new(x, y), number.clone());
+            equation
+        })
+        .collect();
+
+    Ok(Fragment::frames(frames))
+}
+
+/// Resize the equation's frame accordingly so that it encompasses the number.
 fn resize_equation(
     equation: &mut Frame,
     number: &Frame,
