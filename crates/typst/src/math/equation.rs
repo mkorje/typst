@@ -297,13 +297,15 @@ fn layout_equation_inline(
         let InlineItem::Frame(frame) = item else { continue };
 
         let font_size = scaled_font_size(&ctx, styles);
-        let slack = ParElem::leading_in(styles) * 0.7;
-        let top_edge = TextElem::top_edge_in(styles).resolve(font_size, &font, None);
-        let bottom_edge =
-            -TextElem::bottom_edge_in(styles).resolve(font_size, &font, None);
+        // let slack = ParElem::leading_in(styles) * 0.7;
+        // let top_edge = TextElem::top_edge_in(styles).resolve(font_size, &font, None);
+        // let bottom_edge =
+        //     -TextElem::bottom_edge_in(styles).resolve(font_size, &font, None);
 
-        let ascent = top_edge.max(frame.ascent() - slack);
-        let descent = bottom_edge.max(frame.descent() - slack);
+        // let ascent = top_edge.max(frame.ascent() - slack);
+        // let descent = bottom_edge.max(frame.descent() - slack);
+        let ascent = TextElem::top_edge_in(styles).resolve(font_size, &font, None);
+        let descent = -TextElem::bottom_edge_in(styles).resolve(font_size, &font, None);
         frame.translate(Point::with_y(ascent - frame.baseline()));
         frame.size_mut().y = ascent + descent;
     }

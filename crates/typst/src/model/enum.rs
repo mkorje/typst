@@ -223,7 +223,8 @@ impl Show for Packed<EnumElem> {
             .spanned(self.span());
 
         if self.tight(styles) {
-            let leading = ParElem::leading_in(styles);
+            // TODO: fix this.
+            let leading = ParElem::line_height_in(styles);
             let spacing = VElem::list_attach(leading.into()).pack();
             realized = spacing + realized;
         }
@@ -246,7 +247,8 @@ fn layout_enum(
     let body_indent = elem.body_indent(styles);
     let gutter = elem.spacing(styles).unwrap_or_else(|| {
         if elem.tight(styles) {
-            ParElem::leading_in(styles).into()
+            // TODO: fix this.
+            ParElem::line_height_in(styles).into()
         } else {
             ParElem::spacing_in(styles).into()
         }

@@ -1019,7 +1019,7 @@ impl<'a, 'e> FlowLayouter<'a, 'e> {
     ) -> SourceResult<()> {
         // Fetch properties.
         let align = AlignElem::alignment_in(styles).resolve(styles);
-        let leading = ParElem::leading_in(styles);
+        let line_height = ParElem::line_height_in(styles);
         let costs = TextElem::costs_in(styles);
 
         // Layout the paragraph into lines. This only depends on the base size,
@@ -1038,7 +1038,7 @@ impl<'a, 'e> FlowLayouter<'a, 'e> {
         .into_frames();
 
         // If the first line doesn’t fit in this region, then defer any
-        // previous sticky frame to the next region (if available)
+        // previous sticky frame to the next region (if available).
         if let Some(first) = lines.first() {
             while !self.regions.size.y.fits(first.height()) && !self.regions.in_last() {
                 let in_last = self.finish_region_with_migration()?;
@@ -1064,16 +1064,26 @@ impl<'a, 'e> FlowLayouter<'a, 'e> {
         let back_2 = height_at(len.saturating_sub(2));
         let back_1 = height_at(len.saturating_sub(1));
 
+        let leading_at = |line: &Frame, frame: &Frame| {
+            if line.descent().abs() + frame.ascent() > line_height {
+                Abs::pt(1.0)
+            } else {
+                line_height - line.descent().abs() - frame.ascent()
+            }
+        };
+
         // Layout the lines.
-        for (i, mut frame) in lines.into_iter().enumerate() {
+        for (i, mut frame) in lines.clone().into_iter().enumerate() {
             if i > 0 {
-                self.handle_item(FlowItem::Absolute(leading, true))?;
+                self.handle_item(FlowItem::Absolute(leading_at(&lines[i - 1], &frame), true))?;
             }
 
             // To prevent widows and orphans, we require enough space for
             // - all lines if it's just three
             // - the first two lines if we're at the first line
             // - the last two lines if we're at the second to last line
+            let leading = leading_at(&frame, &frame);
+            
             let needed = if prevent_all && i == 0 {
                 front_1 + leading + front_2 + leading + back_1
             } else if prevent_orphans && i == 0 {
