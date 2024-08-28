@@ -119,6 +119,8 @@ impl LayoutMath for Packed<AccentElem> {
         // Preserve class to preserve automatic spacing.
         let base_class = base.class();
         let base_attach = base.accent_attach();
+        let base_lr_ascent = base.lr_ascent().unwrap_or(base.ascent());
+        let base_lr_descent = base.lr_descent().unwrap_or(base.descent());
 
         let width = self
             .size(styles)
@@ -163,7 +165,9 @@ impl LayoutMath for Packed<AccentElem> {
                 .with_base_ascent(base_ascent)
                 .with_italics_correction(base_italics_correction)
                 .with_accent_attach(base_attach)
-                .with_text_like(base_text_like),
+                .with_text_like(base_text_like)
+                .with_lr_ascent(Some(base_lr_ascent))
+                .with_lr_descent(Some(base_lr_descent)),
         );
 
         Ok(())

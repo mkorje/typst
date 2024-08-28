@@ -4,7 +4,7 @@ use crate::diag::SourceResult;
 use crate::foundations::{elem, Content, Packed, StyleChain};
 use crate::layout::{Abs, Corner, Frame, Point, Size};
 use crate::math::{
-    style_for_subscript, style_for_superscript, EquationElem, FrameFragment, LayoutMath,
+    style_for_subscript, style_for_superscript, EquationElem, FrameFragment, LayoutMath, LrElem, LrStyle,
     MathContext, MathFragment, MathSize, Scaled,
 };
 use crate::text::TextElem;
@@ -56,6 +56,23 @@ impl LayoutMath for Packed<AttachElem> {
         let new_elem = merge_base(self);
         let elem = new_elem.as_ref().unwrap_or(self);
 
+        let tight = if let Some(equation) = elem.base().to_packed::<LrElem>() {
+            let fragments = ctx.layout_into_fragments(&equation.body().clone(), styles)?;
+            match fragments.as_slice() {
+                [first, .., last] => {
+                    if first.class() == MathClass::Opening && last.class() == MathClass::Closing {
+                        match equation.style(styles) {
+                            LrStyle::Normal => false,
+                            LrStyle::Tight => true,
+                        }
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            }
+        } else { false };
+
         let base = ctx.layout_into_fragment(elem.base(), styles)?;
         let sup_style = style_for_superscript(styles);
         let sup_style_chain = styles.chain(&sup_style);
@@ -95,7 +112,21 @@ impl LayoutMath for Packed<AttachElem> {
             layout!(br, sub_style_chain)?,
         ];
 
-        layout_attachments(ctx, styles, base, fragments)
+        let (base_ascent, base_descent) = {
+        //     let ascent = ctx.layout_into_fragments(elem.base(), styles)?.iter()
+        //         .map(|fragment| fragment.lr_ascent().unwrap_or(fragment.ascent()) - axis)
+        //         .max()
+        //         .unwrap_or_default();
+
+        // } else {
+            let ascent = match &base {
+                MathFragment::Frame(frame) => frame.base_ascent,
+                _ => base.ascent(),
+            };
+            (ascent, base.descent())
+        };
+
+        layout_attachments(ctx, styles, base, fragments, (base_ascent, base_descent))
     }
 }
 
@@ -300,21 +331,32 @@ fn layout_attachments(
     styles: StyleChain,
     base: MathFragment,
     [tl, t, tr, bl, b, br]: [Option<MathFragment>; 6],
+    (base_ascent, base_descent): (Abs, Abs),
 ) -> SourceResult<()> {
     let base_class = base.class();
+    let mut base_lr_ascent = base.lr_ascent().unwrap_or(base.ascent());
+    let mut base_lr_descent = base.lr_descent().unwrap_or(base.descent());
 
     // Calculate the distance from the base's baseline to the superscripts' and
     // subscripts' baseline.
     let (tx_shift, bx_shift) = if [&tl, &tr, &bl, &br].iter().all(|e| e.is_none()) {
         (Abs::zero(), Abs::zero())
     } else {
-        compute_script_shifts(ctx, styles, &base, [&tl, &tr, &bl, &br])
+        compute_script_shifts(ctx, styles, &base, [&tl, &tr, &bl, &br], (base_ascent, base_descent))
     };
 
     // Calculate the distance from the base's baseline to the top attachment's
     // and bottom attachment's baseline.
     let (t_shift, b_shift) =
         compute_limit_shifts(ctx, styles, &base, [t.as_ref(), b.as_ref()]);
+
+    if let Some(ref t) = t {
+        base_lr_ascent += t_shift - base.ascent() - t.descent();
+    }
+
+    if let Some(ref b) = b {
+        base_lr_descent += b_shift - base.ascent() - b.ascent();
+    }
 
     // Calculate the final frame height.
     let ascent = base
@@ -403,7 +445,12 @@ fn layout_attachments(
     layout!(b, b_x, b_y); // lower-limit
 
     // Done! Note that we retain the class of the base.
-    ctx.push(FrameFragment::new(ctx, styles, frame).with_class(base_class));
+    ctx.push(
+        FrameFragment::new(ctx, styles, frame)
+            .with_class(base_class)
+            .with_lr_ascent(Some(base_lr_ascent))
+            .with_lr_descent(Some(base_lr_descent)),
+    );
 
     Ok(())
 }
@@ -530,6 +577,7 @@ fn compute_script_shifts(
     styles: StyleChain,
     base: &MathFragment,
     [tl, tr, bl, br]: [&Option<MathFragment>; 4],
+    (base_ascent, base_descent): (Abs, Abs),
 ) -> (Abs, Abs) {
     let sup_shift_up = if EquationElem::cramped_in(styles) {
         scaled!(ctx, styles, superscript_shift_up_cramped)
@@ -551,13 +599,9 @@ fn compute_script_shifts(
     let is_text_like = base.is_text_like();
 
     if tl.is_some() || tr.is_some() {
-        let ascent = match &base {
-            MathFragment::Frame(frame) => frame.base_ascent,
-            _ => base.ascent(),
-        };
         shift_up = shift_up
             .max(sup_shift_up)
-            .max(if is_text_like { Abs::zero() } else { ascent - sup_drop_max })
+            .max(if is_text_like { Abs::zero() } else { base_ascent - sup_drop_max })
             .max(sup_bottom_min + measure!(tl, descent))
             .max(sup_bottom_min + measure!(tr, descent));
     }
@@ -565,7 +609,7 @@ fn compute_script_shifts(
     if bl.is_some() || br.is_some() {
         shift_down = shift_down
             .max(sub_shift_down)
-            .max(if is_text_like { Abs::zero() } else { base.descent() + sub_drop_min })
+            .max(if is_text_like { Abs::zero() } else { base_descent + sub_drop_min })
             .max(measure!(bl, ascent) - sub_top_max)
             .max(measure!(br, ascent) - sub_top_max);
     }

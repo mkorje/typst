@@ -70,19 +70,22 @@ fn layout(
     let raise_factor = percent!(ctx, radical_degree_bottom_raise_percent);
 
     // Layout radicand.
-    let radicand = {
+    let (radicand, radicand_lr_ascent, radicand_lr_descent) = {
         let cramped = style_cramped();
         let styles = styles.chain(&cramped);
         let run = ctx.layout_into_run(radicand, styles)?;
         let multiline = run.is_multiline();
-        let mut radicand = run.into_fragment(ctx, styles).into_frame();
+        let radicand = run.into_fragment(ctx, styles);
+        let radicand_lr_ascent = radicand.lr_ascent().unwrap_or(radicand.ascent());
+        let radicand_lr_descent = radicand.lr_descent().unwrap_or(radicand.descent());
+        let mut radicand = radicand.into_frame();
         if multiline {
             // Align the frame center line with the math axis.
             radicand.set_baseline(
                 radicand.height() / 2.0 + scaled!(ctx, styles, axis_height),
             );
         }
-        radicand
+        (radicand, radicand_lr_ascent, radicand_lr_descent)
     };
 
     // Layout root symbol.
@@ -156,7 +159,10 @@ fn layout(
     );
 
     frame.push_frame(radicand_pos, radicand);
-    ctx.push(FrameFragment::new(ctx, styles, frame));
+    ctx.push(FrameFragment::new(ctx, styles, frame)
+        .with_lr_ascent(Some(radicand_lr_ascent))
+        .with_lr_descent(Some(radicand_lr_descent)),
+    );
 
     Ok(())
 }

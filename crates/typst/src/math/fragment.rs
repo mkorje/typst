@@ -73,6 +73,20 @@ impl MathFragment {
         }
     }
 
+    pub fn lr_ascent(&self) -> Option<Abs> {
+        match self {
+            Self::Frame(fragment) => fragment.lr_ascent,
+            _ => None,
+        }
+    }
+
+    pub fn lr_descent(&self) -> Option<Abs> {
+        match self {
+            Self::Frame(fragment) => fragment.lr_descent,
+            _ => None,
+        }
+    }
+
     pub fn is_ignorant(&self) -> bool {
         match self {
             Self::Frame(fragment) => fragment.ignorant,
@@ -470,6 +484,8 @@ pub struct FrameFragment {
     pub accent_attach: Abs,
     pub text_like: bool,
     pub ignorant: bool,
+    pub lr_ascent: Option<Abs>,
+    pub lr_descent: Option<Abs>,
 }
 
 impl FrameFragment {
@@ -489,6 +505,8 @@ impl FrameFragment {
             accent_attach,
             text_like: false,
             ignorant: false,
+            lr_ascent: None,
+            lr_descent: None,
         }
     }
 
@@ -522,6 +540,14 @@ impl FrameFragment {
 
     pub fn with_ignorant(self, ignorant: bool) -> Self {
         Self { ignorant, ..self }
+    }
+
+    pub fn with_lr_ascent(self, lr_ascent: Option<Abs>) -> Self {
+        Self { lr_ascent, ..self }
+    }
+
+    pub fn with_lr_descent(self, lr_descent: Option<Abs>) -> Self {
+        Self { lr_descent, ..self }
     }
 }
 
