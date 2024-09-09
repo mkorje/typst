@@ -83,6 +83,10 @@ pub enum SyntaxKind {
     MathDelimited,
     /// A base with optional attachments in math: `a_1^2`.
     MathAttach,
+    /// Grouped subscripts in math: `a₁₂`.
+    MathSubscripts,
+    /// Grouped superscripts in math: `a¹²`.
+    MathSuperscripts,
     /// Grouped primes in math: `a'''`.
     MathPrimes,
     /// A fraction in math: `x/2`.
@@ -160,6 +164,10 @@ pub enum SyntaxKind {
     Arrow,
     /// A root: `√`, `∛` or `∜`.
     Root,
+    /// A superscript: `²`.
+    Superscript,
+    /// A subscript: `₂`.
+    Subscript,
 
     /// The `not` operator.
     Not,
@@ -406,6 +414,8 @@ impl SyntaxKind {
             Self::MathAlignPoint => "math alignment point",
             Self::MathDelimited => "delimited math",
             Self::MathAttach => "math attachments",
+            Self::MathSubscripts => "math subscripts",
+            Self::MathSuperscripts => "math superscripts",
             Self::MathFrac => "math fraction",
             Self::MathRoot => "math root",
             Self::MathPrimes => "math primes",
@@ -442,6 +452,8 @@ impl SyntaxKind {
             Self::Dots => "dots",
             Self::Arrow => "arrow",
             Self::Root => "root",
+            Self::Superscript => "superscript",
+            Self::Subscript => "subscript",
             Self::Not => "operator `not`",
             Self::And => "operator `and`",
             Self::Or => "operator `or`",

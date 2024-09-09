@@ -133,7 +133,11 @@ pub enum Expr<'a> {
     MathDelimited(MathDelimited<'a>),
     /// A base with optional attachments in math: `a_1^2`.
     MathAttach(MathAttach<'a>),
-    /// Grouped math primes
+    /// Grouped subscripts in math: `a₁₂`.
+    MathSubscripts(MathSubscripts<'a>),
+    /// Grouped superscripts in math: `a¹²`.
+    MathSuperscripts(MathSuperscripts<'a>),
+    /// Grouped primes in math: `a'''`.
     MathPrimes(MathPrimes<'a>),
     /// A fraction in math: `x/2`.
     MathFrac(MathFrac<'a>),
@@ -238,6 +242,8 @@ impl<'a> AstNode<'a> for Expr<'a> {
             SyntaxKind::MathAlignPoint => node.cast().map(Self::MathAlignPoint),
             SyntaxKind::MathDelimited => node.cast().map(Self::MathDelimited),
             SyntaxKind::MathAttach => node.cast().map(Self::MathAttach),
+            SyntaxKind::MathSubscripts => node.cast().map(Self::MathSubscripts),
+            SyntaxKind::MathSuperscripts => node.cast().map(Self::MathSuperscripts),
             SyntaxKind::MathPrimes => node.cast().map(Self::MathPrimes),
             SyntaxKind::MathFrac => node.cast().map(Self::MathFrac),
             SyntaxKind::MathRoot => node.cast().map(Self::MathRoot),
@@ -302,6 +308,8 @@ impl<'a> AstNode<'a> for Expr<'a> {
             Self::MathAlignPoint(v) => v.to_untyped(),
             Self::MathDelimited(v) => v.to_untyped(),
             Self::MathAttach(v) => v.to_untyped(),
+            Self::MathSubscripts(v) => v.to_untyped(),
+            Self::MathSuperscripts(v) => v.to_untyped(),
             Self::MathPrimes(v) => v.to_untyped(),
             Self::MathFrac(v) => v.to_untyped(),
             Self::MathRoot(v) => v.to_untyped(),
@@ -832,17 +840,19 @@ impl<'a> MathAttach<'a> {
 
     /// The bottom attachment.
     pub fn bottom(self) -> Option<Expr<'a>> {
+        println!("{:?}", self.0.children());
         self.0
             .children()
-            .skip_while(|node| !matches!(node.kind(), SyntaxKind::Underscore))
+            .skip_while(|node| !matches!(node.kind(), SyntaxKind::Underscore | SyntaxKind::MathSubscripts))
             .find_map(SyntaxNode::cast)
     }
 
     /// The top attachment.
     pub fn top(self) -> Option<Expr<'a>> {
+        println!("{:?}", self.0.children());
         self.0
             .children()
-            .skip_while(|node| !matches!(node.kind(), SyntaxKind::Hat))
+            .skip_while(|node| !matches!(node.kind(), SyntaxKind::Hat | SyntaxKind::MathSuperscripts))
             .find_map(SyntaxNode::cast)
     }
 
@@ -853,6 +863,159 @@ impl<'a> MathAttach<'a> {
             .skip_while(|node| node.cast::<Expr<'_>>().is_none())
             .nth(1)
             .and_then(|n| n.cast())
+    }
+}
+
+node! {
+    /// Grouped subscripts in math: `a₁₂`.
+    MathSubscripts
+}
+
+impl<'a> MathSubscripts<'a> {
+    /// A list of all subscripts in math mode.
+    pub const LIST: &'static [(char, char)] = &[
+        ('₀', '0'),
+        ('₁', '1'),
+        ('₂', '2'),
+        ('₃', '3'),
+        ('₄', '4'),
+        ('₅', '5'),
+        ('₆', '6'),
+        ('₇', '7'),
+        ('₈', '8'),
+        ('₉', '9'),
+        ('₊', '+'),
+        ('₋', '-'),
+        ('₌', '='),
+        ('₍', '('),
+        ('₎', ')'),
+        ('ₐ', 'a'),
+        ('ₑ', 'e'),
+        ('ₕ', 'h'),
+        ('ᵢ', 'i'),
+        ('ⱼ', 'j'),
+        ('ₖ', 'k'),
+        ('ₗ', 'l'),
+        ('ₘ', 'm'),
+        ('ₙ', 'n'),
+        ('ₒ', 'o'),
+        ('ₚ', 'p'),
+        ('ᵣ', 'r'),
+        ('ₛ', 's'),
+        ('ₜ', 't'),
+        ('ᵤ', 'u'),
+        ('ᵥ', 'v'),
+        ('ₓ', 'x'),
+        ('ᵦ', 'β'),
+        ('ᵧ', 'γ'),
+        ('ᵨ', 'ρ'),
+        ('ᵩ', 'φ'),
+        ('ᵪ', 'χ'),
+    ];
+
+    /// Get the subscript characters.
+    pub fn get(self) -> EcoString {
+        println!("{:?}", self.0.children());
+        self.0
+            .children()
+            .filter(|node| node.kind() == SyntaxKind::Subscript)
+            .map(|node| {
+                // Should never panic as we have filtered for
+                // SyntaxKind::Subscript
+                let character = node.text().chars().next().unwrap();
+                
+                Self::LIST.iter().find(|&&(s, _)| s == character).map(|&(_, c)| c).unwrap()
+            })
+            .collect()
+        // Self::LIST
+        //     .iter()
+        //     .find(|&&(s, _)| s == text)
+        //     .map_or_else(char::default, |&(_, c)| c)
+    }
+}
+
+node! {
+    /// Grouped superscripts in math: `a¹²`.
+    MathSuperscripts
+}
+
+impl<'a> MathSuperscripts<'a> {
+    /// A list of all superscripts in math mode.
+    pub const LIST: &'static [(char, char)] = &[
+        ('⁰', '0'),
+        ('¹', '1'),
+        ('²', '2'),
+        ('³', '3'),
+        ('⁴', '4'),
+        ('⁵', '5'),
+        ('⁶', '6'),
+        ('⁷', '7'),
+        ('⁸', '8'),
+        ('⁹', '9'),
+        ('⁺', '+'),
+        ('⁻', '-'),
+        ('⁼', '='),
+        ('⁽', '('),
+        ('⁾', ')'),
+        ('ᴬ', 'A'),
+        ('ᴮ', 'B'),
+        ('ᴰ', 'D'),
+        ('ᴱ', 'E'),
+        ('ᴳ', 'G'),
+        ('ᴴ', 'H'),
+        ('ᴵ', 'I'),
+        ('ᴶ', 'J'),
+        ('ᴷ', 'K'),
+        ('ᴸ', 'L'),
+        ('ᴹ', 'M'),
+        ('ᴺ', 'N'),
+        ('ᴼ', 'O'),
+        ('ᴾ', 'P'),
+        ('ᴿ', 'R'),
+        ('ᵀ', 'T'),
+        ('ᵁ', 'U'),
+        ('ⱽ', 'V'),
+        ('ᵂ', 'W'),
+        ('ᵃ', 'a'),
+        ('ᵇ', 'b'),
+        ('ᶜ', 'c'),
+        ('ᵈ', 'd'),
+        ('ᵉ', 'e'),
+        ('ᶠ', 'f'),
+        ('ᵍ', 'g'),
+        ('ʰ', 'h'),
+        ('ⁱ', 'i'),
+        ('ʲ', 'j'),
+        ('ᵏ', 'k'),
+        ('ˡ', 'l'),
+        ('ᵐ', 'm'),
+        ('ⁿ', 'n'),
+        ('ᵒ', 'o'),
+        ('ᵖ', 'p'),
+        ('ʳ', 'r'),
+        ('ˢ', 's'),
+        ('ᵗ', 't'),
+        ('ᵘ', 'u'),
+        ('ᵛ', 'v'),
+        ('ʷ', 'w'),
+        ('ˣ', 'x'),
+        ('ʸ', 'y'),
+        ('ᶻ', 'z'),
+        ('ᵝ', 'β'),
+        ('ᵞ', 'γ'),
+        ('ᵟ', 'δ'),
+        ('ᵠ', 'φ'),
+        ('ᵡ', 'χ'),
+        ('ᶿ', 'θ'),
+    ];
+
+    /// Get the superscript character.
+    pub fn get(self) -> &'a EcoString {
+        self.0.text()
+        // Self::LIST
+        //     .iter()
+        //     .find(|&&(s, _)| s == text)
+        //     .map_or_else(char::default, |&(_, c)| c)
     }
 }
 

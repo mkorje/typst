@@ -287,11 +287,12 @@ fn math(p: &mut Parser, mut stop: impl FnMut(&Parser) -> bool) {
 /// Parses a single math expression: This includes math elements like
 /// attachment, fractions, and roots, and embedded code expressions.
 fn math_expr(p: &mut Parser) {
-    math_expr_prec(p, 0, SyntaxKind::End)
+    const END: SyntaxSet = SyntaxSet::new().add(SyntaxKind::End);
+    math_expr_prec(p, 0, END)
 }
 
 /// Parses a math expression with at least the given precedence.
-fn math_expr_prec(p: &mut Parser, min_prec: usize, stop: SyntaxKind) {
+fn math_expr_prec(p: &mut Parser, min_prec: usize, stop: SyntaxSet) {
     let m = p.marker();
     let mut continuable = false;
     match p.current() {
@@ -371,7 +372,7 @@ fn math_expr_prec(p: &mut Parser, min_prec: usize, stop: SyntaxKind) {
     // Whether there were _any_ primes in the loop.
     let mut primed = false;
 
-    while !p.end() && !p.at(stop) {
+    while !p.end() && !p.at_set(stop) {
         if p.directly_at(SyntaxKind::Text) && p.current_text() == "!" {
             p.eat();
             p.wrap(m, SyntaxKind::Math);
@@ -385,7 +386,7 @@ fn math_expr_prec(p: &mut Parser, min_prec: usize, stop: SyntaxKind) {
             p.wrap(prime_marker, SyntaxKind::MathPrimes);
 
             // Will not be continued, so need to wrap the prime as attachment.
-            if p.at(stop) {
+            if p.at_set(stop) {
                 p.wrap(m, SyntaxKind::MathAttach);
             }
 
@@ -419,19 +420,41 @@ fn math_expr_prec(p: &mut Parser, min_prec: usize, stop: SyntaxKind) {
             math_unparen(p, m);
         }
 
-        p.eat();
-        let m2 = p.marker();
-        math_expr_prec(p, prec, stop);
-        math_unparen(p, m2);
+        println!("A {:?}", p.current());
+        if !math_scripts(p) {
+            p.eat();
+            let m2 = p.marker();
+            math_expr_prec(p, prec, stop);
+            math_unparen(p, m2);
+        }
 
-        if p.eat_if(SyntaxKind::Underscore) || p.eat_if(SyntaxKind::Hat) {
+        println!("B {:?}", p.current());
+        if !math_scripts(p) && (p.at(SyntaxKind::Underscore) || p.at(SyntaxKind::Hat)) {
+            p.eat();
             let m3 = p.marker();
-            math_expr_prec(p, prec, SyntaxKind::End);
+            const END: SyntaxSet = SyntaxSet::new().add(SyntaxKind::End);
+            math_expr_prec(p, prec, END);
             math_unparen(p, m3);
         }
 
+        println!("C {:?}", p.current());
         p.wrap(m, kind);
     }
+}
+
+fn math_scripts(p: &mut Parser) -> bool {
+    let current = p.current();
+    let kind = match current {
+        SyntaxKind::Subscript => SyntaxKind::MathSubscripts,
+        SyntaxKind::Superscript => SyntaxKind::MathSuperscripts,
+        _ => return false,
+    };
+
+    let m = p.marker();
+    while p.eat_if_direct(current) {}
+    p.wrap(m, kind);
+
+    true
 }
 
 fn maybe_delimited(p: &mut Parser) -> bool {
@@ -495,16 +518,19 @@ fn math_class(text: &str) -> Option<MathClass> {
         .and_then(unicode_math_class::class)
 }
 
-fn math_op(kind: SyntaxKind) -> Option<(SyntaxKind, SyntaxKind, ast::Assoc, usize)> {
+fn math_op(kind: SyntaxKind) -> Option<(SyntaxKind, SyntaxSet, ast::Assoc, usize)> {
     match kind {
-        SyntaxKind::Underscore => {
-            Some((SyntaxKind::MathAttach, SyntaxKind::Hat, ast::Assoc::Right, 2))
+        SyntaxKind::Underscore | SyntaxKind::Subscript => {
+            const END: SyntaxSet = SyntaxSet::new().add(SyntaxKind::Hat).add(SyntaxKind::Superscript);
+            Some((SyntaxKind::MathAttach, END, ast::Assoc::Right, 2))
         }
-        SyntaxKind::Hat => {
-            Some((SyntaxKind::MathAttach, SyntaxKind::Underscore, ast::Assoc::Right, 2))
+        SyntaxKind::Hat | SyntaxKind::Superscript => {
+            const END: SyntaxSet = SyntaxSet::new().add(SyntaxKind::Underscore).add(SyntaxKind::Subscript);
+            Some((SyntaxKind::MathAttach, END, ast::Assoc::Right, 2))
         }
         SyntaxKind::Slash => {
-            Some((SyntaxKind::MathFrac, SyntaxKind::End, ast::Assoc::Left, 1))
+            const END: SyntaxSet = SyntaxSet::new().add(SyntaxKind::End);
+            Some((SyntaxKind::MathFrac, END, ast::Assoc::Left, 1))
         }
         _ => None,
     }

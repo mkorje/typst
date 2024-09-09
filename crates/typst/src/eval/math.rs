@@ -79,6 +79,22 @@ impl Eval for ast::MathAttach<'_> {
     }
 }
 
+impl Eval for ast::MathSubscripts<'_> {
+    type Output = Content;
+
+    fn eval(self, _: &mut Vm) -> SourceResult<Self::Output> {
+        Ok(TextElem::packed(self.get().clone()))
+    }
+}
+
+impl Eval for ast::MathSuperscripts<'_> {
+    type Output = Content;
+
+    fn eval(self, _: &mut Vm) -> SourceResult<Self::Output> {
+        Ok(TextElem::packed(self.get().clone()))
+    }
+}
+
 impl Eval for ast::MathPrimes<'_> {
     type Output = Content;
 

@@ -563,6 +563,10 @@ impl Lexer<'_> {
             '&' => SyntaxKind::MathAlignPoint,
             '√' | '∛' | '∜' => SyntaxKind::Root,
 
+            // Subscripts and Superscripts.
+            c if is_math_subscript(c) => SyntaxKind::Subscript,
+            c if is_math_superscript(c) => SyntaxKind::Superscript,
+
             // Identifiers.
             c if is_math_id_start(c) && self.s.at(is_math_id_continue) => {
                 self.s.eat_while(is_math_id_continue);
@@ -577,9 +581,9 @@ impl Lexer<'_> {
     fn math_text(&mut self, start: usize, c: char) -> SyntaxKind {
         // Keep numbers and grapheme clusters together.
         if c.is_numeric() {
-            self.s.eat_while(char::is_numeric);
+            self.s.eat_while(is_math_numeric);
             let mut s = self.s;
-            if s.eat_if('.') && !s.eat_while(char::is_numeric).is_empty() {
+            if s.eat_if('.') && !s.eat_while(is_math_numeric).is_empty() {
                 self.s = s;
             }
         } else {
@@ -931,7 +935,38 @@ fn is_math_id_start(c: char) -> bool {
 /// Whether a character can continue an identifier in math.
 #[inline]
 fn is_math_id_continue(c: char) -> bool {
-    is_xid_continue(c) && c != '_'
+    is_xid_continue(c) && c != '_' && !is_math_subscript(c) && !is_math_superscript(c)
+}
+
+/// Whether a character is numeric in math.
+///
+/// This is the same as char::is_numeric, excluding characters for which either
+/// is_math_subscript or is_math_superscript is true.
+#[inline]
+fn is_math_numeric(c: char) -> bool {
+    !(!c.is_numeric() || is_math_subscript(c) || is_math_superscript(c))
+}
+
+/// Whether a character is a subscript in math.
+fn is_math_subscript(c: char) -> bool {
+    const LIST: &[char] = &[
+        '₀', '₁', '₂', '₃', '₄', '₅', '₆', '₇', '₈', '₉', '₊', '₋', '₌', '₍', '₎', 'ₐ',
+        'ₑ', 'ₕ', 'ᵢ', 'ⱼ', 'ₖ', 'ₗ', 'ₘ', 'ₙ', 'ₒ', 'ₚ', 'ᵣ', 'ₛ', 'ₜ', 'ᵤ', 'ᵥ', 'ₓ',
+        'ᵦ', 'ᵧ', 'ᵨ', 'ᵩ', 'ᵪ',
+    ];
+    LIST.contains(&c)
+}
+
+/// Whether a character is a superscript in math.
+fn is_math_superscript(c: char) -> bool {
+    const LIST: &[char] = &[
+        '⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹', '⁺', '⁻', '⁼', '⁽', '⁾', 'ᴬ',
+        'ᴮ', 'ᴰ', 'ᴱ', 'ᴳ', 'ᴴ', 'ᴵ', 'ᴶ', 'ᴷ', 'ᴸ', 'ᴹ', 'ᴺ', 'ᴼ', 'ᴾ', 'ᴿ', 'ᵀ', 'ᵁ',
+        'ⱽ', 'ᵂ', 'ᵃ', 'ᵇ', 'ᶜ', 'ᵈ', 'ᵉ', 'ᶠ', 'ᵍ', 'ʰ', 'ⁱ', 'ʲ', 'ᵏ', 'ˡ', 'ᵐ', 'ⁿ',
+        'ᵒ', 'ᵖ', 'ʳ', 'ˢ', 'ᵗ', 'ᵘ', 'ᵛ', 'ʷ', 'ˣ', 'ʸ', 'ᶻ', 'ᵝ', 'ᵞ', 'ᵟ', 'ᵠ', 'ᵡ',
+        'ᶿ',
+    ];
+    LIST.contains(&c)
 }
 
 /// Whether a character can be part of a label literal's name.
