@@ -47,6 +47,7 @@ impl Eval for ast::FuncCall<'_> {
 
         let func_result = callee.clone().cast::<Func>();
         if in_math && func_result.is_err() {
+            println!("!-- wrap_args_in_math --!");
             return wrap_args_in_math(callee, callee_span, args, trailing_comma);
         }
 

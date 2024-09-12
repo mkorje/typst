@@ -225,6 +225,8 @@ pub fn highlight(node: &LinkedNode) -> Option<Tag> {
         SyntaxKind::Dots => Some(Tag::Operator),
         SyntaxKind::Arrow => Some(Tag::Operator),
         SyntaxKind::Root => Some(Tag::MathOperator),
+        SyntaxKind::Subscript => Some(Tag::MathOperator),
+        SyntaxKind::Superscript => Some(Tag::MathOperator),
 
         SyntaxKind::Not => Some(Tag::Keyword),
         SyntaxKind::And => Some(Tag::Keyword),

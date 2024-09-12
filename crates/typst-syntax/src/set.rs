@@ -80,6 +80,7 @@ pub const MATH_EXPR: SyntaxSet = SyntaxSet::new()
     .add(SyntaxKind::Hash)
     .add(SyntaxKind::MathIdent)
     .add(SyntaxKind::Text)
+    .add(SyntaxKind::LeftParen)
     .add(SyntaxKind::MathShorthand)
     .add(SyntaxKind::Linebreak)
     .add(SyntaxKind::MathAlignPoint)
@@ -87,6 +88,26 @@ pub const MATH_EXPR: SyntaxSet = SyntaxSet::new()
     .add(SyntaxKind::Str)
     .add(SyntaxKind::Root)
     .add(SyntaxKind::Prime);
+
+/// Syntax kinds that can end an argument in a math function call.
+pub const MATH_ARG_END: SyntaxSet = SyntaxSet::new()
+    .add(SyntaxKind::Comma)
+    .add(SyntaxKind::Semicolon)
+    .add(SyntaxKind::RightParen);
+
+/// Syntax kinds that are not valid math expressions in isolation.
+pub const MATH_INVALID_SINGLE: SyntaxSet = SyntaxSet::new()
+    .add(SyntaxKind::Linebreak)
+    .add(SyntaxKind::MathAlignPoint);
+
+pub const MATH_EXPR_END: SyntaxSet = SyntaxSet::new().add(SyntaxKind::End);
+
+/// Syntax kinds that can start a math attachment.
+pub const MATH_ATTACH: SyntaxSet = SyntaxSet::new()
+    .add(SyntaxKind::Underscore)
+    .add(SyntaxKind::Hat)
+    .add(SyntaxKind::Subscript)
+    .add(SyntaxKind::Superscript);
 
 /// Syntax kinds that can start a code expression.
 pub const CODE_EXPR: SyntaxSet = CODE_PRIMARY.union(UNARY_OP);

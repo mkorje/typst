@@ -160,6 +160,10 @@ pub enum SyntaxKind {
     Arrow,
     /// A root: `√`, `∛` or `∜`.
     Root,
+    /// A subscript: `₂`.
+    Subscript,
+    /// A superscript: `²`.
+    Superscript,
 
     /// The `not` operator.
     Not,
@@ -442,6 +446,8 @@ impl SyntaxKind {
             Self::Dots => "dots",
             Self::Arrow => "arrow",
             Self::Root => "root",
+            Self::Subscript => "subscript",
+            Self::Superscript => "superscript",
             Self::Not => "operator `not`",
             Self::And => "operator `and`",
             Self::Or => "operator `or`",

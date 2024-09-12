@@ -29,6 +29,10 @@ pub(super) enum LexMode {
     Markup,
     /// Math atoms, operators, etc.
     Math,
+    /// An argument in a math function.
+    MathArg,
+    /// Function argument list in math.
+    MathArgs,
     /// Keywords, literals and operators.
     Code,
     /// The contents of a raw block.
@@ -127,6 +131,8 @@ impl Lexer<'_> {
             Some(c) => match self.mode {
                 LexMode::Markup => self.markup(start, c),
                 LexMode::Math => self.math(start, c),
+                LexMode::MathArg => self.math_arg(start, c),
+                LexMode::MathArgs => self.math_args(start, c),
                 LexMode::Code => self.code(start, c),
                 LexMode::Raw => unreachable!(),
             },
@@ -561,7 +567,13 @@ impl Lexer<'_> {
             '^' => SyntaxKind::Hat,
             '\'' => SyntaxKind::Prime,
             '&' => SyntaxKind::MathAlignPoint,
+            '(' => SyntaxKind::LeftParen,
+            ')' => SyntaxKind::RightParen,
             '√' | '∛' | '∜' => SyntaxKind::Root,
+
+            // Subscripts and Superscripts.
+            c if is_math_subscript(c) => SyntaxKind::Subscript,
+            c if is_math_superscript(c) => SyntaxKind::Superscript,
 
             // Identifiers.
             c if is_math_id_start(c) && self.s.at(is_math_id_continue) => {
@@ -569,29 +581,122 @@ impl Lexer<'_> {
                 SyntaxKind::MathIdent
             }
 
-            // Other math atoms.
-            _ => self.math_text(start, c),
+            // Keep numbers together.
+            c if is_math_numeric(c) => {
+                self.s.eat_while(is_math_numeric);
+                let mut s = self.s;
+                if s.eat_if('.') && !s.eat_while(is_math_numeric).is_empty() {
+                    self.s = s;
+                }
+                SyntaxKind::Text
+            }
+
+            // Keep grapheme clusters together.
+            _ => {
+                let len = self
+                    .s
+                    .get(start..self.s.string().len())
+                    .graphemes(true)
+                    .next()
+                    .map_or(0, str::len);
+                self.s.jump(start + len);
+                SyntaxKind::Text
+            }
+
+            // // Other math atoms.
+            // _ => self.math_text(start, c),
         }
     }
 
-    fn math_text(&mut self, start: usize, c: char) -> SyntaxKind {
-        // Keep numbers and grapheme clusters together.
-        if c.is_numeric() {
-            self.s.eat_while(char::is_numeric);
-            let mut s = self.s;
-            if s.eat_if('.') && !s.eat_while(char::is_numeric).is_empty() {
-                self.s = s;
-            }
-        } else {
-            let len = self
-                .s
-                .get(start..self.s.string().len())
-                .graphemes(true)
-                .next()
-                .map_or(0, str::len);
-            self.s.jump(start + len);
+    // fn math_text(&mut self, start: usize, c: char) -> SyntaxKind {
+    //     // Keep numbers and grapheme clusters together.
+    //     if c.is_numeric() {
+    //         self.s.eat_while(is_math_numeric);
+    //         let mut s = self.s;
+    //         if s.eat_if('.') && !s.eat_while(is_math_numeric).is_empty() {
+    //             self.s = s;
+    //         }
+    //     } else {
+    //         let len = self
+    //             .s
+    //             .get(start..self.s.string().len())
+    //             .graphemes(true)
+    //             .next()
+    //             .map_or(0, str::len);
+    //         self.s.jump(start + len);
+    //     }
+    //     SyntaxKind::Text
+    // }
+}
+
+/// Math argument.
+/// Identical to Math, but we lex commas and semicolons so we know when to
+/// stop.
+impl Lexer<'_> {
+    fn math_arg(&mut self, start: usize, c: char) -> SyntaxKind {
+        match c {
+            ',' => SyntaxKind::Comma,
+            ';' => SyntaxKind::Semicolon,
+            _ => self.math(start, c),
         }
-        SyntaxKind::Text
+    }
+}
+
+/// Math arguments.
+impl Lexer<'_> {
+    fn math_args(&mut self, start: usize, c: char) -> SyntaxKind {
+        match c {
+            c if self.is_math_named_arg(start, c) => SyntaxKind::Ident,
+            '.' if self.is_math_spread_arg(start) => SyntaxKind::Dots,
+            _ => self.math_arg(start, c),
+        }
+    }
+
+    fn is_math_named_arg(&mut self, start: usize, c: char) -> bool {
+        // Handle named arguments in math function call.
+        let cursor = self.s.cursor();
+
+        if !is_id_start(c) {
+            return false;
+        }
+        self.s.eat_while(is_id_continue);
+        // Identifier is just "_", and so invalid.
+        let ident = self.s.from(start);
+        if ident == "_" {
+            return false;
+        }
+
+        // Check that a colon proceeds the identifier.
+        if let Some(c) = self.s.peek() {
+            if c == ':' {
+                return true;
+            }
+        }
+
+        // No colon, and so we need to go back as we don't want to treat this
+        // as an identifier then.
+        self.s.jump(cursor);
+        false
+    }
+
+    fn is_math_spread_arg(&mut self, start: usize) -> bool {
+        // Handle spread arguments in math function call.
+        let cursor = self.s.cursor();
+        if !self.s.eat_if('.') {
+            return false;
+        }
+
+        // Check that non-whitespace follows the spread syntax.
+        if let Some(c) = self.s.peek() {
+            if !c.is_whitespace() {
+                return true;
+            }
+        }
+
+        // There is whitespace, so we go back so as to not treat the dots as
+        // spread syntax.
+        self.s.jump(cursor);
+        false
     }
 }
 
@@ -899,7 +1004,7 @@ fn count_newlines(text: &str) -> usize {
 ///
 /// In addition to what is specified in the [Unicode Standard][uax31], we allow:
 /// - `_` as a starting character,
-/// - `_` and `-` as continuing characters.
+/// - `-` as a continuing character.
 ///
 /// [uax31]: http://www.unicode.org/reports/tr31/
 #[inline]
@@ -919,7 +1024,7 @@ pub fn is_id_start(c: char) -> bool {
 /// Whether a character can continue an identifier.
 #[inline]
 pub fn is_id_continue(c: char) -> bool {
-    is_xid_continue(c) || c == '_' || c == '-'
+    is_xid_continue(c) || c == '-'
 }
 
 /// Whether a character can start an identifier in math.
@@ -931,7 +1036,38 @@ fn is_math_id_start(c: char) -> bool {
 /// Whether a character can continue an identifier in math.
 #[inline]
 fn is_math_id_continue(c: char) -> bool {
-    is_xid_continue(c) && c != '_'
+    is_xid_continue(c) && c != '_'  && !is_math_subscript(c) && !is_math_superscript(c)
+}
+
+/// Whether a character is numeric in math.
+///
+/// This is the same as char::is_numeric, excluding characters for which either
+/// is_math_subscript or is_math_superscript is true.
+#[inline]
+fn is_math_numeric(c: char) -> bool {
+    !(!c.is_numeric() || is_math_subscript(c) || is_math_superscript(c))
+}
+
+/// Whether a character is a subscript in math.
+fn is_math_subscript(c: char) -> bool {
+    const LIST: &[char] = &[
+        '₀', '₁', '₂', '₃', '₄', '₅', '₆', '₇', '₈', '₉', '₊', '₋', '₌', '₍', '₎', 'ₐ',
+        'ₑ', 'ₕ', 'ᵢ', 'ⱼ', 'ₖ', 'ₗ', 'ₘ', 'ₙ', 'ₒ', 'ₚ', 'ᵣ', 'ₛ', 'ₜ', 'ᵤ', 'ᵥ', 'ₓ',
+        'ᵦ', 'ᵧ', 'ᵨ', 'ᵩ', 'ᵪ',
+    ];
+    LIST.contains(&c)
+}
+
+/// Whether a character is a superscript in math.
+fn is_math_superscript(c: char) -> bool {
+    const LIST: &[char] = &[
+        '⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹', '⁺', '⁻', '⁼', '⁽', '⁾', 'ᴬ',
+        'ᴮ', 'ᴰ', 'ᴱ', 'ᴳ', 'ᴴ', 'ᴵ', 'ᴶ', 'ᴷ', 'ᴸ', 'ᴹ', 'ᴺ', 'ᴼ', 'ᴾ', 'ᴿ', 'ᵀ', 'ᵁ',
+        'ⱽ', 'ᵂ', 'ᵃ', 'ᵇ', 'ᶜ', 'ᵈ', 'ᵉ', 'ᶠ', 'ᵍ', 'ʰ', 'ⁱ', 'ʲ', 'ᵏ', 'ˡ', 'ᵐ', 'ⁿ',
+        'ᵒ', 'ᵖ', 'ʳ', 'ˢ', 'ᵗ', 'ᵘ', 'ᵛ', 'ʷ', 'ˣ', 'ʸ', 'ᶻ', 'ᵝ', 'ᵞ', 'ᵟ', 'ᵠ', 'ᵡ',
+        'ᶿ',
+    ];
+    LIST.contains(&c)
 }
 
 /// Whether a character can be part of a label literal's name.

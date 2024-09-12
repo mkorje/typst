@@ -69,7 +69,7 @@ impl LayoutMath for Packed<AttachElem> {
         let bl = elem.bl(sub_style_chain);
         let br = elem.br(sub_style_chain);
         let b = elem.b(sub_style_chain);
-
+        println!("{:?}", b);
         let limits = base.limits().active(styles);
         let (t, tr) = match (t, tr) {
             (Some(t), Some(tr)) if primed && !limits => (None, Some(tr + t)),
@@ -302,7 +302,7 @@ fn layout_attachments(
     [tl, t, tr, bl, b, br]: [Option<MathFragment>; 6],
 ) -> SourceResult<()> {
     let base_class = base.class();
-
+    println!("{:?}", br);
     // Calculate the distance from the base's baseline to the superscripts' and
     // subscripts' baseline.
     let (tx_shift, bx_shift) = if [&tl, &tr, &bl, &br].iter().all(|e| e.is_none()) {

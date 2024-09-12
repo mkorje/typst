@@ -30,7 +30,7 @@ pub fn parse_code(text: &str) -> SyntaxNode {
 /// Parses top-level math.
 pub fn parse_math(text: &str) -> SyntaxNode {
     let mut p = Parser::new(text, 0, LexMode::Math);
-    math(&mut p, |_| false);
+    math(&mut p, |_| false, MathWrap::Math);
     p.finish().into_iter().next().unwrap()
 }
 
@@ -265,58 +265,98 @@ fn equation(p: &mut Parser) {
     let m = p.marker();
     p.enter(LexMode::Math);
     p.assert(SyntaxKind::Dollar);
-    math(p, |p| p.at(SyntaxKind::Dollar));
+    math(p, |p| p.at(SyntaxKind::Dollar), MathWrap::Math);
     p.expect_closing_delimiter(m, SyntaxKind::Dollar);
     p.exit();
     p.wrap(m, SyntaxKind::Equation);
+    println!("{:?}", p.nodes);
+}
+
+/// How to wrap contents of a mathematical equation.
+enum MathWrap {
+    /// Wrap in "Math" SyntaxKind.
+    Math,
+    /// Wrap math function arguments in a "Math" SyntaxKind to combine adjacent
+    /// expressions or create blank content.
+    Args,
+    /// Don't wrap in any SyntaxKind.
+    None,
 }
 
 /// Parses the contents of a mathematical equation: `x^2 + 1`.
-fn math(p: &mut Parser, mut stop: impl FnMut(&Parser) -> bool) {
+fn math(p: &mut Parser, mut stop: impl FnMut(&Parser) -> bool, wrap: MathWrap) {
     let m = p.marker();
+    println!("! {:?} , {:?}", p.current(), p.current_text());
+
     while !p.end() && !stop(p) {
+        println!("{:?} , {:?}", p.current(), p.current_text());
+
         if p.at_set(set::MATH_EXPR) {
-            math_expr(p);
+            math_expr(p, 0, set::MATH_EXPR_END);
         } else {
             p.unexpected();
         }
     }
-    p.wrap(m, SyntaxKind::Math);
+
+    match wrap {
+        MathWrap::None => (),
+        MathWrap::Math => p.wrap(m, SyntaxKind::Math),
+        MathWrap::Args => {
+            let exprs = p.post_process(m).filter(|node| node.is::<ast::Expr>()).count();
+            // We don't wrap when `exprs == 1`, as there is only one expression,
+            // so the grouping isn't needed, and this would change the type of
+            // the expression from potentially non-content to content.
+            if exprs != 1 {
+                // Convert 0 exprs into a blank math element (so empty arguments
+                // are allowed).
+                // Convert 2+ exprs into a math element (so they become a joined
+                // sequence).
+                p.wrap(m, SyntaxKind::Math);
+            }
+        }
+    }
 }
 
-/// Parses a single math expression: This includes math elements like
-/// attachment, fractions, and roots, and embedded code expressions.
-fn math_expr(p: &mut Parser) {
-    math_expr_prec(p, 0, SyntaxKind::End)
-}
+// /// Syntax kinds that can start a math expression.
+// pub const MATH_EXPR: SyntaxSet = SyntaxSet::new()
+//     .add(SyntaxKind::Hash)
+//     .add(SyntaxKind::MathIdent)
+//     .add(SyntaxKind::Text)
+//     .add(SyntaxKind::LeftParen)
+//     .add(SyntaxKind::MathShorthand)
+//     .add(SyntaxKind::Linebreak)
+//     .add(SyntaxKind::MathAlignPoint)
+//     .add(SyntaxKind::Escape)
+//     .add(SyntaxKind::Str)
+//     .add(SyntaxKind::Root)
+//     .add(SyntaxKind::Prime);
 
-/// Parses a math expression with at least the given precedence.
-fn math_expr_prec(p: &mut Parser, min_prec: usize, stop: SyntaxKind) {
+/// Parses a single math expression with at least the given precedence: This
+/// includes math elements like attachment, fractions, and roots, and embedded
+/// code expressions.
+fn math_expr(p: &mut Parser, min_prec: usize, stop: SyntaxSet) {
     let m = p.marker();
     let mut continuable = false;
     match p.current() {
-        SyntaxKind::Hash => embedded_code_expr(p),
-        SyntaxKind::MathIdent => {
+        SyntaxKind::Escape | SyntaxKind::Str => {
             continuable = true;
             p.eat();
-            while p.directly_at(SyntaxKind::Text) && p.current_text() == "." && {
-                let mut copy = p.lexer.clone();
-                let start = copy.cursor();
-                let next = copy.next();
-                let end = copy.cursor();
-                matches!(next, SyntaxKind::MathIdent | SyntaxKind::Text)
-                    && is_ident(&p.text[start..end])
-            } {
-                p.convert(SyntaxKind::Dot);
-                p.convert(SyntaxKind::Ident);
-                p.wrap(m, SyntaxKind::FieldAccess);
+        }
+        SyntaxKind::Hash => embedded_code_expr(p),
+        SyntaxKind::Linebreak | SyntaxKind::MathAlignPoint => p.eat(),
+
+        SyntaxKind::Root => {
+            if min_prec < 3 {
+                p.eat();
+                let m2 = p.marker();
+                math_expr(p, 2, stop);
+                math_unparen(p, m2);
+                p.wrap(m, SyntaxKind::MathRoot);
             }
-            if min_prec < 3 && p.directly_at(SyntaxKind::Text) && p.current_text() == "("
-            {
-                math_args(p);
-                p.wrap(m, SyntaxKind::FuncCall);
-                continuable = false;
-            }
+        }
+
+        SyntaxKind::MathIdent => {
+            continuable = math_ident(p, min_prec);
         }
 
         SyntaxKind::Text | SyntaxKind::MathShorthand => {
@@ -326,22 +366,6 @@ fn math_expr_prec(p: &mut Parser, min_prec: usize, stop: SyntaxKind) {
             );
             if !maybe_delimited(p) {
                 p.eat();
-            }
-        }
-
-        SyntaxKind::Linebreak | SyntaxKind::MathAlignPoint => p.eat(),
-        SyntaxKind::Escape | SyntaxKind::Str => {
-            continuable = true;
-            p.eat();
-        }
-
-        SyntaxKind::Root => {
-            if min_prec < 3 {
-                p.eat();
-                let m2 = p.marker();
-                math_expr_prec(p, 2, stop);
-                math_unparen(p, m2);
-                p.wrap(m, SyntaxKind::MathRoot);
             }
         }
 
@@ -355,6 +379,17 @@ fn math_expr_prec(p: &mut Parser, min_prec: usize, stop: SyntaxKind) {
                 while p.eat_if_direct(SyntaxKind::Prime) {}
                 p.wrap(m2, SyntaxKind::MathPrimes);
             }
+        }
+
+        SyntaxKind::LeftParen => {
+            println!("A");
+            p.eat();
+            math(p, |p| p.at(SyntaxKind::RightParen), MathWrap::Args);
+            p.expect_closing_delimiter(m, SyntaxKind::RightParen);
+            // could either be matching something like (], _or_ if there is no rightparen until a rightparen followed by a slash, then this is a fraction!
+            
+            // fraction lookahead needs to happen...
+            // if there is rightparen followed by slash, then 
         }
 
         _ => p.expected("expression"),
@@ -371,7 +406,11 @@ fn math_expr_prec(p: &mut Parser, min_prec: usize, stop: SyntaxKind) {
     // Whether there were _any_ primes in the loop.
     let mut primed = false;
 
-    while !p.end() && !p.at(stop) {
+    println!("+++ Start {:?} ({:?})", p.current_text(), p.current());
+    while !p.end() && !p.at_set(stop) {
+        println!("\tLoop {:?} ({:?})", p.current_text(), p.current());
+        // wtf is this for?? precedence of n! / 2
+        // see https://github.com/typst/typst/pull/1487
         if p.directly_at(SyntaxKind::Text) && p.current_text() == "!" {
             p.eat();
             p.wrap(m, SyntaxKind::Math);
@@ -385,7 +424,7 @@ fn math_expr_prec(p: &mut Parser, min_prec: usize, stop: SyntaxKind) {
             p.wrap(prime_marker, SyntaxKind::MathPrimes);
 
             // Will not be continued, so need to wrap the prime as attachment.
-            if p.at(stop) {
+            if p.at_set(stop) {
                 p.wrap(m, SyntaxKind::MathAttach);
             }
 
@@ -417,21 +456,227 @@ fn math_expr_prec(p: &mut Parser, min_prec: usize, stop: SyntaxKind) {
 
         if kind == SyntaxKind::MathFrac {
             math_unparen(p, m);
+            p.eat(); // slash
+            let m2 = p.marker();
+            math_expr(p, prec, set::MATH_EXPR_END);
+            math_unparen(p, m2);
+            p.wrap(m, kind);
+            continue;
         }
 
-        p.eat();
-        let m2 = p.marker();
-        math_expr_prec(p, prec, stop);
-        math_unparen(p, m2);
-
-        if p.eat_if(SyntaxKind::Underscore) || p.eat_if(SyntaxKind::Hat) {
-            let m3 = p.marker();
-            math_expr_prec(p, prec, SyntaxKind::End);
-            math_unparen(p, m3);
-        }
-
+        // We are now just left with top and bottom attachments...
+        let next = math_attachment(p, prec, None);
+        math_attachment(p, prec, next);
+        println!("{:?} = {:?}", p.current_text(), p.current());
         p.wrap(m, kind);
+        
+        // let curr = p.current();
+        // math_attachment(p, prec, stop);
+        // // is there the opposite hat/underscore left?
+        // if p.eat_if(SyntaxKind::Underscore) || p.eat_if(SyntaxKind::Hat) {
+        //     math_attachment(p, prec, SyntaxKind::End);
+        // }
+        // p.wrap(m, kind);
     }
+}
+
+
+/// Whether this is a subscript or a superscript.
+#[derive(Copy, Clone, PartialEq)]
+enum MathAttach {
+    /// A subscript attachment (b/br).
+    Subscript,
+    /// A superscript attachment (t/tr).
+    Superscript,
+}
+
+impl MathAttach {
+    pub fn new(kind: SyntaxKind) -> Option<Self> {
+        match kind {
+            SyntaxKind::Underscore | SyntaxKind::Subscript => Some(MathAttach::Subscript),
+            SyntaxKind::Hat | SyntaxKind::Superscript => Some(MathAttach::Superscript),
+            _ => None,
+        }
+    }
+    
+    fn inv(self) -> MathAttach {
+        match self {
+            MathAttach::Subscript => MathAttach::Superscript,
+            MathAttach::Superscript => MathAttach::Subscript,
+        }
+    }
+}
+
+// Returns which of sub/super script follows
+fn math_attachment(p: &mut Parser, prec: usize, attach_type: Option<MathAttach>) -> Option<MathAttach> {
+    // Get whether we are dealing with sub- or superscript.
+    // Exit if not a math attachment kind.
+    let current = p.current();
+    let current_type = match MathAttach::new(current) {
+        Some(x) => x,
+        None => return None,
+    };
+
+    // Check that whether sub/super matches the type parameter.
+    if let Some(attach_type) = attach_type {
+        if current_type != attach_type {
+            return None;
+        }
+    }
+
+    if current == SyntaxKind::Subscript || current == SyntaxKind::Superscript {
+        while p.eat_if_direct(current) {}  
+        
+        return Some(current_type.inv());
+    }
+
+    // next is a hat or underscore.
+    p.eat();
+
+    // now we want a single expr, but if theres a left bracket we instead go for multiple expressions until right bracket.
+    let m = p.marker();
+    if p.eat_if(SyntaxKind::LeftParen) {
+        math(p, |p| p.at(SyntaxKind::RightParen), MathWrap::Args);
+        p.expect_closing_delimiter(m, SyntaxKind::RightParen);
+    } else {
+        if p.at_set(set::MATH_INVALID_SINGLE) {
+            p.unexpected();
+        }
+        let stop = if attach_type.is_none() {
+            match current_type {
+                MathAttach::Subscript => SyntaxSet::new().add(SyntaxKind::Superscript).add(SyntaxKind::Hat), 
+                MathAttach::Superscript => SyntaxSet::new().add(SyntaxKind::Subscript).add(SyntaxKind::Underscore),
+            }
+        } else {
+            set::MATH_EXPR_END
+        };
+        math_expr(p, prec, stop);
+    }
+    
+    Some(current_type.inv())
+}
+
+fn math_ident(p: &mut Parser, min_prec: usize) -> bool {
+    let m = p.marker();
+    p.assert(SyntaxKind::MathIdent);
+    let mut continuable = true;
+
+    // Field access.
+    while p.directly_at(SyntaxKind::Text) && p.current_text() == "." && {
+        let mut copy = p.lexer.clone();
+        let start = copy.cursor();
+        let next = copy.next();
+        let end = copy.cursor();
+        matches!(next, SyntaxKind::MathIdent | SyntaxKind::Text)
+            && is_ident(&p.text[start..end])
+    } {
+        p.convert(SyntaxKind::Dot);
+        p.convert(SyntaxKind::Ident);
+        p.wrap(m, SyntaxKind::FieldAccess);
+    }
+
+    // Function call.
+    if min_prec < 3 && p.directly_at(SyntaxKind::LeftParen) {
+        math_args(p);
+        p.wrap(m, SyntaxKind::FuncCall);
+        continuable = false;
+    }
+    continuable
+}
+
+fn math_args_end(current: SyntaxKind) -> bool {
+    matches!(current, SyntaxKind::End | SyntaxKind::Dollar | SyntaxKind::RightParen)
+}
+
+fn math_args(p: &mut Parser) {
+    if !p.at(SyntaxKind::LeftParen) {
+        p.expected("argument list");
+    }
+
+    let m = p.marker();
+    p.enter(LexMode::MathArgs);
+    p.enter_newline_mode(NewlineMode::Continue);
+    p.assert(SyntaxKind::LeftParen);
+
+    let mut array = false;
+    let mut maybe_array_start = p.marker();
+    let mut maybe_array = false;
+    let mut seen = HashSet::new();
+    while !math_args_end(p.current()) {
+        //TODO fix turning into arrays with 2d call syntax!!
+        // This is only thing left broken here, otherwise this all works now!
+        
+        let m1 = p.marker();
+        // println!("!-- {:?} - {:?}", p.current(), p.current_text());
+        let named = math_arg(p, &mut seen);
+        // println!("    {:?} - {:?} --!", p.current(), p.current_text());
+
+        // if named {
+        //     // reset maybe array
+        //     maybe_array_start = 
+        // }
+
+        // Check if we have reached the end, after the last argument.
+        if math_args_end(p.current()) {
+            if array && maybe_array {
+                p.wrap(maybe_array_start, SyntaxKind::Array);
+            }
+            continue;
+        }
+
+        // Parses an array: `a, b, c;`.
+        // The semicolon merges preceding arguments separated by commas into an array argument.
+        if p.at(SyntaxKind::Semicolon) {
+            array = true;
+            p.wrap(maybe_array_start, SyntaxKind::Array);
+            p.eat();
+            maybe_array = false;
+            continue;
+        }
+
+        p.expect(SyntaxKind::Comma);
+
+        if !named && !maybe_array {
+            maybe_array = true;
+            maybe_array_start = m1;
+        }
+    }
+
+    p.expect_closing_delimiter(m, SyntaxKind::RightParen);
+    p.exit_newline_mode();
+    p.exit();
+    p.wrap(m, SyntaxKind::Args);
+}
+
+// Returns if named or not.
+fn math_arg<'s>(p: &mut Parser<'s>, seen: &mut HashSet<&'s str>) -> bool {
+    let m = p.marker();
+    p.enter(LexMode::MathArg);
+
+    let mut named = false;
+    if p.eat_if(SyntaxKind::Dots) {
+        // Parse a spread argument: `..args`.
+        math(p, |p| p.at_set(set::MATH_ARG_END), MathWrap::Args);
+        p.wrap(m, SyntaxKind::Spread);
+    } else if p.at(SyntaxKind::Ident) {
+        // Parses a named argument: `thickness: #12pt`.
+        let text = p.current_text();
+        p.eat();
+        p.convert(SyntaxKind::Colon);
+        if !seen.insert(text) {
+            p[m].convert_to_error(eco_format!("duplicate argument: {text}"));
+        }
+
+        math(p, |p| p.at_set(set::MATH_ARG_END), MathWrap::Args);
+        p.wrap(m, SyntaxKind::Named);
+        named = true;
+    } else {
+        // Parse a normal position argument.
+        math(p, |p| p.at_set(set::MATH_ARG_END), MathWrap::Args);
+    }
+
+    p.exit();
+    named
 }
 
 fn maybe_delimited(p: &mut Parser) -> bool {
@@ -454,11 +699,13 @@ fn math_delimited(p: &mut Parser) {
             return;
         }
 
-        if p.at_set(set::MATH_EXPR) {
-            math_expr(p);
-        } else {
-            p.unexpected();
-        }
+        math_expr(p, 0, set::MATH_EXPR_END);
+        // calls p.expected("expression") instead of p.unexpected() now with the above...
+        // if p.at_set(set::MATH_EXPR) {
+        //     math_expr(p);
+        // } else {
+        //     p.unexpected();
+        // }
     }
 
     p.wrap(m, SyntaxKind::Math);
@@ -497,119 +744,19 @@ fn math_class(text: &str) -> Option<MathClass> {
 
 fn math_op(kind: SyntaxKind) -> Option<(SyntaxKind, SyntaxKind, ast::Assoc, usize)> {
     match kind {
-        SyntaxKind::Underscore => {
-            Some((SyntaxKind::MathAttach, SyntaxKind::Hat, ast::Assoc::Right, 2))
+        // Revert to old behaviour:
+        // old: f_i(x) = f_i (x)  f_abs(x) = f_abs (x)  - 3 (usize)
+        // cur: f_i(x) = f_(i(x)) f_abs(x) = f_(abs(x)) - 2 (usize)
+        SyntaxKind::Underscore | SyntaxKind::Subscript => {
+            Some((SyntaxKind::MathAttach, SyntaxKind::Hat, ast::Assoc::Right, 3))
         }
-        SyntaxKind::Hat => {
-            Some((SyntaxKind::MathAttach, SyntaxKind::Underscore, ast::Assoc::Right, 2))
+        SyntaxKind::Hat | SyntaxKind::Superscript => {
+            Some((SyntaxKind::MathAttach, SyntaxKind::Underscore, ast::Assoc::Right, 3))
         }
         SyntaxKind::Slash => {
             Some((SyntaxKind::MathFrac, SyntaxKind::End, ast::Assoc::Left, 1))
         }
         _ => None,
-    }
-}
-
-fn math_args(p: &mut Parser) {
-    let m = p.marker();
-    p.convert(SyntaxKind::LeftParen);
-
-    let mut namable = true;
-    let mut named = None;
-    let mut has_arrays = false;
-    let mut array = p.marker();
-    let mut arg = p.marker();
-
-    while !p.end() && !p.at(SyntaxKind::Dollar) {
-        if namable
-            && (p.at(SyntaxKind::MathIdent) || p.at(SyntaxKind::Text))
-            && p.text[p.current_end()..].starts_with(':')
-        {
-            p.convert(SyntaxKind::Ident);
-            p.convert(SyntaxKind::Colon);
-            named = Some(arg);
-            arg = p.marker();
-            array = p.marker();
-        }
-
-        match p.current_text() {
-            ")" => break,
-            ";" => {
-                maybe_wrap_in_math(p, arg, named);
-                p.wrap(array, SyntaxKind::Array);
-                p.convert(SyntaxKind::Semicolon);
-                array = p.marker();
-                arg = p.marker();
-                namable = true;
-                named = None;
-                has_arrays = true;
-                continue;
-            }
-            "," => {
-                maybe_wrap_in_math(p, arg, named);
-                p.convert(SyntaxKind::Comma);
-                arg = p.marker();
-                namable = true;
-                if named.is_some() {
-                    array = p.marker();
-                    named = None;
-                }
-                continue;
-            }
-            _ => {}
-        }
-
-        if p.at_set(set::MATH_EXPR) {
-            math_expr(p);
-        } else {
-            p.unexpected();
-        }
-
-        namable = false;
-    }
-
-    if arg != p.marker() {
-        maybe_wrap_in_math(p, arg, named);
-        if named.is_some() {
-            array = p.marker();
-        }
-    }
-
-    if has_arrays && array != p.marker() {
-        p.wrap(array, SyntaxKind::Array);
-    }
-
-    if p.at(SyntaxKind::Text) && p.current_text() == ")" {
-        p.convert(SyntaxKind::RightParen);
-    } else {
-        p.expected("closing paren");
-        p.balanced = false;
-    }
-
-    p.wrap(m, SyntaxKind::Args);
-}
-
-/// Wrap math function arguments in a "Math" SyntaxKind to combine adjacent expressions
-/// or create blank content.
-///
-/// We don't wrap when `exprs == 1`, as there is only one expression, so the grouping
-/// isn't needed, and this would change the type of the expression from potentially
-/// non-content to content.
-///
-/// Note that `exprs` might be 0 if we have whitespace or trivia before a comma i.e.
-/// `mat(; ,)` or `sin(x, , , ,)`. This would create an empty Math element before that
-/// trivia if we called `p.wrap()` -- breaking the expected AST for 2-d arguments -- so
-/// we instead manually wrap to our current marker using `p.wrap_within()`.
-fn maybe_wrap_in_math(p: &mut Parser, arg: Marker, named: Option<Marker>) {
-    let exprs = p.post_process(arg).filter(|node| node.is::<ast::Expr>()).count();
-    if exprs != 1 {
-        // Convert 0 exprs into a blank math element (so empty arguments are allowed).
-        // Convert 2+ exprs into a math element (so they become a joined sequence).
-        p.wrap_within(arg, p.marker(), SyntaxKind::Math);
-    }
-
-    if let Some(m) = named {
-        p.wrap(m, SyntaxKind::Named);
     }
 }
 
