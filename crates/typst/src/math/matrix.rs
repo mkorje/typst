@@ -11,8 +11,8 @@ use crate::layout::{
 };
 use crate::math::{
     alignments, scaled_font_size, stack, style_for_denominator, AlignmentResult,
-    FrameFragment, GlyphFragment, LayoutMath, LeftRightAlternator, MathContext, Scaled,
-    DELIM_SHORT_FALL,
+    FrameFragment, GlyphFragment, LayoutMath, LeftRightAlternator, MathContext,
+    MathFragment, Scaled, DELIM_SHORT_FALL,
 };
 use crate::symbols::Symbol;
 use crate::syntax::{Span, Spanned};
@@ -22,6 +22,7 @@ use crate::visualize::{FillRule, FixedStroke, Geometry, LineCap, Shape, Stroke};
 
 use super::delimiter_alignment;
 
+const DEFAULT_DELIM_GAP: Em = Em::new(0.16667);
 const DEFAULT_ROW_GAP: Em = Em::new(0.2);
 const DEFAULT_COL_GAP: Em = Em::new(0.5);
 const VERTICAL_PADDING: Ratio = Ratio::new(0.1);
@@ -46,6 +47,16 @@ pub struct VecElem {
     /// ```
     #[default(DelimiterPair::PAREN)]
     pub delim: DelimiterPair,
+
+    /// The gap between the delimiters and the elements.
+    ///
+    /// ```example
+    /// #set math.vec(delim-gap: 1em)
+    /// $ vec(1, 2) $
+    /// ```
+    #[resolve]
+    #[default(DEFAULT_DELIM_GAP.into())]
+    pub delim_gap: Rel<Length>,
 
     /// The gap between elements.
     ///
@@ -75,7 +86,15 @@ impl LayoutMath for Packed<VecElem> {
             LeftRightAlternator::Right,
         )?;
 
-        layout_delimiters(ctx, styles, frame, delim.open(), delim.close(), self.span())
+        layout_delimiters(
+            ctx,
+            styles,
+            frame,
+            delim.open(),
+            delim.close(),
+            self.delim_gap(styles),
+            self.span(),
+        )
     }
 }
 
@@ -108,6 +127,16 @@ pub struct MatElem {
     /// ```
     #[default(DelimiterPair::PAREN)]
     pub delim: DelimiterPair,
+
+    /// The gap between the delimiters and the cells.
+    ///
+    /// ```example
+    /// #set math.mat(delim-gap: 1em)
+    /// $ mat(1, 2; 3, 4) $
+    /// ```
+    #[resolve]
+    #[default(DEFAULT_DELIM_GAP.into())]
+    pub delim_gap: Rel<Length>,
 
     /// Draws augmentation lines in a matrix.
     ///
@@ -254,7 +283,15 @@ impl LayoutMath for Packed<MatElem> {
             self.span(),
         )?;
 
-        layout_delimiters(ctx, styles, frame, delim.open(), delim.close(), self.span())
+        layout_delimiters(
+            ctx,
+            styles,
+            frame,
+            delim.open(),
+            delim.close(),
+            self.delim_gap(styles),
+            self.span(),
+        )
     }
 }
 
@@ -281,6 +318,16 @@ pub struct CasesElem {
     /// ```
     #[default(DelimiterPair::BRACE)]
     pub delim: DelimiterPair,
+
+    /// The gap between the delimiter and the branches.
+    ///
+    /// ```example
+    /// #set math.cases(delim-gap: 1em)
+    /// $ x = cases(1, 2) $
+    /// ```
+    #[resolve]
+    #[default(DEFAULT_DELIM_GAP.into())]
+    pub delim_gap: Rel<Length>,
 
     /// Whether the direction of cases should be reversed.
     ///
@@ -325,7 +372,15 @@ impl LayoutMath for Packed<CasesElem> {
             (delim.open(), None)
         };
 
-        layout_delimiters(ctx, styles, frame, open, close, self.span())
+        layout_delimiters(
+            ctx,
+            styles,
+            frame,
+            open,
+            close,
+            self.delim_gap(styles),
+            self.span(),
+        )
     }
 }
 
@@ -611,8 +666,10 @@ fn layout_delimiters(
     mut frame: Frame,
     left: Option<char>,
     right: Option<char>,
+    padding: Rel<Abs>,
     span: Span,
 ) -> SourceResult<()> {
+    let gap = padding.relative_to(ctx.region.size.x);
     let font_size = scaled_font_size(ctx, styles);
     let short_fall = DELIM_SHORT_FALL.at(font_size);
     let axis = ctx.constants.axis_height().scaled(ctx, font_size);
@@ -625,6 +682,7 @@ fn layout_delimiters(
             .stretch_vertical(ctx, target, short_fall);
         left.align_on_axis(ctx, delimiter_alignment(left.c));
         ctx.push(left);
+        ctx.push(MathFragment::Spacing(gap, false));
     }
 
     ctx.push(FrameFragment::new(ctx, styles, frame));
@@ -633,6 +691,7 @@ fn layout_delimiters(
         let mut right = GlyphFragment::new(ctx, styles, right, span)
             .stretch_vertical(ctx, target, short_fall);
         right.align_on_axis(ctx, delimiter_alignment(right.c));
+        ctx.push(MathFragment::Spacing(gap, false));
         ctx.push(right);
     }
 

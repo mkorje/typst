@@ -4,6 +4,9 @@
 #set math.vec(gap: 1em)
 $ vec(1, 2) $
 
+--- math-vec-delim-gap ---
+#set math.vec(delim-gap: 1em)
+$ vec(1, 2) $
 
 --- math-vec-align-explicit-alternating ---
 // Test alternating alignment in a vector.

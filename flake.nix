@@ -109,6 +109,9 @@
           packages = with pkgs; [
             rustc
             cargo
+            clippy
+            rustfmt
+            cargo-watch
           ];
 
           buildInputs = (lib.optionals pkgs.stdenv.isDarwin [
