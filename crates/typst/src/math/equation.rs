@@ -5,7 +5,7 @@ use unicode_math_class::MathClass;
 use crate::diag::{bail, SourceResult};
 use crate::engine::Engine;
 use crate::foundations::{
-    elem, Content, NativeElement, Packed, Resolve, Show, ShowSet, Smart, StyleChain,
+    elem, Args, Construct, Content, NativeElement, Packed, Resolve, Set, Show, ShowSet, Smart, StyleChain,
     Styles, Synthesize,
 };
 use crate::introspection::{Count, Counter, CounterUpdate, Locatable, Locator};
@@ -48,7 +48,7 @@ use crate::World;
 /// least one space lifts it into a separate block that is centered
 /// horizontally. For more details about math syntax, see the
 /// [main math page]($category/math).
-#[elem(Locatable, Synthesize, Show, ShowSet, Count, LocalName, Refable, Outlinable)]
+#[elem(Construct, Locatable, Synthesize, Show, ShowSet, Count, LocalName, Refable, Outlinable)]
 pub struct EquationElem {
     /// Whether the equation is displayed as a separate block.
     #[default(false)]
@@ -108,37 +108,48 @@ pub struct EquationElem {
     pub body: Content,
 
     /// The size of the glyphs.
-    #[internal]
+    // #[internal]
     #[default(MathSize::Text)]
     #[ghost]
     pub size: MathSize,
 
     /// The style variant to select.
-    #[internal]
+    // #[internal]
     #[ghost]
     pub variant: MathVariant,
 
     /// Affects the height of exponents.
-    #[internal]
+    // #[internal]
     #[default(false)]
     #[ghost]
     pub cramped: bool,
 
     /// Whether to use bold glyphs.
-    #[internal]
+    // #[internal]
     #[default(false)]
     #[ghost]
     pub bold: bool,
 
     /// Whether to use italic glyphs.
-    #[internal]
+    // #[internal]
     #[ghost]
     pub italic: Smart<bool>,
 
     /// A forced class to use for all fragment.
-    #[internal]
+    // #[internal]
     #[ghost]
     pub class: Option<MathClass>,
+}
+
+impl Construct for EquationElem {
+    fn construct(engine: &mut Engine, args: &mut Args) -> SourceResult<Content> {
+        // The text constructor is special: It doesn't create a text element.
+        // Instead, it leaves the passed argument structurally unchanged, but
+        // styles all text in it.
+        let styles = Self::set(engine, args)?;
+        let body = args.expect::<Content>("body")?;
+        Ok(body.styled_with_map(styles))
+    }
 }
 
 impl Synthesize for Packed<EquationElem> {
