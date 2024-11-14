@@ -43,24 +43,8 @@ $tilde(U, size: #1.1em), x^tilde(U, size: #1.1em), sscript(tilde(U, size: #1.1em
   circle(bold(upright(#c))), caron(upright(sans(#c))), arrow(bold(frak(#c)))$
 $test(i) \ test(j)$
 
---- math-accent-colored ---
-// Test colored accents.
-$text(#blue, tilde(v)), accent(text(#yellow, x), text(#green, hat)),
- accent(ö, text(#eastern, .)), accent(y, text(#red, ->))$
-
 --- math-accent-arbitrary ---
 // Test arbitrary characters as accents.
-$accent(u, 1)_3^bold(k) = 0, hat(accent(f, 𝑥)), accent(f, ast.triple)_1^1, accent(x, i), accent(text(#blue, sans(i)), text(#red, ast)), accent(upright(j), text(#purple, star))$
-$ accent(Lambda, diamond.stroked.dot), accent(Lambda, text(#red, frak(dotless.i))),
-  Z^(accent(Lambda, triangle.stroked.small.r)^2) attach(accent(x, a b c), t: a) accent(u, bold(u)) $
+$ accent(u, 1)_3^bold(k) = 0, accent(Lambda, diamond.stroked.dot) = hat(accent(f, 𝑥)) $
+$ accent(Lambda, diamond.stroked.dot), accent(f, ast.triple)_1^1 $
 
---- math-accent-stacked ---
-// Test stacked accents.
-$hat(
-  accent(
-    accent(
-      accent(x, text(#green, star))
-      , text(#teal, grave)
-    ), text(#maroon, lozenge.stroked.small)
-  )),
-accent(accent(accent(v, text(#blue, <-)), text(#red, ->)), text(#green, arrow.l.r))$

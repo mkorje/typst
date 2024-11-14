@@ -1,8 +1,9 @@
-use crate::diag::bail;
-use crate::foundations::{cast, elem, func, Content, NativeElement, Smart, Value};
+use crate::foundations::{cast, elem, func, Content, NativeElement, Smart};
 use crate::layout::{Length, Rel};
-use crate::math::Mathy;
+use crate::math::{EquationElem, Mathy};
 use crate::text::TextElem;
+
+use finl_unicode::categories::CharacterCategories;
 
 /// Attaches an accent to a base.
 ///
@@ -10,7 +11,8 @@ use crate::text::TextElem;
 /// ```example
 /// $grave(a) = accent(a, `)$ \
 /// $arrow(a) = accent(a, arrow)$ \
-/// $tilde(a) = accent(a, \u{0303})$
+/// $tilde(a) = accent(a, \u{0303})$ \
+/// $accent(a, 1), accent(a, text(#red, .))$
 /// ```
 #[elem(Mathy)]
 pub struct AccentElem {
@@ -25,7 +27,8 @@ pub struct AccentElem {
 
     /// The accent to apply to the base.
     ///
-    /// Supported accents include:
+    /// Supported accents are listed below, but you can also pass arbitrary
+    /// content to be used as the accent.
     ///
     /// | Accent        | Name            | Codepoint |
     /// | ------------- | --------------- | --------- |
@@ -56,13 +59,46 @@ pub struct AccentElem {
 }
 
 /// An accent character.
-#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Hash)]
-pub struct Accent(pub char);
+#[derive(Debug, Clone, PartialEq, Hash)]
+pub struct Accent {
+    /// The content which makes up the accent.
+    pub accent: Content,
+    /// Whether the accent is a character with the Unicode General Category M.
+    pub is_mark: bool,
+}
 
 impl Accent {
-    /// Normalize a character into an accent.
-    pub fn new(c: char) -> Self {
-        Self(Self::combine(c).unwrap_or(c))
+    /// Create a new accent.
+    pub fn new(c: Content) -> Self {
+        // Extract from an EquationElem.
+        let mut accent = if let Some(equation) = c.to_packed::<EquationElem>() {
+            equation.body()
+        } else {
+            &c
+        }
+        .clone();
+
+        let is_mark = Self::normalize(&mut accent);
+
+        Self { accent, is_mark }
+    }
+
+    // Normalize a character into an accent.
+    // Returns whether the accent is a character with the Unicode General
+    // Category M.
+    fn normalize(accent: &mut Content) -> bool {
+        let mut is_mark = false;
+        if let Some(elem) = accent.styled_child().to_packed_mut::<TextElem>() {
+            let text = elem.text();
+            if text.chars().count() == 1 {
+                let mut c = text.chars().next().unwrap();
+                c = Self::combine(c).unwrap_or(c);
+                is_mark = c.is_mark();
+                elem.text = c.into();
+            }
+        }
+
+        is_mark
     }
 }
 
@@ -103,7 +139,7 @@ macro_rules! accents {
                 #[named]
                 size: Option<Smart<Rel<Length>>>,
             ) -> Content {
-                let mut accent = AccentElem::new(base, Accent::new($primary));
+                let mut accent = AccentElem::new(base, Accent::new(TextElem::packed($primary)));
                 if let Some(size) = size {
                     accent = accent.with_size(size);
                 }
@@ -138,10 +174,7 @@ accents! {
 
 cast! {
     Accent,
-    self => self.0.into_value(),
-    v: char => Self::new(v),
-    v: Content => match v.to_packed::<TextElem>() {
-        Some(elem) => Value::Str(elem.text().clone().into()).cast()?,
-        None => bail!("expected text"),
-    },
+    self => self.accent.into_value(),
+    v: char => Self::new(TextElem::packed(v)),
+    v: Content => Self::new(v),
 }

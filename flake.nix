@@ -133,6 +133,7 @@
             (pkgs.writeShellScriptBin "testit" ''
               cargo test --workspace --test tests -- "$@"
             '')
+            pkgs.typos
           ];
         };
       };

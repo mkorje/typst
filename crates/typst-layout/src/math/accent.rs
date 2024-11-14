@@ -1,15 +1,18 @@
 use typst_library::diag::SourceResult;
 use typst_library::foundations::{Packed, StyleChain};
 use typst_library::layout::{Em, Frame, Point, Rel, Size};
-use typst_library::math::{Accent, AccentElem};
-
-use super::{
-    scaled_font_size, style_cramped, FrameFragment, GlyphFragment, MathContext,
-    MathFragment,
+use typst_library::math::{Accent, AccentElem, EquationElem, MathSize};
+use typst_library::text::{
+    TextElem, TextSize,
 };
+
+use super::{scaled_font_size, style_cramped, FrameFragment, MathContext, MathFragment};
 
 /// How much the accent can be shorter than the base.
 const ACCENT_SHORT_FALL: Em = Em::new(0.5);
+
+// The gap between the base and an arbitrary character as the accent.
+const ACCENT_GAP: Em = Em::new(0.15);
 
 /// Lays out an [`AccentElem`].
 #[typst_macros::time(name = "math.accent", span = elem.span())]
@@ -36,28 +39,46 @@ pub fn layout_accent(
         .at(scaled_font_size(ctx, styles))
         .relative_to(base.width());
 
-    let Accent(c) = elem.accent();
-    let mut glyph = GlyphFragment::new(ctx, styles, *c, elem.span());
+    let Accent { accent: c, is_mark } = elem.accent();
+    let (accent, accent_attach, gap) = if *is_mark {
+        // Standard accent layout for characters with the General Category M.
+        let MathFragment::Glyph(mut glyph) = ctx.layout_into_fragment(c, styles)? else {
+            unreachable!()
+        };
 
-    // Try to replace accent glyph with flattened variant.
-    let flattened_base_height = scaled!(ctx, styles, flattened_accent_base_height);
-    if base.height() > flattened_base_height {
-        glyph.make_flattened_accent_form(ctx);
-    }
+        // Try to replace accent glyph with flattened variant.
+        let flattened_base_height = scaled!(ctx, styles, flattened_accent_base_height);
+        if base.height() > flattened_base_height {
+            glyph.make_flattened_accent_form(ctx);
+        }
 
-    // Forcing the accent to be at least as large as the base makes it too
-    // wide in many case.
-    let short_fall = ACCENT_SHORT_FALL.at(glyph.font_size);
-    let variant = glyph.stretch_horizontal(ctx, width, short_fall);
-    let accent = variant.frame;
-    let accent_attach = variant.accent_attach;
+        // Forcing the accent to be at least as large as the base makes it too
+        // wide in many case.
+        let short_fall = ACCENT_SHORT_FALL.at(glyph.font_size);
+        let variant = glyph.stretch_horizontal(ctx, width, short_fall);
+        let accent = variant.frame;
+        let accent_attach = variant.accent_attach;
 
-    // Descent is negative because the accent's ink bottom is above the
-    // baseline. Therefore, the default gap is the accent's negated descent
-    // minus the accent base height. Only if the base is very small, we need
-    // a larger gap so that the accent doesn't move too low.
-    let accent_base_height = scaled!(ctx, styles, accent_base_height);
-    let gap = -accent.descent() - base.height().min(accent_base_height);
+        // Descent is negative because the accent's ink bottom is above the
+        // baseline. Therefore, the default gap is the accent's negated descent
+        // minus the accent base height. Only if the base is very small, we need
+        // a larger gap so that the accent doesn't move too low.
+        let accent_base_height = scaled!(ctx, styles, accent_base_height);
+        let gap = -accent.descent() - base.height().min(accent_base_height);
+
+        (accent, accent_attach, gap)
+    } else {
+        // Alternate layout to allow for arbitrary characters as accents.
+        let sscript_style = EquationElem::set_size(MathSize::ScriptScript).wrap();
+        let style = TextElem::set_size(TextSize(scaled_font_size(ctx, styles.chain(&sscript_style)).into())).wrap();
+        let style_chain = styles.chain(&style);
+        let accent = ctx.layout_into_fragment(c, style_chain)?;
+        let accent_attach = accent.accent_attach();
+        let gap = ACCENT_GAP.at(scaled_font_size(ctx, style_chain));
+
+        (accent.into_frame(), accent_attach, gap)
+    };
+
     let size = Size::new(base.width(), accent.height() + gap + base.height());
     let accent_pos = Point::with_x(base_attach - accent_attach);
     let base_pos = Point::with_y(accent.height() + gap);

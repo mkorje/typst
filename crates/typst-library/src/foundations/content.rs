@@ -372,6 +372,15 @@ impl Content {
         Self::sequence(std::iter::repeat_with(|| self.clone()).take(count))
     }
 
+    /// Retrieve styled content's child (the content alone).
+    pub fn styled_child(&mut self) -> &mut Content {
+        if self.is::<StyledElem>() {
+            let styled_elem = self.to_packed_mut::<StyledElem>().unwrap();
+            return &mut styled_elem.child;
+        }
+        self
+    }
+
     /// Style this content with a style entry.
     pub fn styled(mut self, style: impl Into<Style>) -> Self {
         if let Some(style_elem) = self.to_packed_mut::<StyledElem>() {
