@@ -17,7 +17,9 @@ use rustybuzz::Feature;
 use ttf_parser::Tag;
 use typst_library::diag::{bail, SourceResult};
 use typst_library::engine::Engine;
-use typst_library::foundations::{Content, NativeElement, Packed, Resolve, StyleChain};
+use typst_library::foundations::{
+    select_where, Content, NativeElement, Packed, Resolve, Selector, StyleChain,
+};
 use typst_library::introspection::{Counter, Locator, SplitLocator, TagElem};
 use typst_library::layout::{
     Abs, AlignElem, Axes, BlockElem, BoxElem, Em, FixedAlignment, Fragment, Frame, HElem,
@@ -39,7 +41,7 @@ use unicode_math_class::MathClass;
 use self::fragment::{
     FrameFragment, GlyphFragment, GlyphwiseSubsts, Limits, MathFragment, VariantFragment,
 };
-use self::run::{LeftRightAlternator, MathRun, MathRunFrameBuilder};
+use self::run::{LeftRightAlternator, MathRun, MathRunEquation, MathRunFrameBuilder};
 use self::shared::*;
 use self::stretch::{stretch_fragment, stretch_glyph};
 
@@ -110,9 +112,13 @@ pub fn layout_equation_block(
 
     let mut locator = locator.split();
     let mut ctx = MathContext::new(engine, &mut locator, styles, regions.base(), &font);
-    let full_equation_builder = ctx
-        .layout_into_run(&elem.body, styles)?
-        .multiline_frame_builder(&ctx, styles);
+
+    let equations = ctx.collect_equations(elem, styles)?;
+    let full_equation_builder = equations.multiequation_frame_builder(&ctx, styles);
+
+    // let full_equation_builder = ctx
+    //     .layout_into_run(&elem.body, styles)?
+    //     .multiline_frame_builder(&ctx, styles);
     let width = full_equation_builder.size.x;
 
     let equation_builders = if BlockElem::breakable_in(styles) {
@@ -436,6 +442,41 @@ impl<'a, 'v, 'e> MathContext<'a, 'v, 'e> {
     /// Push multiple fragments.
     fn extend(&mut self, fragments: impl IntoIterator<Item = MathFragment>) {
         self.fragments.extend(fragments);
+    }
+
+    /// Collect all equations with the same label as elem together.
+    fn collect_equations(
+        &mut self,
+        elem: &Packed<EquationElem>,
+        styles: StyleChain,
+    ) -> SourceResult<MathRunEquation> {
+        let equations = if let Some(label) = elem.label() {
+            let target = Selector::And(
+                [Selector::Label(label), select_where!(EquationElem, Block => true)]
+                    .into_iter()
+                    .collect(),
+            );
+
+            self.engine
+                .introspector
+                .query(&target)
+                .into_iter()
+                .map(|x| x.into_packed::<EquationElem>().unwrap())
+                .collect()
+        } else {
+            vec![elem.clone()]
+        };
+
+        let mut runs: Vec<MathRun> = Vec::new();
+        let mut index: usize = 0;
+        for (i, equation) in equations.into_iter().enumerate() {
+            if equation == *elem {
+                index = i;
+            }
+            runs.push(self.layout_into_run(&equation.body, styles)?);
+        }
+
+        Ok(MathRunEquation { runs, index })
     }
 
     /// Layout the given element and return the result as a [`MathRun`].

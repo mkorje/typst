@@ -201,6 +201,7 @@ pub fn alignments(rows: &[MathRun]) -> AlignmentResult {
     }
 }
 
+#[derive(Debug)]
 pub struct AlignmentResult {
     pub points: Vec<Abs>,
     pub width: Abs,

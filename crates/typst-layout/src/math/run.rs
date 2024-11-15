@@ -6,9 +6,83 @@ use typst_library::math::{EquationElem, MathSize, MEDIUM, THICK, THIN};
 use typst_library::model::ParElem;
 use unicode_math_class::MathClass;
 
-use super::{alignments, scaled_font_size, FrameFragment, MathContext, MathFragment};
+use super::{
+    alignments, scaled_font_size, AlignmentResult, FrameFragment, MathContext,
+    MathFragment,
+};
 
 const TIGHT_LEADING: Em = Em::new(0.25);
+
+/// A set of MathRuns that make up an equation.
+#[derive(Debug, Default, Clone)]
+pub struct MathRunEquation {
+    /// All of the MathRuns that make up the equation.
+    pub runs: Vec<MathRun>,
+    /// The index of the MathRun in runs that is being laid out.
+    pub index: usize,
+}
+
+impl MathRunEquation {
+    /// Returns the alignments for the whole equation.
+    fn alignments(&self) -> AlignmentResult {
+        let mut rows = vec![];
+        for run in &self.runs {
+            rows.extend(run.rows());
+        }
+        alignments(&rows)
+    }
+
+    /// Returns a builder that lays out the [`MathFragment`]s into a possibly
+    /// multi-row [`Frame`]. The rows are aligned using the same set of alignment
+    /// points computed from all linked equations as a whole.
+    pub fn multiequation_frame_builder(
+        self,
+        ctx: &MathContext,
+        styles: StyleChain,
+    ) -> MathRunFrameBuilder {
+        let alignments = self.alignments();
+
+        let leading = if EquationElem::size_in(styles) >= MathSize::Text {
+            ParElem::leading_in(styles)
+        } else {
+            let font_size = scaled_font_size(ctx, styles);
+            TIGHT_LEADING.at(font_size)
+        };
+
+        let align = AlignElem::alignment_in(styles).resolve(styles).x;
+        let mut frames: Vec<(Frame, Point)> = vec![];
+        let mut size = Size::zero();
+
+        for (i, equation) in self.runs.into_iter().enumerate() {
+            let rows: Vec<_> = equation.rows();
+            let row_count = rows.len();
+            for (j, row) in rows.into_iter().enumerate() {
+                if j == row_count - 1 && row.0.is_empty() {
+                    continue;
+                }
+
+                let sub =
+                    row.into_line_frame(&alignments.points, LeftRightAlternator::Right);
+                size.x.set_max(sub.width());
+
+                if i == self.index {
+                    if j > 0 {
+                        size.y += leading;
+                    }
+
+                    let mut pos = Point::with_y(size.y);
+                    if alignments.points.is_empty() {
+                        pos.x = align.position(alignments.width - sub.width());
+                    }
+                    size.y += sub.height();
+                    frames.push((sub, pos));
+                }
+            }
+        }
+
+        MathRunFrameBuilder { size, frames }
+    }
+}
 
 /// A linear collection of [`MathFragment`]s.
 #[derive(Debug, Default, Clone)]
