@@ -6,7 +6,7 @@ use unicode_math_class::MathClass;
 use crate::diag::SourceResult;
 use crate::engine::Engine;
 use crate::foundations::{
-    elem, Content, NativeElement, Packed, Show, ShowSet, Smart, StyleChain, Styles,
+    elem, Cast, Content, NativeElement, Packed, Show, ShowSet, Smart, StyleChain, Styles,
     Synthesize,
 };
 use crate::introspection::{Count, Counter, CounterUpdate, Locatable};
@@ -63,6 +63,14 @@ pub struct EquationElem {
     /// ```
     #[borrowed]
     pub numbering: Option<Numbering>,
+
+    /// How to number equations.
+    ///
+    /// ```example
+    ///
+    /// ```
+    #[default(NumberingMode::Equation)]
+    pub numbering_mode: NumberingMode,
 
     /// The alignment of the equation numbering.
     ///
@@ -253,4 +261,20 @@ impl Outlinable for Packed<EquationElem> {
 
         Ok(Some(supplement + numbers))
     }
+}
+
+/// How to number equations.
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Hash, Cast)]
+pub enum NumberingMode {
+    /// Every equation is numbered.
+    #[default]
+    Equation,
+    /// Every line is numbered.
+    Line,
+    /// Only labelled equations or labelled lines have a number. If both a line
+    /// and an equation have a label, then subnumbering is enabled.
+    Label,
+    /// Only equations that are referenced in the document are numbered.
+    /// Otherwise, this has the same logic as NumberingMode::Label.
+    Reference,
 }
