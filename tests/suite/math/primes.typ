@@ -27,17 +27,17 @@ $a' = a^', a_', a_'''^''^'$
 $ x' $
 $ x^' $
 $ attach(x, t: ') $
-$ <' $
-$ attach(<, br: ') $
-$ op(<, limits: #true)' $
-$ limits(<)' $
+$ \<' $
+$ attach(\<, br: ') $
+$ op(\<, limits: #true)' $
+$ limits(\<)' $
 
 --- math-primes-limits ---
 // Test forcefully attaching primes as limits
-$ attach(<, t: ') $
-$ <^' $
-$ attach(<, b: ') $
-$ <_' $
+$ attach(\<, t: ') $
+$ \<^' $
+$ attach(\<, b: ') $
+$ \<_' $
 
 $ limits(x)^' $
 $ attach(limits(x), t: ') $

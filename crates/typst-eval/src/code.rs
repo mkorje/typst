@@ -87,6 +87,7 @@ impl Eval for ast::Expr<'_> {
             Self::Emph(v) => v.eval(vm).map(Value::Content),
             Self::Raw(v) => v.eval(vm).map(Value::Content),
             Self::Link(v) => v.eval(vm).map(Value::Content),
+            Self::NoLabel(v) => v.eval(vm),
             Self::Label(v) => v.eval(vm),
             Self::Ref(v) => v.eval(vm).map(Value::Content),
             Self::Heading(v) => v.eval(vm).map(Value::Content),

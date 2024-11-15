@@ -200,6 +200,14 @@ impl Eval for ast::Link<'_> {
     }
 }
 
+impl Eval for ast::NoLabel<'_> {
+    type Output = Value;
+
+    fn eval(self, _: &mut Vm) -> SourceResult<Self::Output> {
+        Ok(Value::Label(Label::new("*")))
+    }
+}
+
 impl Eval for ast::Label<'_> {
     type Output = Value;
 

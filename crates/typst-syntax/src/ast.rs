@@ -107,6 +107,9 @@ pub enum Expr<'a> {
     Raw(Raw<'a>),
     /// A hyperlink: `https://typst.org`.
     Link(Link<'a>),
+    /// A do not label marker: `<*>`.
+    /// For now, this is only used in Math.
+    NoLabel(NoLabel<'a>),
     /// A label: `<intro>`.
     Label(Label<'a>),
     /// A reference: `@target`, `@target[..]`.
@@ -225,6 +228,7 @@ impl<'a> AstNode<'a> for Expr<'a> {
             SyntaxKind::Emph => node.cast().map(Self::Emph),
             SyntaxKind::Raw => node.cast().map(Self::Raw),
             SyntaxKind::Link => node.cast().map(Self::Link),
+            SyntaxKind::NoLabel => node.cast().map(Self::NoLabel),
             SyntaxKind::Label => node.cast().map(Self::Label),
             SyntaxKind::Ref => node.cast().map(Self::Ref),
             SyntaxKind::Heading => node.cast().map(Self::Heading),
@@ -289,6 +293,7 @@ impl<'a> AstNode<'a> for Expr<'a> {
             Self::Emph(v) => v.to_untyped(),
             Self::Raw(v) => v.to_untyped(),
             Self::Link(v) => v.to_untyped(),
+            Self::NoLabel(v) => v.to_untyped(),
             Self::Label(v) => v.to_untyped(),
             Self::Ref(v) => v.to_untyped(),
             Self::Heading(v) => v.to_untyped(),
@@ -569,6 +574,12 @@ impl<'a> Link<'a> {
     pub fn get(self) -> &'a EcoString {
         self.0.text()
     }
+}
+
+node! {
+    /// A do not label marker: `<*>`.
+    // For now, this is only used in Math.
+    NoLabel
 }
 
 node! {

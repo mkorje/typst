@@ -46,6 +46,9 @@ pub enum SyntaxKind {
     RawTrimmed,
     /// A hyperlink: `https://typst.org`.
     Link,
+    /// A do not label marker: `<*>`.
+    /// For now, this is only used in Math.
+    NoLabel,
     /// A label: `<intro>`.
     Label,
     /// A reference: `@target`, `@target[..]`.
@@ -388,6 +391,7 @@ impl SyntaxKind {
             Self::RawTrimmed => "raw trimmed",
             Self::RawDelim => "raw delimiter",
             Self::Link => "link",
+            Self::NoLabel => "do not label",
             Self::Label => "label",
             Self::Ref => "reference",
             Self::RefMarker => "reference marker",
