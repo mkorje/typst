@@ -106,6 +106,7 @@ pub const ATOMIC_CODE_PRIMARY: SyntaxSet = syntax_set!(
     Bool,
     Numeric,
     Str,
+    NoLabel,
     Label,
     Raw,
 );

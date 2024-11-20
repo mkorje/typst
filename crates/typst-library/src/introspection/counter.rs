@@ -324,7 +324,7 @@ impl Counter {
             }
 
             if let Some(update) = match elem.with::<dyn Count>() {
-                Some(countable) => countable.update(),
+                Some(countable) => countable.update(&mut engine),
                 None => Some(CounterUpdate::Step(NonZeroUsize::ONE)),
             } {
                 state.update(&mut engine, update)?;
@@ -651,7 +651,7 @@ cast! {
 /// Elements that have special counting behaviour.
 pub trait Count {
     /// Get the counter update for this element.
-    fn update(&self) -> Option<CounterUpdate>;
+    fn update(&self, engine: &mut Engine) -> Option<CounterUpdate>;
 }
 
 /// Counts through elements with different levels.
@@ -748,7 +748,7 @@ impl Show for Packed<CounterUpdateElem> {
 }
 
 impl Count for Packed<CounterUpdateElem> {
-    fn update(&self) -> Option<CounterUpdate> {
+    fn update(&self, _: &mut Engine) -> Option<CounterUpdate> {
         Some(self.update.clone())
     }
 }

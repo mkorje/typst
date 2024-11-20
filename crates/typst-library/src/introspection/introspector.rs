@@ -12,6 +12,7 @@ use crate::diag::{bail, StrResult};
 use crate::foundations::{Content, Label, Repr, Selector};
 use crate::introspection::{Location, Tag};
 use crate::layout::{Frame, FrameItem, Page, Point, Position, Transform};
+use crate::math::EquationElem;
 use crate::model::Numbering;
 
 /// Can be queried for elements and their positions.
@@ -226,6 +227,28 @@ impl Introspector {
             [idx] => Ok(self.get_by_idx(idx)),
             [] => bail!("label `{}` does not exist in the document", label.repr()),
             _ => bail!("label `{}` occurs multiple times in the document", label.repr()),
+        }
+    }
+
+    /// Query for a unique element with the label, except for equations, where
+    /// the first element with the label is returned.
+    /// This is used in references.
+    pub fn query_label_ref(&self, label: Label) -> StrResult<Content> {
+        let selector = Selector::Label(label);
+        let query = self.query(&selector);
+        match query.len() {
+            0 => bail!("label `{}` does not exist in the document", label.repr()),
+            1 => Ok(query[0].clone()),
+            _ => {
+                if query.clone().into_iter().all(|x| x.is::<EquationElem>()) {
+                    Ok(query[0].clone())
+                } else {
+                    bail!(
+                        "label `{}` occurs multiple times in the document",
+                        label.repr()
+                    )
+                }
+            }
         }
     }
 

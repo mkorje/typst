@@ -94,6 +94,7 @@ fn markup_expr(p: &mut Parser, at_start: bool) {
         | SyntaxKind::Shorthand
         | SyntaxKind::SmartQuote
         | SyntaxKind::Link
+        | SyntaxKind::NoLabel
         | SyntaxKind::Label => p.eat(),
 
         SyntaxKind::Raw => p.eat(), // Raw is handled entirely in the Lexer.
@@ -147,7 +148,7 @@ fn heading(p: &mut Parser) {
     p.with_nl_mode(AtNewline::Stop, |p| {
         let m = p.marker();
         p.assert(SyntaxKind::HeadingMarker);
-        markup(p, false, false, syntax_set!(Label, RightBracket, End));
+        markup(p, false, false, syntax_set!(NoLabel, Label, RightBracket, End));
         p.wrap(m, SyntaxKind::Heading);
     });
 }
@@ -581,7 +582,7 @@ fn code_exprs(p: &mut Parser, stop_set: SyntaxSet) {
             code_expr(p);
             if !p.at_set(stop_set) && !p.eat_if(SyntaxKind::Semicolon) {
                 p.expected("semicolon or line break");
-                if p.at(SyntaxKind::Label) {
+                if p.at_set(syntax_set!(NoLabel, Label)) {
                     p.hint("labels can only be applied in markup mode");
                     p.hint("try wrapping your code in a markup block (`[ ]`)");
                 }
@@ -746,6 +747,7 @@ fn code_primary(p: &mut Parser, atomic: bool) {
         | SyntaxKind::Bool
         | SyntaxKind::Numeric
         | SyntaxKind::Str
+        | SyntaxKind::NoLabel
         | SyntaxKind::Label => p.eat(),
 
         _ => p.expected("expression"),

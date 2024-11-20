@@ -638,6 +638,7 @@ impl Lexer<'_> {
 impl Lexer<'_> {
     fn code(&mut self, start: usize, c: char) -> SyntaxKind {
         match c {
+            '<' if self.s.eat_if("*>") => SyntaxKind::NoLabel,
             '<' if self.s.at(is_id_continue) => self.label(),
             '0'..='9' => self.number(start, c),
             '.' if self.s.at(char::is_ascii_digit) => self.number(start, c),

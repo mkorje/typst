@@ -415,7 +415,7 @@ impl Construct for ParLineMarker {
 }
 
 impl Count for Packed<ParLineMarker> {
-    fn update(&self) -> Option<CounterUpdate> {
+    fn update(&self, _: &mut Engine) -> Option<CounterUpdate> {
         // The line counter must be updated manually by the root flow.
         None
     }

@@ -6,8 +6,8 @@ use unicode_math_class::MathClass;
 use crate::diag::SourceResult;
 use crate::engine::Engine;
 use crate::foundations::{
-    elem, Cast, Content, NativeElement, Packed, Show, ShowSet, Smart, StyleChain, Styles,
-    Synthesize,
+    elem, select_where, Cast, Content, Label, NativeElement, Packed, Selector, Show,
+    ShowSet, Smart, StyleChain, Styles, Synthesize,
 };
 use crate::introspection::{Count, Counter, CounterUpdate, Locatable};
 use crate::layout::{
@@ -111,6 +111,15 @@ pub struct EquationElem {
     #[required]
     pub body: Content,
 
+    /// Whether this is an equation created as a line within a block equation.
+    ///
+    /// This is used so that during realization we know not to unwrap this
+    /// nested EquationElem.
+    #[internal]
+    #[parse(None)]
+    #[default(false)]
+    pub line: bool,
+
     /// The size of the glyphs.
     #[internal]
     #[default(MathSize::Text)]
@@ -189,6 +198,8 @@ impl ShowSet for Packed<EquationElem> {
             out.set(BlockElem::set_breakable(false));
             out.set(ParLine::set_numbering(None));
             out.set(EquationElem::set_size(MathSize::Display));
+            // So line equations inherit the block-ness of their parent.
+            out.set(EquationElem::set_block(true));
         } else {
             out.set(EquationElem::set_size(MathSize::Text));
         }
@@ -201,9 +212,50 @@ impl ShowSet for Packed<EquationElem> {
 }
 
 impl Count for Packed<EquationElem> {
-    fn update(&self) -> Option<CounterUpdate> {
-        (self.block(StyleChain::default()) && self.numbering().is_some())
-            .then(|| CounterUpdate::Step(NonZeroUsize::ONE))
+    fn update(&self, engine: &mut Engine) -> Option<CounterUpdate> {
+        // (self.block(StyleChain::default()) && self.numbering().is_some())
+        //     .then(|| CounterUpdate::Step(NonZeroUsize::ONE))
+        if (**self).numbering(StyleChain::default()).is_none()
+            || !self.block(StyleChain::default())
+        {
+            return None;
+        }
+
+        match (**self).numbering_mode(StyleChain::default()) {
+            NumberingMode::Equation => {
+                // Don't step counter if there is a do no label marker `<*>`
+                // attached to it, or if this is not the first EquationElem
+                // with the given label.
+                if let Some(label) = self.label() {
+                    if label.as_str() == "*" {
+                        None
+                    } else {
+                        let equations = get_equations(engine, label);
+                        if *self != equations[0] {
+                            None
+                        } else {
+                            Some(CounterUpdate::Step(NonZeroUsize::ONE))
+                        }
+                    }
+                } else {
+                    Some(CounterUpdate::Step(NonZeroUsize::ONE))
+                }
+            }
+            NumberingMode::Line => {
+                // TODO
+                if let Some(label) = self.label() {
+                    if label.as_str() == "*" {
+                        None
+                    } else {
+                        Some(CounterUpdate::Step(NonZeroUsize::ONE))
+                    }
+                } else {
+                    Some(CounterUpdate::Step(NonZeroUsize::ONE))
+                }
+            }
+            NumberingMode::Label => todo!(),
+            NumberingMode::Reference => todo!(),
+        }
     }
 }
 
@@ -277,4 +329,19 @@ pub enum NumberingMode {
     /// Only equations that are referenced in the document are numbered.
     /// Otherwise, this has the same logic as NumberingMode::Label.
     Reference,
+}
+
+pub fn get_equations(engine: &mut Engine, label: Label) -> Vec<Packed<EquationElem>> {
+    let target = Selector::And(
+        [Selector::Label(label), select_where!(EquationElem, Block => true)]
+            .into_iter()
+            .collect(),
+    );
+
+    engine
+        .introspector
+        .query(&target)
+        .into_iter()
+        .map(|x| x.into_packed::<EquationElem>().unwrap())
+        .collect()
 }

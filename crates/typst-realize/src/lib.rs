@@ -282,9 +282,13 @@ fn visit_math_rules<'a>(
         // #let my = $pi$
         // $ my r^2 $
         // ```
+        // We don't recurse if the equation was created during eval to be a
+        // line in another equation.
         if let Some(elem) = content.to_packed::<EquationElem>() {
-            visit(s, &elem.body, styles)?;
-            return Ok(true);
+            if !elem.line(styles) {
+                visit(s, &elem.body, styles)?;
+                return Ok(true);
+            }
         }
 
         // In normal realization, we apply regex show rules to consecutive

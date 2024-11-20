@@ -18,7 +18,8 @@ use ttf_parser::Tag;
 use typst_library::diag::{bail, SourceResult};
 use typst_library::engine::Engine;
 use typst_library::foundations::{
-    select_where, Content, NativeElement, Packed, Resolve, Selector, StyleChain,
+    select_where, Content, NativeElement, Packed, Resolve, Selector, SequenceElem,
+    StyleChain,
 };
 use typst_library::introspection::{Counter, Locator, SplitLocator, TagElem};
 use typst_library::layout::{
@@ -27,7 +28,7 @@ use typst_library::layout::{
     SpecificAlignment, VAlignment,
 };
 use typst_library::math::*;
-use typst_library::model::ParElem;
+use typst_library::model::{Numbering, ParElem};
 use typst_library::routines::{Arenas, RealizationKind};
 use typst_library::text::{
     families, features, variant, Font, LinebreakElem, SpaceElem, TextEdgeBounds,
@@ -113,82 +114,15 @@ pub fn layout_equation_block(
     let mut locator = locator.split();
     let mut ctx = MathContext::new(engine, &mut locator, styles, regions.base(), &font);
 
-    let equations = ctx.collect_equations(elem, styles)?;
-    let full_equation_builder = equations.multiequation_frame_builder(&ctx, styles);
+    // Early exit if we are not numbering equations.
+    let Some(numbering) = elem.numbering(styles) else {
+        let full_equation_builder = ctx
+            .layout_into_run(&elem.body, styles)?
+            .multiline_frame_builder(&ctx, styles);
 
-    // let full_equation_builder = ctx
-    //     .layout_into_run(&elem.body, styles)?
-    //     .multiline_frame_builder(&ctx, styles);
-    let width = full_equation_builder.size.x;
+        let breakable = BlockElem::breakable_in(styles);
+        let equation_builders = full_equation_builder.region_split(breakable, regions);
 
-    let equation_builders = if BlockElem::breakable_in(styles) {
-        let mut rows = full_equation_builder.frames.into_iter().peekable();
-        let mut equation_builders = vec![];
-        let mut last_first_pos = Point::zero();
-        let mut regions = regions;
-
-        loop {
-            // Keep track of the position of the first row in this region,
-            // so that the offset can be reverted later.
-            let Some(&(_, first_pos)) = rows.peek() else { break };
-            last_first_pos = first_pos;
-
-            let mut frames = vec![];
-            let mut height = Abs::zero();
-            while let Some((sub, pos)) = rows.peek() {
-                let mut pos = *pos;
-                pos.y -= first_pos.y;
-
-                // Finish this region if the line doesn't fit. Only do it if
-                // we placed at least one line _or_ we still have non-last
-                // regions. Crucially, we don't want to infinitely create
-                // new regions which are too small.
-                if !regions.size.y.fits(sub.height() + pos.y)
-                    && (regions.may_progress()
-                        || (regions.may_break() && !frames.is_empty()))
-                {
-                    break;
-                }
-
-                let (sub, _) = rows.next().unwrap();
-                height = height.max(pos.y + sub.height());
-                frames.push((sub, pos));
-            }
-
-            equation_builders
-                .push(MathRunFrameBuilder { frames, size: Size::new(width, height) });
-            regions.next();
-        }
-
-        // Append remaining rows to the equation builder of the last region.
-        if let Some(equation_builder) = equation_builders.last_mut() {
-            equation_builder.frames.extend(rows.map(|(frame, mut pos)| {
-                pos.y -= last_first_pos.y;
-                (frame, pos)
-            }));
-
-            let height = equation_builder
-                .frames
-                .iter()
-                .map(|(frame, pos)| frame.height() + pos.y)
-                .max()
-                .unwrap_or(equation_builder.size.y);
-
-            equation_builder.size.y = height;
-        }
-
-        // Ensure that there is at least one frame, even for empty equations.
-        if equation_builders.is_empty() {
-            equation_builders
-                .push(MathRunFrameBuilder { frames: vec![], size: Size::zero() });
-        }
-
-        equation_builders
-    } else {
-        vec![full_equation_builder]
-    };
-
-    let Some(numbering) = (**elem).numbering(styles) else {
         let frames = equation_builders
             .into_iter()
             .map(MathRunFrameBuilder::build)
@@ -196,12 +130,110 @@ pub fn layout_equation_block(
         return Ok(Fragment::frames(frames));
     };
 
+    // Number equations.
+    match (**elem).numbering_mode(styles) {
+        NumberingMode::Equation => {
+            number_by_equation(&mut ctx, styles, regions, elem, numbering, span)
+        }
+        NumberingMode::Line => todo!(),
+        // {
+        //     number_by_line(&mut ctx, styles, regions, elem, numbering, span)
+        // }
+        NumberingMode::Label => todo!(),
+        NumberingMode::Reference => todo!(),
+    }
+}
+
+fn find_math_font(
+    engine: &mut Engine<'_>,
+    styles: StyleChain,
+    span: Span,
+) -> SourceResult<Font> {
+    let variant = variant(styles);
+    let world = engine.world;
+    let Some(font) = families(styles).find_map(|family| {
+        let id = world.book().select(family, variant)?;
+        let font = world.font(id)?;
+        let _ = font.ttf().tables().math?.constants?;
+        Some(font)
+    }) else {
+        bail!(span, "current font does not support math");
+    };
+    Ok(font)
+}
+
+// fn number_by_line(
+//     ctx: &mut MathContext,
+//     styles: StyleChain,
+//     regions: Regions,
+//     elem: &Packed<EquationElem>,
+//     numbering: &Numbering,
+//     span: Span,
+// ) -> SourceResult<Fragment> {
+// let counter = Counter::of(EquationElem::elem());
+// let update = CounterUpdate::Step(NonZeroUsize::ONE);
+// let content = counter.update(span, update);
+// let frame =
+//     (engine.routines.layout_frame)(engine, &content, locator.next(&()), styles, pod)?;
+
+// // Equation number
+// // let number = Counter::of(EquationElem::elem())
+// //     .display_at_loc(engine, elem.location().unwrap(), styles, numbering)?
+// //     .spanned(span);
+// let counter = Counter::of(EquationElem::elem());
+// let numbering = Smart::Custom(numbering.clone());
+// let content = CounterDisplayElem::new(counter, numbering, false).pack();
+// let number =
+//     (engine.routines.layout_frame)(engine, &content, locator.next(&()), styles, pod)?;
+// }
+
+fn number_by_equation(
+    ctx: &mut MathContext,
+    styles: StyleChain,
+    regions: Regions,
+    elem: &Packed<EquationElem>,
+    numbering: &Numbering,
+    span: Span,
+) -> SourceResult<Fragment> {
+    let full_equation_builder = ctx
+        .layout_into_run(&elem.body, styles)?
+        .multiline_frame_builder(ctx, styles);
+
+    let breakable = BlockElem::breakable_in(styles);
+    let equation_builders = full_equation_builder.region_split(breakable, regions);
+
+    let location = if let Some(label) = elem.label() {
+        // Early exit if this element has a do not label marker `<*>` attached
+        // to it.
+        if label.as_str() == "*" {
+            let frames = equation_builders
+                .into_iter()
+                .map(MathRunFrameBuilder::build)
+                .collect();
+            return Ok(Fragment::frames(frames));
+        }
+
+        // Use the number at the location of the first EquationElem with the
+        // label. This also skips stepping the EquationElem counter.
+        get_equations(ctx.engine, label)
+            .first()
+            .map(|x| x.location().unwrap())
+            .unwrap_or(elem.location().unwrap())
+    } else {
+        elem.location().unwrap()
+    };
+
     let pod = Region::new(regions.base(), Axes::splat(false));
     let counter = Counter::of(EquationElem::elem())
-        .display_at_loc(engine, elem.location().unwrap(), styles, numbering)?
+        .display_at_loc(ctx.engine, location, styles, numbering)?
         .spanned(span);
-    let number =
-        (engine.routines.layout_frame)(engine, &counter, locator.next(&()), styles, pod)?;
+    let number = (ctx.engine.routines.layout_frame)(
+        ctx.engine,
+        &counter,
+        ctx.locator.next(&()),
+        styles,
+        pod,
+    )?;
 
     static NUMBER_GUTTER: Em = Em::new(0.5);
     let full_number_width = number.width() + NUMBER_GUTTER.resolve(styles);
@@ -233,24 +265,6 @@ pub fn layout_equation_block(
         .collect();
 
     Ok(Fragment::frames(frames))
-}
-
-fn find_math_font(
-    engine: &mut Engine<'_>,
-    styles: StyleChain,
-    span: Span,
-) -> SourceResult<Font> {
-    let variant = variant(styles);
-    let world = engine.world;
-    let Some(font) = families(styles).find_map(|family| {
-        let id = world.book().select(family, variant)?;
-        let font = world.font(id)?;
-        let _ = font.ttf().tables().math?.constants?;
-        Some(font)
-    }) else {
-        bail!(span, "current font does not support math");
-    };
-    Ok(font)
 }
 
 fn add_equation_number(
@@ -528,30 +542,117 @@ impl<'a, 'v, 'e> MathContext<'a, 'v, 'e> {
         content: &Content,
         styles: StyleChain,
     ) -> SourceResult<()> {
-        let arenas = Arenas::default();
-        let pairs = (self.engine.routines.realize)(
-            RealizationKind::Math,
-            self.engine,
-            self.locator,
-            &arenas,
-            content,
-            styles,
-        )?;
+        // If the top level content is a sequence of equations, then we know
+        // that they are lines which make up an equation.
+        // We will only ever get a sequence of EquationElem, as during eval we
+        // do not wrap a lone line into an EquationElem.
+        if let Some(sequence) = content.to_packed::<SequenceElem>() {
+            if sequence.children.iter().any(|x| x.is::<EquationElem>()) {
+                // An EquationElem should only every appear here if it is a
+                // line of another equation, in which case, every element of
+                // the sequence should also be an EquationElem.
+                assert!(sequence.children.iter().all(|x| x.is::<EquationElem>()));
 
-        let outer = styles;
-        for (elem, styles) in pairs {
-            // Hack because the font is fixed in math.
-            if styles != outer && TextElem::font_in(styles) != TextElem::font_in(outer) {
-                let frame = layout_external(elem, self, styles)?;
-                self.push(FrameFragment::new(self, styles, frame).with_spaced(true));
-                continue;
+                for child in &sequence.children {
+                    realize_and_layout_equation(child, self, styles)?;
+                }
+
+                return Ok(());
             }
-
-            layout_realized(elem, self, styles)?;
         }
+
+        // Top level content isn't a sequence of equation(s).
+        realize_and_layout(content, self, styles)?;
 
         Ok(())
     }
+}
+
+/// Realize and layout an EquationElem.
+///
+/// Assumes the input content can be packed into an EquationElem.
+fn realize_and_layout_equation(
+    content: &Content,
+    ctx: &mut MathContext,
+    styles: StyleChain,
+) -> SourceResult<()> {
+    // We will only ever encounter an EquationElem during layout if it is one
+    // created during eval (and preserved during realization) to be a line of
+    // another equation. We need to ensure that this element still exists in
+    // the document, so that it is queryable, referenceable, etc. as one would
+    // expect. However, we don't want to use the realized BlockElem/InlineElem
+    // as it impedes the layouting of the whole equation (including other
+    // lines). Thus, we realize it and keep only the TagElem, and instead of
+    // the realized BlockElem/InlineElem, we use the EquationElem's body
+    // directly.
+    let elem = content.clone().into_packed::<EquationElem>().unwrap();
+
+    // By default, the line EquationElem inherit the styles of the parent.
+    // This is fine for most cases, but we want lines when the NumberingMode is
+    // set to Equation to not have any numbering. This ensures references don't
+    // need any special handling :D.
+    let style = [EquationElem::set_numbering(None).wrap()];
+    let styles = if EquationElem::numbering_mode_in(styles) == NumberingMode::Equation {
+        styles.chain(&style)
+    } else {
+        styles
+    };
+
+    // Because we are passing the EquationElem as the content for realization,
+    // we know that there will be exactly three resulting pairs: the start
+    // TagElem, the BlockElem/InlineElem equation, and the end TagElem.
+    let arenas = Arenas::default();
+    let [(start, _), _, (end, _)] = (ctx.engine.routines.realize)(
+        RealizationKind::Math,
+        ctx.engine,
+        ctx.locator,
+        &arenas,
+        content,
+        styles,
+    )?[..] else {
+        unreachable!()
+    };
+
+    let start = start.to_packed::<TagElem>().unwrap();
+    ctx.push(MathFragment::Tag(start.tag.clone()));
+
+    realize_and_layout(&elem.body, ctx, styles)?;
+
+    let end = end.to_packed::<TagElem>().unwrap();
+    ctx.push(MathFragment::Tag(end.tag.clone()));
+
+    Ok(())
+}
+
+/// Realize and layout arbitrary content.
+fn realize_and_layout(
+    content: &Content,
+    ctx: &mut MathContext,
+    styles: StyleChain,
+) -> SourceResult<()> {
+    let arenas = Arenas::default();
+    let pairs = (ctx.engine.routines.realize)(
+        RealizationKind::Math,
+        ctx.engine,
+        ctx.locator,
+        &arenas,
+        content,
+        styles,
+    )?;
+
+    let outer = styles;
+    for (elem, styles) in pairs {
+        // Hack because the font is fixed in math.
+        if styles != outer && TextElem::font_in(styles) != TextElem::font_in(outer) {
+            let frame = layout_external(elem, ctx, styles)?;
+            ctx.push(FrameFragment::new(ctx, styles, frame).with_spaced(true));
+            continue;
+        }
+
+        layout_realized(elem, ctx, styles)?;
+    }
+
+    Ok(())
 }
 
 /// Lays out a leaf element resulting from realization.
