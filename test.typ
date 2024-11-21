@@ -1,12 +1,12 @@
 #set page(width: 15cm, height: 18cm)
 
-$ a + b \
-  c + d <kk> $ <ll>
+// $ a + b \
+//   c + d <kk> $ <ll>
 
-#context query(<kk>)
-#context query(<ll>)
+// #context query(<kk>)
+// #context query(<ll>)
 
-#set math.equation(numbering: "(1a)", numbering-mode: "equation")
+// #set math.equation(numbering: "(1a)", numbering-mode: "equation")
 
 // #list(
 //   [Foundations],
@@ -32,47 +32,86 @@ $ a + b \
 
 // I think there's another issue that needs addressing with regards to equation numbering: the distinction between math as an input mode, and how it is displayed in the document. I'm bringing this up as each line in an equation kind of needs to be its own element, that way you can reference and query it properly. As each line is math, this element should be an equation, but. Maybe I'm overthinking this, 
 
-#lorem(20)
-$ a &+ z <x>
-  c + &d \
-  &e + f <*>
-  g + h& \ $ <y>
-#lorem(20)
+// #lorem(20)
+// $ a &+ z <x>
+//   c + &d \
+//   &e + f <*>
+//   g + h& \ $ <y>
+// #lorem(20)
 
-#context query(<y>)
-// #context query(<y>).at(0).body.children.at(0).fields()
-#context query(<x>)
-#context query(<*>)
+// #context query(<y>)
+// // #context query(<y>).at(0).body.children.at(0).fields()
+// #context query(<x>)
+// #context query(<*>)
 
-$ a $ <*>
+// $ a $ <*>
 
-$ b $
+// $ b $
 
-$ c $ <y>
+// $ c $ <y>
 
-A
+// A
 
-$ c \
-  d <l> $ <y>
+// $ c \
+//   d <l> $ <y>
 
-#context query(<l>).at(0)
+// #context query(<l>).at(0)
 
-@y
-// @l
+// @y
+// // @l
 
 
-WORKING
-$ a + b $ <a>
-$ a + b \ $ <b>
-$ a + b <*> $ <c>
-$ a + b <e> $ <d>
-#context query(<a>)
-#context query(<b>)
-#context query(<c>)
-#context query(<d>)
+// WORKING
+// $ a + b $ <a>
+// $ a + b \ $ <b>
+// $ a + b <*> $ <c>
+// $ a + b <e> $ <d>
+// #context query(<a>)
+// #context query(<b>)
+// #context query(<c>)
+// #context query(<d>)
+// #context query(<e>)
+// #context query(<*>)
+
+// $a + b$
+// $RR/CC$
+// $a \ b$
+
+// #set math.equation(numbering: "(1a)", numbering-mode: "line")
+
+// $ a &+ z <x>
+//   c + &d \
+//   &e + f <*>
+//   g + h& $ <y>
+
+// $ a + b $
+// $ a + b \ $
+// $ a + b <a> $
+
+// #set math.equation(numbering: "(1a)", numbering-mode: "equation")
+
+// #lorem(10)
+// $ a + b \ $ <a>
+// #lorem(10)
+// $ x + y <d> $ <a>
+// #lorem(10)
+// $ a &+ z <x>
+//   c + &d \ $ <b>
+// #lorem(10)
+// $ a &+ z <x>
+//   c + &d <e> $ <b>
+// #lorem(10)
+// #context query(<e>).at(0)
+// #lorem(10)
+// #context query(<a>)
+// // #context query(<b>)
+// #context query(<x>)
+// #context query(<e>).at(0).fields()
+// #context query(<a>).at(0)
+// #let dotb = box(stroke: 1pt + black, sym.dot)
+// $ dotb \ a $
+// $ dot \ a $
+--- math-common-symbols ---
+// Test common symbols.
+$ dot \ dots \ ast \ tilde \ star $ <e>
 #context query(<e>)
-#context query(<*>)
-
-$a + b$
-$RR/CC$
-$a \ b$

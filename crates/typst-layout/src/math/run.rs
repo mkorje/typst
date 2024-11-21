@@ -314,6 +314,8 @@ impl MathRun {
         mut alternator: LeftRightAlternator,
     ) -> Frame {
         let ascent = self.ascent();
+        println!("{:?}", ascent);
+        println!("{:?}", self.descent());
         let mut frame = Frame::soft(Size::new(Abs::zero(), ascent + self.descent()));
         frame.set_baseline(ascent);
 
@@ -344,17 +346,19 @@ impl MathRun {
         let mut x = next_x().unwrap_or_default();
 
         for fragment in self.0.into_iter() {
+            println!("{:?}", fragment);
             if matches!(fragment, MathFragment::Align) {
                 x = next_x().unwrap_or(x);
                 continue;
             }
-
+            println!("\t{:?} = {:?} - {:?}", ascent - fragment.ascent(), ascent, fragment.ascent());
             let y = ascent - fragment.ascent();
             let pos = Point::new(x, y);
             x += fragment.width();
             frame.push_frame(pos, fragment.into_frame());
+            println!("\t{:?}", frame.height());
         }
-
+        println!("");
         frame.size_mut().x = x;
         frame
     }

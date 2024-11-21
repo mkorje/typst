@@ -119,6 +119,7 @@ pub fn layout_equation_block(
         let full_equation_builder = ctx
             .layout_into_run(&elem.body, styles)?
             .multiline_frame_builder(&ctx, styles);
+        println!("\n{:?}", full_equation_builder.frames);
 
         let breakable = BlockElem::breakable_in(styles);
         let equation_builders = full_equation_builder.region_split(breakable, regions);
@@ -135,10 +136,9 @@ pub fn layout_equation_block(
         NumberingMode::Equation => {
             number_by_equation(&mut ctx, styles, regions, elem, numbering, span)
         }
-        NumberingMode::Line => todo!(),
-        // {
-        //     number_by_line(&mut ctx, styles, regions, elem, numbering, span)
-        // }
+        NumberingMode::Line => {
+            number_by_line(&mut ctx, styles, regions, elem, numbering, span)
+        }
         NumberingMode::Label => todo!(),
         NumberingMode::Reference => todo!(),
     }
@@ -162,30 +162,88 @@ fn find_math_font(
     Ok(font)
 }
 
-// fn number_by_line(
-//     ctx: &mut MathContext,
-//     styles: StyleChain,
-//     regions: Regions,
-//     elem: &Packed<EquationElem>,
-//     numbering: &Numbering,
-//     span: Span,
-// ) -> SourceResult<Fragment> {
-// let counter = Counter::of(EquationElem::elem());
-// let update = CounterUpdate::Step(NonZeroUsize::ONE);
-// let content = counter.update(span, update);
-// let frame =
-//     (engine.routines.layout_frame)(engine, &content, locator.next(&()), styles, pod)?;
+fn number_by_line(
+    ctx: &mut MathContext,
+    styles: StyleChain,
+    regions: Regions,
+    elem: &Packed<EquationElem>,
+    numbering: &Numbering,
+    span: Span,
+) -> SourceResult<Fragment> {
+    let full_equation_builder = ctx
+        .layout_into_run(&elem.body, styles)?
+        .multiline_frame_builder(ctx, styles);
 
-// // Equation number
-// // let number = Counter::of(EquationElem::elem())
-// //     .display_at_loc(engine, elem.location().unwrap(), styles, numbering)?
-// //     .spanned(span);
-// let counter = Counter::of(EquationElem::elem());
-// let numbering = Smart::Custom(numbering.clone());
-// let content = CounterDisplayElem::new(counter, numbering, false).pack();
-// let number =
-//     (engine.routines.layout_frame)(engine, &content, locator.next(&()), styles, pod)?;
-// }
+    // where location is easily accessible (add method which checks the tag for the row).
+    // Then can layout number for said row!
+    // tag.location() method.
+    let breakable = BlockElem::breakable_in(styles);
+    let equation_builders = full_equation_builder.region_split(breakable, regions);
+
+    let location = if let Some(label) = elem.label() {
+        // Early exit if this element has a do not label marker `<*>` attached
+        // to it.
+        if label.as_str() == "*" {
+            let frames = equation_builders
+                .into_iter()
+                .map(MathRunFrameBuilder::build)
+                .collect();
+            return Ok(Fragment::frames(frames));
+        }
+
+        // Use the number at the location of the first EquationElem with the
+        // label. This also skips stepping the EquationElem counter.
+        get_equations(ctx.engine, label)
+            .first()
+            .map(|x| x.location().unwrap())
+            .unwrap_or(elem.location().unwrap())
+    } else {
+        elem.location().unwrap()
+    };
+
+    let pod = Region::new(regions.base(), Axes::splat(false));
+    let counter = Counter::of(EquationElem::elem())
+        .display_at_loc(ctx.engine, location, styles, numbering)?
+        .spanned(span);
+    let number = (ctx.engine.routines.layout_frame)(
+        ctx.engine,
+        &counter,
+        ctx.locator.next(&()),
+        styles,
+        pod,
+    )?;
+
+    static NUMBER_GUTTER: Em = Em::new(0.5);
+    let full_number_width = number.width() + NUMBER_GUTTER.resolve(styles);
+
+    let number_align = match elem.number_align(styles) {
+        SpecificAlignment::H(h) => SpecificAlignment::Both(h, VAlignment::Horizon),
+        SpecificAlignment::V(v) => SpecificAlignment::Both(OuterHAlignment::End, v),
+        SpecificAlignment::Both(h, v) => SpecificAlignment::Both(h, v),
+    };
+
+    // Add equation numbers to each equation region.
+    let region_count = equation_builders.len();
+    let frames = equation_builders
+        .into_iter()
+        .map(|builder| {
+            if builder.frames.is_empty() && region_count > 1 {
+                // Don't number empty regions, but do number empty equations.
+                return builder.build();
+            }
+            add_equation_number(
+                builder,
+                number.clone(),
+                number_align.resolve(styles),
+                AlignElem::alignment_in(styles).resolve(styles).x,
+                regions.size.x,
+                full_number_width,
+            )
+        })
+        .collect();
+
+    Ok(Fragment::frames(frames))
+}
 
 fn number_by_equation(
     ctx: &mut MathContext,
@@ -547,23 +605,51 @@ impl<'a, 'v, 'e> MathContext<'a, 'v, 'e> {
         // We will only ever get a sequence of EquationElem, as during eval we
         // do not wrap a lone line into an EquationElem.
         if let Some(sequence) = content.to_packed::<SequenceElem>() {
-            if sequence.children.iter().any(|x| x.is::<EquationElem>()) {
-                // An EquationElem should only every appear here if it is a
-                // line of another equation, in which case, every element of
-                // the sequence should also be an EquationElem.
-                assert!(sequence.children.iter().all(|x| x.is::<EquationElem>()));
-
+            println!("{:?}", sequence);
+            if sequence.children.iter().all(|x| x.is::<EquationElem>() || x.is::<LinebreakElem>()) {
                 for child in &sequence.children {
-                    realize_and_layout_equation(child, self, styles)?;
+                    if child.is::<EquationElem>() {
+                        realize_and_layout_equation(child, self, styles)?;
+                    } else {
+                        self.push(MathFragment::Linebreak);
+                    }
                 }
-
+                println!("\n{:?}", self.fragments);
                 return Ok(());
             }
+            // for child in &sequence.children {
+            //     if child.is::<EquationElem>() {
+            //         realize_and_layout_equation(child, self, styles)?;
+            //     } else {
+            //         realize_and_layout(child, self, styles)?;
+            //     }
+            // }
+            // return Ok(());
+            
+            // if sequence.children.iter().any(|x| x.is::<EquationElem>()) {
+            //     // An EquationElem should only every appear here if it is a
+            //     // line of another equation, in which case, every element of
+            //     // the sequence should also be an EquationElem.
+            //     assert!(sequence
+            //         .children
+            //         .iter()
+            //         .all(|x| x.is::<EquationElem>() || x.is::<LinebreakElem>()));
+
+            //     for child in &sequence.children {
+            //         if child.is::<EquationElem>() {
+            //             realize_and_layout_equation(child, self, styles)?;
+            //         } else {
+            //             self.push(MathFragment::Linebreak);
+            //         }
+            //     }
+            //     // println!("! fragments: {:?}", self.fragments);
+            //     return Ok(());
+            // }
         }
 
         // Top level content isn't a sequence of equation(s).
         realize_and_layout(content, self, styles)?;
-
+        // println!("! fragments: {:?}", self.fragments);
         Ok(())
     }
 }
@@ -610,6 +696,15 @@ fn realize_and_layout_equation(
         content,
         styles,
     )?[..] else {
+        let e = (ctx.engine.routines.realize)(
+            RealizationKind::Math,
+            ctx.engine,
+            ctx.locator,
+            &arenas,
+            content,
+            styles,
+        )?;
+        println!("{:?}", e);
         unreachable!()
     };
 

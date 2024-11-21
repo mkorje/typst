@@ -36,19 +36,17 @@ fn eval_math<'a>(
     while let Some(expr) = exprs.next() {
         match expr {
             ast::Expr::Linebreak(_) => {
-                line.push(expr.eval(vm)?.display().spanned(expr.span()));
                 if exprs.peek().is_none() && seq.is_empty() {
+                    line.push(expr.eval(vm)?.display().spanned(expr.span()));
                     seq.push(Content::sequence(line.to_owned()));
                 } else {
                     seq.push(eq(&line));
+                    seq.push(expr.eval(vm)?.display().spanned(expr.span()));
                 }
                 line.clear();
             }
             expr => match expr.eval(vm)? {
                 Value::Label(label) => {
-                    if exprs.peek().is_some() {
-                        line.push(LinebreakElem::shared().clone().spanned(expr.span()));
-                    }
                     if exprs.peek().is_none() && seq.is_empty() {
                         vm.engine.sink.warn(warning!(
                             expr.span(),
@@ -60,6 +58,7 @@ fn eval_math<'a>(
                         seq.push(Content::sequence(line.to_owned()));
                     } else {
                         seq.push(eq(&line).labelled(label));
+                        seq.push(LinebreakElem::shared().clone().spanned(expr.span()));
                     }
                     line.clear();
                 }

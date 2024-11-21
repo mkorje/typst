@@ -1,0 +1,77 @@
+Sequence [EquationElem { block: None, numbering: None, numbering_mode: None, number_align: None, supplement: None, body: Sequence [Text(⋅), SpaceElem], line: Some(true) }, LinebreakElem { justify: None }, EquationElem { block: None, numbering: None, numbering_mode: None, number_align: None, supplement: None, body: Sequence [SpaceElem, Text(…), SpaceElem], line: Some(true) }, LinebreakElem { justify: None }, EquationElem { block: None, numbering: None, numbering_mode: None, number_align: None, supplement: None, body: Sequence [SpaceElem, Text(∗), SpaceElem], line: Some(true) }, LinebreakElem { justify: None }, EquationElem { block: None, numbering: None, numbering_mode: None, number_align: None, supplement: None, body: Sequence [SpaceElem, Text(∼), SpaceElem], line: Some(true) }, LinebreakElem { justify: None }, EquationElem { block: None, numbering: None, numbering_mode: None, number_align: None, supplement: None, body: Sequence [SpaceElem, Text(⋆)], line: Some(true) }]
+
+[Tag(Start("equation")), Glyph(GlyphFragment('⋅')), Tag(End), Linebreak, Tag(Start("equation")), Glyph(GlyphFragment('…')), Tag(End), Linebreak, Tag(Start("equation")), Glyph(GlyphFragment('∗')), Tag(End), Linebreak, Tag(Start("equation")), Glyph(GlyphFragment('∼')), Tag(End), Linebreak, Tag(Start("equation")), Glyph(GlyphFragment('⋆')), Tag(End)]
+3.333pt
+0.0pt
+Tag(Start("equation"))
+	3.333pt = 3.333pt - 0.0pt
+	3.333pt
+Glyph(GlyphFragment('⋅'))
+	0.0pt = 3.333pt - 3.333pt
+	3.333pt
+Tag(End)
+	3.333pt = 3.333pt - 0.0pt
+	3.333pt
+Linebreak
+	3.333pt = 3.333pt - 0.0pt
+	3.333pt
+
+1.166pt
+0.0pt
+Tag(Start("equation"))
+	1.166pt = 1.166pt - 0.0pt
+	1.166pt
+Glyph(GlyphFragment('…'))
+	0.0pt = 1.166pt - 1.166pt
+	1.166pt
+Tag(End)
+	1.166pt = 1.166pt - 0.0pt
+	1.166pt
+Linebreak
+	1.166pt = 1.166pt - 0.0pt
+	1.166pt
+
+5.082pt
+0.0pt
+Tag(Start("equation"))
+	5.082pt = 5.082pt - 0.0pt
+	5.082pt
+Glyph(GlyphFragment('∗'))
+	0.0pt = 5.082pt - 5.082pt
+	5.082pt
+Tag(End)
+	5.082pt = 5.082pt - 0.0pt
+	5.082pt
+Linebreak
+	5.082pt = 5.082pt - 0.0pt
+	5.082pt
+
+4.026pt
+0.0pt
+Tag(Start("equation"))
+	4.026pt = 4.026pt - 0.0pt
+	4.026pt
+Glyph(GlyphFragment('∼'))
+	0.0pt = 4.026pt - 4.026pt
+	4.026pt
+Tag(End)
+	4.026pt = 4.026pt - 0.0pt
+	4.026pt
+Linebreak
+	4.026pt = 4.026pt - 0.0pt
+	4.026pt
+
+5.346pt
+0.0pt
+Tag(Start("equation"))
+	5.346pt = 5.346pt - 0.0pt
+	5.346pt
+Glyph(GlyphFragment('⋆'))
+	0.0pt = 5.346pt - 5.346pt
+	5.346pt
+Tag(End)
+	5.346pt = 5.346pt - 0.0pt
+	5.346pt
+
+
+[(Frame [Start("equation"), Text("⋅"), End], Point(3.0745pt, 0.0pt)), (Frame [Start("equation"), Text("…"), End], Point(0.0pt, 10.483pt)), (Frame [Start("equation"), Text("∗"), End], Point(1.8535pt, 18.799000000000003pt)), (Frame [Start("equation"), Text("∼"), End], Point(0.3519999999999996pt, 31.031000000000006pt)), (Frame [Start("equation"), Text("⋆"), End], Point(1.7160000000000002pt, 42.20700000000001pt))]
