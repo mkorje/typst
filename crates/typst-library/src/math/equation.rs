@@ -6,8 +6,8 @@ use unicode_math_class::MathClass;
 use crate::diag::SourceResult;
 use crate::engine::Engine;
 use crate::foundations::{
-    elem, Content, NativeElement, Packed, Show, ShowSet, Smart, StyleChain, Styles,
-    Synthesize,
+    elem, select_where, Cast, Content, Label, NativeElement, Packed, Selector, Show,
+    ShowSet, Smart, StyleChain, Styles, Synthesize,
 };
 use crate::introspection::{Count, Counter, CounterUpdate, Locatable};
 use crate::layout::{
@@ -64,6 +64,14 @@ pub struct EquationElem {
     #[borrowed]
     pub numbering: Option<Numbering>,
 
+    /// How to number equations.
+    ///
+    /// ```example
+    ///
+    /// ```
+    #[default(NumberingMode::Equation)]
+    pub numbering_mode: NumberingMode,
+
     /// The alignment of the equation numbering.
     ///
     /// By default, the alignment is `{end + horizon}`. For the horizontal
@@ -102,6 +110,15 @@ pub struct EquationElem {
     /// The contents of the equation.
     #[required]
     pub body: Content,
+
+    /// Whether this is an equation created as a line within a block equation.
+    ///
+    /// This is used so that during realization we know not to unwrap this
+    /// nested EquationElem.
+    #[internal]
+    #[parse(None)]
+    #[default(false)]
+    pub line: bool,
 
     /// The size of the glyphs.
     #[internal]
@@ -193,9 +210,48 @@ impl ShowSet for Packed<EquationElem> {
 }
 
 impl Count for Packed<EquationElem> {
-    fn update(&self) -> Option<CounterUpdate> {
-        (self.block(StyleChain::default()) && self.numbering().is_some())
-            .then(|| CounterUpdate::Step(NonZeroUsize::ONE))
+    fn update(&self, engine: &mut Engine) -> Option<CounterUpdate> {
+        if !self.block(StyleChain::default()) || self.numbering().is_none() {
+            return None;
+        }
+
+        match (**self).numbering_mode(StyleChain::default()) {
+            NumberingMode::Equation => {
+                // Don't step counter if there is a do no label marker `<*>`
+                // attached to it, or if this is not the first EquationElem
+                // with the given label.
+                if let Some(label) = self.label() {
+                    if label.as_str() == "*" {
+                        None
+                    } else {
+                        let equations = get_equations(engine, label);
+                        if *self != equations[0] {
+                            None
+                        } else {
+                            Some(CounterUpdate::Step(NonZeroUsize::ONE))
+                        }
+                    }
+                } else {
+                    Some(CounterUpdate::Step(NonZeroUsize::ONE))
+                }
+            }
+            NumberingMode::Line => {
+                // TODO
+                if !self.line(StyleChain::default()) {
+                    None
+                } else if let Some(label) = self.label() {
+                    if label.as_str() == "*" {
+                        None
+                    } else {
+                        Some(CounterUpdate::Step(NonZeroUsize::ONE))
+                    }
+                } else {
+                    Some(CounterUpdate::Step(NonZeroUsize::ONE))
+                }
+            }
+            NumberingMode::Label => todo!(),
+            NumberingMode::Reference => todo!(),
+        }
     }
 }
 
@@ -253,4 +309,35 @@ impl Outlinable for Packed<EquationElem> {
 
         Ok(Some(supplement + numbers))
     }
+}
+
+/// How to number equations.
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Hash, Cast)]
+pub enum NumberingMode {
+    /// Every equation is numbered.
+    #[default]
+    Equation,
+    /// Every line is numbered.
+    Line,
+    /// Only labelled equations or labelled lines have a number. If both a line
+    /// and an equation have a label, then subnumbering is enabled.
+    Label,
+    /// Only equations that are referenced in the document are numbered.
+    /// Otherwise, this has the same logic as NumberingMode::Label.
+    Reference,
+}
+
+pub fn get_equations(engine: &mut Engine, label: Label) -> Vec<Packed<EquationElem>> {
+    let target = Selector::And(
+        [Selector::Label(label), select_where!(EquationElem, Block => true)]
+            .into_iter()
+            .collect(),
+    );
+
+    engine
+        .introspector
+        .query(&target)
+        .into_iter()
+        .map(|x| x.into_packed::<EquationElem>().unwrap())
+        .collect()
 }

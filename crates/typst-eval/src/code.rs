@@ -94,6 +94,7 @@ impl Eval for ast::Expr<'_> {
             Self::Enum(v) => v.eval(vm).map(Value::Content),
             Self::Term(v) => v.eval(vm).map(Value::Content),
             Self::Equation(v) => v.eval(vm).map(Value::Content),
+            Self::NoNumberMarker(_) => bail!(error!(span, "do not number marker is only allowed directly in content and math blocks")),
             Self::Math(v) => v.eval(vm).map(Value::Content),
             Self::MathIdent(v) => v.eval(vm),
             Self::MathShorthand(v) => v.eval(vm),

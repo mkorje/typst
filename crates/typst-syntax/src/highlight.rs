@@ -169,6 +169,7 @@ pub fn highlight(node: &LinkedNode) -> Option<Tag> {
         SyntaxKind::TermItem => None,
         SyntaxKind::TermMarker => Some(Tag::ListMarker),
         SyntaxKind::Equation => None,
+        SyntaxKind::NoNumberMarker => Some(Tag::Label),
 
         SyntaxKind::Math => None,
         SyntaxKind::MathIdent => highlight_ident(node),

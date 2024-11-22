@@ -152,7 +152,7 @@ impl Show for Packed<FootnoteElem> {
 }
 
 impl Count for Packed<FootnoteElem> {
-    fn update(&self) -> Option<CounterUpdate> {
+    fn update(&self, _: &mut Engine) -> Option<CounterUpdate> {
         (!self.is_ref()).then(|| CounterUpdate::Step(NonZeroUsize::ONE))
     }
 }

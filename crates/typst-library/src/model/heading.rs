@@ -291,7 +291,7 @@ impl ShowSet for Packed<HeadingElem> {
 }
 
 impl Count for Packed<HeadingElem> {
-    fn update(&self) -> Option<CounterUpdate> {
+    fn update(&self, _: &mut Engine) -> Option<CounterUpdate> {
         (**self)
             .numbering(StyleChain::default())
             .is_some()

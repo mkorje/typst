@@ -121,6 +121,9 @@ pub enum Expr<'a> {
     Term(TermItem<'a>),
     /// A mathematical equation: `$x$`, `$ x^2 $`.
     Equation(Equation<'a>),
+    /// A do not number marker: `<*>`.
+    /// This is only used for equations in Math.
+    NoNumberMarker(NoNumberMarker<'a>),
     /// The contents of a mathematical equation: `x^2 + 1`.
     Math(Math<'a>),
     /// An identifier in math: `pi`.
@@ -232,6 +235,7 @@ impl<'a> AstNode<'a> for Expr<'a> {
             SyntaxKind::EnumItem => node.cast().map(Self::Enum),
             SyntaxKind::TermItem => node.cast().map(Self::Term),
             SyntaxKind::Equation => node.cast().map(Self::Equation),
+            SyntaxKind::NoNumberMarker => node.cast().map(Self::NoNumberMarker),
             SyntaxKind::Math => node.cast().map(Self::Math),
             SyntaxKind::MathIdent => node.cast().map(Self::MathIdent),
             SyntaxKind::MathShorthand => node.cast().map(Self::MathShorthand),
@@ -296,6 +300,7 @@ impl<'a> AstNode<'a> for Expr<'a> {
             Self::Enum(v) => v.to_untyped(),
             Self::Term(v) => v.to_untyped(),
             Self::Equation(v) => v.to_untyped(),
+            Self::NoNumberMarker(v) => v.to_untyped(),
             Self::Math(v) => v.to_untyped(),
             Self::MathIdent(v) => v.to_untyped(),
             Self::MathShorthand(v) => v.to_untyped(),
@@ -692,6 +697,12 @@ impl<'a> Equation<'a> {
         };
         is_space(self.0.children().nth(1)) && is_space(self.0.children().nth_back(1))
     }
+}
+
+node! {
+    /// A do not number marker: `<*>`.
+    /// This is only used for equations in Math.
+    NoNumberMarker
 }
 
 node! {

@@ -70,6 +70,9 @@ pub enum SyntaxKind {
     TermMarker,
     /// A mathematical equation: `$x$`, `$ x^2 $`.
     Equation,
+    /// A do not number marker: `<*>`.
+    /// This is only used for equations in Math.
+    NoNumberMarker,
 
     /// The contents of a mathematical equation: `x^2 + 1`.
     Math,
@@ -400,6 +403,7 @@ impl SyntaxKind {
             Self::TermItem => "term list item",
             Self::TermMarker => "term marker",
             Self::Equation => "equation",
+            Self::NoNumberMarker => "do not number marker",
             Self::Math => "math",
             Self::MathIdent => "math identifier",
             Self::MathShorthand => "math shorthand",

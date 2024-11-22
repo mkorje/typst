@@ -189,6 +189,7 @@ impl Lexer<'_> {
             '\\' => self.backslash(),
             'h' if self.s.eat_if("ttp://") => self.link(),
             'h' if self.s.eat_if("ttps://") => self.link(),
+            '<' if self.s.eat_if("*>") => SyntaxKind::NoNumberMarker,
             '<' if self.s.at(is_id_continue) => self.label(),
             '@' => self.ref_marker(),
 
@@ -567,6 +568,9 @@ impl Lexer<'_> {
             '\'' => SyntaxKind::Prime,
             '&' => SyntaxKind::MathAlignPoint,
             '√' | '∛' | '∜' => SyntaxKind::Root,
+
+            '<' if self.s.eat_if("*>") => SyntaxKind::NoNumberMarker,
+            '<' if self.s.at(is_math_id_continue) => self.label(),
 
             // Identifiers.
             c if is_math_id_start(c) && self.s.at(is_math_id_continue) => {

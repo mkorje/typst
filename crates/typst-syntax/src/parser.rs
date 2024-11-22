@@ -94,6 +94,7 @@ fn markup_expr(p: &mut Parser, at_start: bool) {
         | SyntaxKind::Shorthand
         | SyntaxKind::SmartQuote
         | SyntaxKind::Link
+        | SyntaxKind::NoNumberMarker
         | SyntaxKind::Label => p.eat(),
 
         SyntaxKind::Raw => p.eat(), // Raw is handled entirely in the Lexer.
@@ -261,7 +262,10 @@ fn math_expr_prec(p: &mut Parser, min_prec: usize, stop: SyntaxKind) {
             }
         }
 
-        SyntaxKind::Linebreak | SyntaxKind::MathAlignPoint => p.eat(),
+        SyntaxKind::Linebreak
+        | SyntaxKind::MathAlignPoint
+        | SyntaxKind::NoNumberMarker
+        | SyntaxKind::Label => p.eat(),
         SyntaxKind::Escape | SyntaxKind::Str => {
             continuable = true;
             p.eat();
@@ -578,7 +582,7 @@ fn code_exprs(p: &mut Parser, stop_set: SyntaxSet) {
             code_expr(p);
             if !p.at_set(stop_set) && !p.eat_if(SyntaxKind::Semicolon) {
                 p.expected("semicolon or line break");
-                if p.at(SyntaxKind::Label) {
+                if p.at_set(syntax_set!(Label)) {
                     p.hint("labels can only be applied in markup mode");
                     p.hint("try wrapping your code in a markup block (`[ ]`)");
                 }

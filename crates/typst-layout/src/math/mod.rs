@@ -3,6 +3,7 @@ mod shared;
 mod accent;
 mod attach;
 mod cancel;
+mod ctx;
 mod frac;
 mod fragment;
 mod lr;
@@ -13,37 +14,32 @@ mod stretch;
 mod text;
 mod underover;
 
-use rustybuzz::Feature;
-use ttf_parser::Tag;
 use typst_library::diag::{bail, SourceResult};
 use typst_library::engine::Engine;
-use typst_library::foundations::{
-    select_where, Content, NativeElement, Packed, Resolve, Selector, StyleChain,
-};
-use typst_library::introspection::{Counter, Locator, SplitLocator, TagElem};
+use typst_library::foundations::{NativeElement, Packed, Resolve, StyleChain};
+use typst_library::introspection::{Counter, Location, Locator, Tag};
 use typst_library::layout::{
-    Abs, AlignElem, Axes, BlockElem, BoxElem, Em, FixedAlignment, Fragment, Frame, HElem,
-    InlineItem, OuterHAlignment, PlaceElem, Point, Region, Regions, Size, Spacing,
-    SpecificAlignment, VAlignment,
+    Abs, AlignElem, Axes, BlockElem, Em, FixedAlignment, Fragment, Frame, FrameItem,
+    InlineItem, OuterHAlignment, Point, Region, Regions, Size, SpecificAlignment,
+    VAlignment,
 };
 use typst_library::math::*;
-use typst_library::model::ParElem;
-use typst_library::routines::{Arenas, RealizationKind};
-use typst_library::text::{
-    families, features, variant, Font, LinebreakElem, SpaceElem, TextEdgeBounds,
-    TextElem, TextSize,
-};
+use typst_library::model::{Numbering, ParElem};
+use typst_library::text::{families, variant, Font, TextEdgeBounds, TextElem};
 use typst_library::World;
 use typst_syntax::Span;
 use typst_utils::Numeric;
-use unicode_math_class::MathClass;
 
+use self::ctx::MathContext;
 use self::fragment::{
     FrameFragment, GlyphFragment, GlyphwiseSubsts, Limits, MathFragment, VariantFragment,
 };
 use self::run::{LeftRightAlternator, MathRun, MathRunEquation, MathRunFrameBuilder};
 use self::shared::*;
 use self::stretch::{stretch_fragment, stretch_glyph};
+
+/// Minimum gap between the equation number and the content of the equation.
+const NUMBER_GUTTER: Em = Em::new(0.5);
 
 /// Layout an inline equation (in a paragraph).
 #[typst_macros::time(span = elem.span())]
@@ -113,82 +109,14 @@ pub fn layout_equation_block(
     let mut locator = locator.split();
     let mut ctx = MathContext::new(engine, &mut locator, styles, regions.base(), &font);
 
-    let equations = ctx.collect_equations(elem, styles)?;
-    let full_equation_builder = equations.multiequation_frame_builder(&ctx, styles);
+    // Early exit if we are not numbering equations.
+    let Some(numbering) = elem.numbering(styles) else {
+        let full_equation_builder =
+            ctx.layout_into_multiline_frame_builder(&elem.body, styles)?;
 
-    // let full_equation_builder = ctx
-    //     .layout_into_run(&elem.body, styles)?
-    //     .multiline_frame_builder(&ctx, styles);
-    let width = full_equation_builder.size.x;
+        let breakable = BlockElem::breakable_in(styles);
+        let equation_builders = full_equation_builder.region_split(breakable, regions);
 
-    let equation_builders = if BlockElem::breakable_in(styles) {
-        let mut rows = full_equation_builder.frames.into_iter().peekable();
-        let mut equation_builders = vec![];
-        let mut last_first_pos = Point::zero();
-        let mut regions = regions;
-
-        loop {
-            // Keep track of the position of the first row in this region,
-            // so that the offset can be reverted later.
-            let Some(&(_, first_pos)) = rows.peek() else { break };
-            last_first_pos = first_pos;
-
-            let mut frames = vec![];
-            let mut height = Abs::zero();
-            while let Some((sub, pos)) = rows.peek() {
-                let mut pos = *pos;
-                pos.y -= first_pos.y;
-
-                // Finish this region if the line doesn't fit. Only do it if
-                // we placed at least one line _or_ we still have non-last
-                // regions. Crucially, we don't want to infinitely create
-                // new regions which are too small.
-                if !regions.size.y.fits(sub.height() + pos.y)
-                    && (regions.may_progress()
-                        || (regions.may_break() && !frames.is_empty()))
-                {
-                    break;
-                }
-
-                let (sub, _) = rows.next().unwrap();
-                height = height.max(pos.y + sub.height());
-                frames.push((sub, pos));
-            }
-
-            equation_builders
-                .push(MathRunFrameBuilder { frames, size: Size::new(width, height) });
-            regions.next();
-        }
-
-        // Append remaining rows to the equation builder of the last region.
-        if let Some(equation_builder) = equation_builders.last_mut() {
-            equation_builder.frames.extend(rows.map(|(frame, mut pos)| {
-                pos.y -= last_first_pos.y;
-                (frame, pos)
-            }));
-
-            let height = equation_builder
-                .frames
-                .iter()
-                .map(|(frame, pos)| frame.height() + pos.y)
-                .max()
-                .unwrap_or(equation_builder.size.y);
-
-            equation_builder.size.y = height;
-        }
-
-        // Ensure that there is at least one frame, even for empty equations.
-        if equation_builders.is_empty() {
-            equation_builders
-                .push(MathRunFrameBuilder { frames: vec![], size: Size::zero() });
-        }
-
-        equation_builders
-    } else {
-        vec![full_equation_builder]
-    };
-
-    let Some(numbering) = (**elem).numbering(styles) else {
         let frames = equation_builders
             .into_iter()
             .map(MathRunFrameBuilder::build)
@@ -196,14 +124,285 @@ pub fn layout_equation_block(
         return Ok(Fragment::frames(frames));
     };
 
+    // Number equations.
+    match (**elem).numbering_mode(styles) {
+        NumberingMode::Equation => {
+            number_by_equation(&mut ctx, styles, regions, elem, numbering, span)
+        }
+        NumberingMode::Line => {
+            number_by_line(&mut ctx, styles, regions, elem, numbering, span)
+        }
+        NumberingMode::Label => todo!(),
+        NumberingMode::Reference => todo!(),
+    }
+}
+
+fn find_math_font(
+    engine: &mut Engine<'_>,
+    styles: StyleChain,
+    span: Span,
+) -> SourceResult<Font> {
+    let variant = variant(styles);
+    let world = engine.world;
+    let Some(font) = families(styles).find_map(|family| {
+        let id = world.book().select(family, variant)?;
+        let font = world.font(id)?;
+        let _ = font.ttf().tables().math?.constants?;
+        Some(font)
+    }) else {
+        bail!(span, "current font does not support math");
+    };
+    Ok(font)
+}
+
+fn number_by_line(
+    ctx: &mut MathContext,
+    styles: StyleChain,
+    regions: Regions,
+    elem: &Packed<EquationElem>,
+    numbering: &Numbering,
+    span: Span,
+) -> SourceResult<Fragment> {
+    let full_equation_builder =
+        ctx.layout_into_multiline_frame_builder(&elem.body, styles)?;
+
+    if full_equation_builder.frames.len() == 1 {
+        return number_by_equation(ctx, styles, regions, elem, numbering, span);
+    }
+
+    let breakable = BlockElem::breakable_in(styles);
+    let equation_builders = full_equation_builder.region_split(breakable, regions);
+
+    let number_align = match elem.number_align(styles) {
+        SpecificAlignment::H(h) => SpecificAlignment::Both(h, VAlignment::Horizon),
+        SpecificAlignment::V(v) => SpecificAlignment::Both(OuterHAlignment::End, v),
+        SpecificAlignment::Both(h, v) => SpecificAlignment::Both(h, v),
+    }
+    .resolve(styles)
+    .x;
+
+    let equation_align = AlignElem::alignment_in(styles).resolve(styles).x;
+
+    // Add equation numbers to each equation region.
+    let mut frames = vec![];
+    let region_count = equation_builders.len();
+    for builder in equation_builders {
+        if builder.frames.is_empty() && region_count > 1 {
+            // Don't number empty regions, but do number empty equations.
+            frames.push(builder.build());
+            continue;
+        }
+
+        let frame = add_line_equation_numbers(
+            ctx,
+            styles,
+            regions,
+            builder,
+            numbering,
+            number_align,
+            equation_align,
+        )?;
+        frames.push(frame.mark_box());
+    }
+
+    Ok(Fragment::frames(frames))
+}
+
+fn get_equation_number(
+    ctx: &mut MathContext,
+    styles: StyleChain,
+    regions: Regions,
+    numbering: &Numbering,
+    location: Location,
+    span: Span,
+) -> SourceResult<(Frame, Abs)> {
     let pod = Region::new(regions.base(), Axes::splat(false));
     let counter = Counter::of(EquationElem::elem())
-        .display_at_loc(engine, elem.location().unwrap(), styles, numbering)?
+        .display_at_loc(ctx.engine, location, styles, numbering)?
         .spanned(span);
-    let number =
-        (engine.routines.layout_frame)(engine, &counter, locator.next(&()), styles, pod)?;
+    let number = (ctx.engine.routines.layout_frame)(
+        ctx.engine,
+        &counter,
+        ctx.locator.next(&()),
+        styles,
+        pod,
+    )?;
 
-    static NUMBER_GUTTER: Em = Em::new(0.5);
+    let full_number_width = number.width() + NUMBER_GUTTER.resolve(styles);
+
+    Ok((number, full_number_width))
+}
+
+fn add_line_equation_numbers(
+    ctx: &mut MathContext,
+    styles: StyleChain,
+    regions: Regions,
+    builder: MathRunFrameBuilder,
+    numbering: &Numbering,
+    number_align: FixedAlignment,
+    equation_align: FixedAlignment,
+) -> SourceResult<Frame> {
+    // Need to make sure following assumptions are fine:
+    // - number of frames is not zero
+    // - each frame is a line equation, and so has tag at the start and end.
+
+    // Get layouted number frame for each line.
+    // We also calculate the maximum width, and excess height above and below.
+    let mut max_width = Abs::zero();
+    let mut max_full_number_width = Abs::zero();
+    let mut excess_above = Abs::zero();
+    let mut excess_below = Abs::zero();
+    let mut numbers: Vec<Option<(Frame, Abs)>> = Vec::new();
+    let sub_count = builder.frames.len();
+    for (i, (sub, pos)) in builder.frames.iter().enumerate() {
+        let (_, FrameItem::Tag(Tag::Start(content))) = sub.items().next().unwrap() else {
+            unreachable!()
+        };
+
+        if let Some(label) = content.label() {
+            // Skip line if it has a do not label marker `<*>` attached to it.
+            if label.as_str() == "*" {
+                numbers.push(None);
+                max_width = max_width.max(sub.width());
+                continue;
+            }
+        }
+
+        let (number, full_number_width) = get_equation_number(
+            ctx,
+            styles,
+            regions,
+            numbering,
+            content.location().unwrap(),
+            content.span(),
+        )?;
+        let y = pos.y + sub.baseline() - number.baseline();
+
+        if i == 0 {
+            excess_above = excess_above.max(number.baseline() - sub.baseline());
+        } else if i == sub_count {
+            excess_below = excess_below.max(
+                (number.height() - number.baseline()) - (sub.height() - sub.baseline()),
+            );
+        }
+
+        numbers.push(Some((number, y)));
+
+        max_width = max_width.max(sub.width() + 2.0 * full_number_width);
+        max_full_number_width = max_full_number_width.max(full_number_width);
+    }
+
+    // Calculate new width of the builder.
+    let region_size_x = regions.size.x;
+    let width = if region_size_x.is_finite() { region_size_x } else { max_width };
+
+    // Build the final frame.
+    let mut final_frame = builder.build();
+
+    // Resize it.
+    // The vertical expansion is asymmetric on the top and bottom edges, so we
+    // first align at the top then translate the content downward later.
+    final_frame.resize(
+        Size::new(width, final_frame.height() + excess_above + excess_below),
+        Axes::<FixedAlignment>::new(equation_align, FixedAlignment::Start),
+    );
+    final_frame.translate(Point::with_y(excess_above));
+
+    // Add room for numbers if both it and the equation are aligned to the start or end.
+    final_frame.translate(Point::with_x(match (equation_align, number_align) {
+        (FixedAlignment::Start, FixedAlignment::Start) => max_full_number_width,
+        (FixedAlignment::End, FixedAlignment::End) => -max_full_number_width,
+        _ => Abs::zero(),
+    }));
+
+    // Add the numbers to each line.
+    for number in numbers {
+        match number {
+            Some((frame, y)) => {
+                let x = match number_align {
+                    FixedAlignment::Start => Abs::zero(),
+                    FixedAlignment::End => width - frame.width(),
+                    _ => unreachable!(),
+                };
+                final_frame.push_frame(Point::new(x, y + excess_above), frame.mark_box());
+            }
+            None => continue,
+        }
+    }
+
+    Ok(final_frame)
+}
+
+/// Resize an equation line's frame accordingly so that it encompasses the number.
+fn resize_line(
+    line: &mut Frame,
+    line_size: Axes<Abs>,
+    line_baseline: Abs,
+    number: &Frame,
+    equation_align: FixedAlignment,
+    width: Abs,
+) -> Point {
+    let excess_above = Abs::zero().max(number.baseline() - line_baseline);
+    let excess_below = Abs::zero()
+        .max((number.height() - number.baseline()) - (line_size.y - line_baseline));
+
+    // The vertical expansion is asymmetric on the top and bottom edges, so we
+    // first align at the top then translate the content downward later.
+    let resizing_offset = line.resize(
+        Size::new(width, line.height() + excess_above + excess_below),
+        Axes::<FixedAlignment>::new(equation_align, FixedAlignment::Start),
+    );
+    line.translate(Point::with_y(excess_above));
+    resizing_offset + Point::with_y(excess_above)
+}
+
+fn number_by_equation(
+    ctx: &mut MathContext,
+    styles: StyleChain,
+    regions: Regions,
+    elem: &Packed<EquationElem>,
+    numbering: &Numbering,
+    span: Span,
+) -> SourceResult<Fragment> {
+    let full_equation_builder =
+        ctx.layout_into_multiline_frame_builder(&elem.body, styles)?;
+
+    let breakable = BlockElem::breakable_in(styles);
+    let equation_builders = full_equation_builder.region_split(breakable, regions);
+
+    let location = if let Some(label) = elem.label() {
+        // Early exit if this element has a do not label marker `<*>` attached
+        // to it.
+        if label.as_str() == "*" {
+            let frames = equation_builders
+                .into_iter()
+                .map(MathRunFrameBuilder::build)
+                .collect();
+            return Ok(Fragment::frames(frames));
+        }
+
+        // Use the number at the location of the first EquationElem with the
+        // label. This also skips stepping the EquationElem counter.
+        get_equations(ctx.engine, label)
+            .first()
+            .map(|x| x.location().unwrap())
+            .unwrap_or(elem.location().unwrap())
+    } else {
+        elem.location().unwrap()
+    };
+
+    let pod = Region::new(regions.base(), Axes::splat(false));
+    let counter = Counter::of(EquationElem::elem())
+        .display_at_loc(ctx.engine, location, styles, numbering)?
+        .spanned(span);
+    let number = (ctx.engine.routines.layout_frame)(
+        ctx.engine,
+        &counter,
+        ctx.locator.next(&()),
+        styles,
+        pod,
+    )?;
+
     let full_number_width = number.width() + NUMBER_GUTTER.resolve(styles);
 
     let number_align = match elem.number_align(styles) {
@@ -233,24 +432,6 @@ pub fn layout_equation_block(
         .collect();
 
     Ok(Fragment::frames(frames))
-}
-
-fn find_math_font(
-    engine: &mut Engine<'_>,
-    styles: StyleChain,
-    span: Span,
-) -> SourceResult<Font> {
-    let variant = variant(styles);
-    let world = engine.world;
-    let Some(font) = families(styles).find_map(|family| {
-        let id = world.book().select(family, variant)?;
-        let font = world.font(id)?;
-        let _ = font.ttf().tables().math?.constants?;
-        Some(font)
-    }) else {
-        bail!(span, "current font does not support math");
-    };
-    Ok(font)
 }
 
 fn add_equation_number(
@@ -363,378 +544,4 @@ fn resize_equation(
     );
     equation.translate(Point::with_y(excess_above));
     resizing_offset + Point::with_y(excess_above)
-}
-
-/// The context for math layout.
-struct MathContext<'a, 'v, 'e> {
-    // External.
-    engine: &'v mut Engine<'e>,
-    locator: &'v mut SplitLocator<'a>,
-    region: Region,
-    // Font-related.
-    font: &'a Font,
-    ttf: &'a ttf_parser::Face<'a>,
-    table: ttf_parser::math::Table<'a>,
-    constants: ttf_parser::math::Constants<'a>,
-    dtls_table: Option<GlyphwiseSubsts<'a>>,
-    flac_table: Option<GlyphwiseSubsts<'a>>,
-    ssty_table: Option<GlyphwiseSubsts<'a>>,
-    glyphwise_tables: Option<Vec<GlyphwiseSubsts<'a>>>,
-    space_width: Em,
-    // Mutable.
-    fragments: Vec<MathFragment>,
-}
-
-impl<'a, 'v, 'e> MathContext<'a, 'v, 'e> {
-    /// Create a new math context.
-    fn new(
-        engine: &'v mut Engine<'e>,
-        locator: &'v mut SplitLocator<'a>,
-        styles: StyleChain<'a>,
-        base: Size,
-        font: &'a Font,
-    ) -> Self {
-        let math_table = font.ttf().tables().math.unwrap();
-        let gsub_table = font.ttf().tables().gsub;
-        let constants = math_table.constants.unwrap();
-
-        let feat = |tag: &[u8; 4]| {
-            GlyphwiseSubsts::new(gsub_table, Feature::new(Tag::from_bytes(tag), 0, ..))
-        };
-
-        let features = features(styles);
-        let glyphwise_tables = Some(
-            features
-                .into_iter()
-                .filter_map(|feature| GlyphwiseSubsts::new(gsub_table, feature))
-                .collect(),
-        );
-
-        let ttf = font.ttf();
-        let space_width = ttf
-            .glyph_index(' ')
-            .and_then(|id| ttf.glyph_hor_advance(id))
-            .map(|advance| font.to_em(advance))
-            .unwrap_or(THICK);
-
-        Self {
-            engine,
-            locator,
-            region: Region::new(base, Axes::splat(false)),
-            font,
-            ttf,
-            table: math_table,
-            constants,
-            dtls_table: feat(b"dtls"),
-            flac_table: feat(b"flac"),
-            ssty_table: feat(b"ssty"),
-            glyphwise_tables,
-            space_width,
-            fragments: vec![],
-        }
-    }
-
-    /// Push a fragment.
-    fn push(&mut self, fragment: impl Into<MathFragment>) {
-        self.fragments.push(fragment.into());
-    }
-
-    /// Push multiple fragments.
-    fn extend(&mut self, fragments: impl IntoIterator<Item = MathFragment>) {
-        self.fragments.extend(fragments);
-    }
-
-    /// Collect all equations with the same label as elem together.
-    fn collect_equations(
-        &mut self,
-        elem: &Packed<EquationElem>,
-        styles: StyleChain,
-    ) -> SourceResult<MathRunEquation> {
-        let equations = if let Some(label) = elem.label() {
-            let target = Selector::And(
-                [Selector::Label(label), select_where!(EquationElem, Block => true)]
-                    .into_iter()
-                    .collect(),
-            );
-
-            self.engine
-                .introspector
-                .query(&target)
-                .into_iter()
-                .map(|x| x.into_packed::<EquationElem>().unwrap())
-                .collect()
-        } else {
-            vec![elem.clone()]
-        };
-
-        let mut runs: Vec<MathRun> = Vec::new();
-        let mut index: usize = 0;
-        for (i, equation) in equations.into_iter().enumerate() {
-            if equation == *elem {
-                index = i;
-            }
-            runs.push(self.layout_into_run(&equation.body, styles)?);
-        }
-
-        Ok(MathRunEquation { runs, index })
-    }
-
-    /// Layout the given element and return the result as a [`MathRun`].
-    fn layout_into_run(
-        &mut self,
-        elem: &Content,
-        styles: StyleChain,
-    ) -> SourceResult<MathRun> {
-        Ok(MathRun::new(self.layout_into_fragments(elem, styles)?))
-    }
-
-    /// Layout the given element and return the resulting [`MathFragment`]s.
-    fn layout_into_fragments(
-        &mut self,
-        elem: &Content,
-        styles: StyleChain,
-    ) -> SourceResult<Vec<MathFragment>> {
-        // The element's layout_math() changes the fragments held in this
-        // MathContext object, but for convenience this function shouldn't change
-        // them, so we restore the MathContext's fragments after obtaining the
-        // layout result.
-        let prev = std::mem::take(&mut self.fragments);
-        self.layout_into_self(elem, styles)?;
-        Ok(std::mem::replace(&mut self.fragments, prev))
-    }
-
-    /// Layout the given element and return the result as a
-    /// unified [`MathFragment`].
-    fn layout_into_fragment(
-        &mut self,
-        elem: &Content,
-        styles: StyleChain,
-    ) -> SourceResult<MathFragment> {
-        Ok(self.layout_into_run(elem, styles)?.into_fragment(self, styles))
-    }
-
-    /// Layout the given element and return the result as a [`Frame`].
-    fn layout_into_frame(
-        &mut self,
-        elem: &Content,
-        styles: StyleChain,
-    ) -> SourceResult<Frame> {
-        Ok(self.layout_into_fragment(elem, styles)?.into_frame())
-    }
-
-    /// Layout arbitrary content.
-    fn layout_into_self(
-        &mut self,
-        content: &Content,
-        styles: StyleChain,
-    ) -> SourceResult<()> {
-        let arenas = Arenas::default();
-        let pairs = (self.engine.routines.realize)(
-            RealizationKind::Math,
-            self.engine,
-            self.locator,
-            &arenas,
-            content,
-            styles,
-        )?;
-
-        let outer = styles;
-        for (elem, styles) in pairs {
-            // Hack because the font is fixed in math.
-            if styles != outer && TextElem::font_in(styles) != TextElem::font_in(outer) {
-                let frame = layout_external(elem, self, styles)?;
-                self.push(FrameFragment::new(self, styles, frame).with_spaced(true));
-                continue;
-            }
-
-            layout_realized(elem, self, styles)?;
-        }
-
-        Ok(())
-    }
-}
-
-/// Lays out a leaf element resulting from realization.
-fn layout_realized(
-    elem: &Content,
-    ctx: &mut MathContext,
-    styles: StyleChain,
-) -> SourceResult<()> {
-    if let Some(elem) = elem.to_packed::<TagElem>() {
-        ctx.push(MathFragment::Tag(elem.tag.clone()));
-    } else if elem.is::<SpaceElem>() {
-        let font_size = scaled_font_size(ctx, styles);
-        ctx.push(MathFragment::Space(ctx.space_width.at(font_size)));
-    } else if elem.is::<LinebreakElem>() {
-        ctx.push(MathFragment::Linebreak);
-    } else if let Some(elem) = elem.to_packed::<HElem>() {
-        layout_h(elem, ctx, styles)?;
-    } else if let Some(elem) = elem.to_packed::<TextElem>() {
-        self::text::layout_text(elem, ctx, styles)?;
-    } else if let Some(elem) = elem.to_packed::<BoxElem>() {
-        layout_box(elem, ctx, styles)?;
-    } else if elem.is::<AlignPointElem>() {
-        ctx.push(MathFragment::Align);
-    } else if let Some(elem) = elem.to_packed::<ClassElem>() {
-        layout_class(elem, ctx, styles)?;
-    } else if let Some(elem) = elem.to_packed::<AccentElem>() {
-        self::accent::layout_accent(elem, ctx, styles)?;
-    } else if let Some(elem) = elem.to_packed::<AttachElem>() {
-        self::attach::layout_attach(elem, ctx, styles)?;
-    } else if let Some(elem) = elem.to_packed::<PrimesElem>() {
-        self::attach::layout_primes(elem, ctx, styles)?;
-    } else if let Some(elem) = elem.to_packed::<ScriptsElem>() {
-        self::attach::layout_scripts(elem, ctx, styles)?;
-    } else if let Some(elem) = elem.to_packed::<LimitsElem>() {
-        self::attach::layout_limits(elem, ctx, styles)?;
-    } else if let Some(elem) = elem.to_packed::<CancelElem>() {
-        self::cancel::layout_cancel(elem, ctx, styles)?
-    } else if let Some(elem) = elem.to_packed::<FracElem>() {
-        self::frac::layout_frac(elem, ctx, styles)?;
-    } else if let Some(elem) = elem.to_packed::<BinomElem>() {
-        self::frac::layout_binom(elem, ctx, styles)?;
-    } else if let Some(elem) = elem.to_packed::<LrElem>() {
-        self::lr::layout_lr(elem, ctx, styles)?
-    } else if let Some(elem) = elem.to_packed::<MidElem>() {
-        self::lr::layout_mid(elem, ctx, styles)?
-    } else if let Some(elem) = elem.to_packed::<VecElem>() {
-        self::mat::layout_vec(elem, ctx, styles)?
-    } else if let Some(elem) = elem.to_packed::<MatElem>() {
-        self::mat::layout_mat(elem, ctx, styles)?
-    } else if let Some(elem) = elem.to_packed::<CasesElem>() {
-        self::mat::layout_cases(elem, ctx, styles)?
-    } else if let Some(elem) = elem.to_packed::<OpElem>() {
-        layout_op(elem, ctx, styles)?
-    } else if let Some(elem) = elem.to_packed::<RootElem>() {
-        self::root::layout_root(elem, ctx, styles)?
-    } else if let Some(elem) = elem.to_packed::<StretchElem>() {
-        self::stretch::layout_stretch(elem, ctx, styles)?
-    } else if let Some(elem) = elem.to_packed::<UnderlineElem>() {
-        self::underover::layout_underline(elem, ctx, styles)?
-    } else if let Some(elem) = elem.to_packed::<OverlineElem>() {
-        self::underover::layout_overline(elem, ctx, styles)?
-    } else if let Some(elem) = elem.to_packed::<UnderbraceElem>() {
-        self::underover::layout_underbrace(elem, ctx, styles)?
-    } else if let Some(elem) = elem.to_packed::<OverbraceElem>() {
-        self::underover::layout_overbrace(elem, ctx, styles)?
-    } else if let Some(elem) = elem.to_packed::<UnderbracketElem>() {
-        self::underover::layout_underbracket(elem, ctx, styles)?
-    } else if let Some(elem) = elem.to_packed::<OverbracketElem>() {
-        self::underover::layout_overbracket(elem, ctx, styles)?
-    } else if let Some(elem) = elem.to_packed::<UnderparenElem>() {
-        self::underover::layout_underparen(elem, ctx, styles)?
-    } else if let Some(elem) = elem.to_packed::<OverparenElem>() {
-        self::underover::layout_overparen(elem, ctx, styles)?
-    } else if let Some(elem) = elem.to_packed::<UndershellElem>() {
-        self::underover::layout_undershell(elem, ctx, styles)?
-    } else if let Some(elem) = elem.to_packed::<OvershellElem>() {
-        self::underover::layout_overshell(elem, ctx, styles)?
-    } else {
-        let mut frame = layout_external(elem, ctx, styles)?;
-        if !frame.has_baseline() {
-            let axis = scaled!(ctx, styles, axis_height);
-            frame.set_baseline(frame.height() / 2.0 + axis);
-        }
-        ctx.push(
-            FrameFragment::new(ctx, styles, frame)
-                .with_spaced(true)
-                .with_ignorant(elem.is::<PlaceElem>()),
-        );
-    }
-
-    Ok(())
-}
-
-/// Lays out an [`BoxElem`].
-fn layout_box(
-    elem: &Packed<BoxElem>,
-    ctx: &mut MathContext,
-    styles: StyleChain,
-) -> SourceResult<()> {
-    let local = TextElem::set_size(TextSize(scaled_font_size(ctx, styles).into())).wrap();
-    let frame = (ctx.engine.routines.layout_box)(
-        elem,
-        ctx.engine,
-        ctx.locator.next(&elem.span()),
-        styles.chain(&local),
-        ctx.region.size,
-    )?;
-    ctx.push(FrameFragment::new(ctx, styles, frame).with_spaced(true));
-    Ok(())
-}
-
-/// Lays out an [`HElem`].
-fn layout_h(
-    elem: &Packed<HElem>,
-    ctx: &mut MathContext,
-    styles: StyleChain,
-) -> SourceResult<()> {
-    if let Spacing::Rel(rel) = elem.amount() {
-        if rel.rel.is_zero() {
-            ctx.push(MathFragment::Spacing(
-                rel.abs.at(scaled_font_size(ctx, styles)),
-                elem.weak(styles),
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Lays out a [`ClassElem`].
-#[typst_macros::time(name = "math.op", span = elem.span())]
-fn layout_class(
-    elem: &Packed<ClassElem>,
-    ctx: &mut MathContext,
-    styles: StyleChain,
-) -> SourceResult<()> {
-    let class = *elem.class();
-    let style = EquationElem::set_class(Some(class)).wrap();
-    let mut fragment = ctx.layout_into_fragment(elem.body(), styles.chain(&style))?;
-    fragment.set_class(class);
-    fragment.set_limits(Limits::for_class(class));
-    ctx.push(fragment);
-    Ok(())
-}
-
-/// Lays out an [`OpElem`].
-#[typst_macros::time(name = "math.op", span = elem.span())]
-fn layout_op(
-    elem: &Packed<OpElem>,
-    ctx: &mut MathContext,
-    styles: StyleChain,
-) -> SourceResult<()> {
-    let fragment = ctx.layout_into_fragment(elem.text(), styles)?;
-    let italics = fragment.italics_correction();
-    let accent_attach = fragment.accent_attach();
-    let text_like = fragment.is_text_like();
-
-    ctx.push(
-        FrameFragment::new(ctx, styles, fragment.into_frame())
-            .with_class(MathClass::Large)
-            .with_italics_correction(italics)
-            .with_accent_attach(accent_attach)
-            .with_text_like(text_like)
-            .with_limits(if elem.limits(styles) {
-                Limits::Display
-            } else {
-                Limits::Never
-            }),
-    );
-    Ok(())
-}
-
-/// Layout into a frame with normal layout.
-fn layout_external(
-    content: &Content,
-    ctx: &mut MathContext,
-    styles: StyleChain,
-) -> SourceResult<Frame> {
-    let local = TextElem::set_size(TextSize(scaled_font_size(ctx, styles).into())).wrap();
-    (ctx.engine.routines.layout_frame)(
-        ctx.engine,
-        content,
-        ctx.locator.next(&content.span()),
-        styles.chain(&local),
-        ctx.region,
-    )
 }

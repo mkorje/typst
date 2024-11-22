@@ -198,7 +198,7 @@ impl Show for Packed<RefElem> {
     #[typst_macros::time(name = "ref", span = self.span())]
     fn show(&self, engine: &mut Engine, styles: StyleChain) -> SourceResult<Content> {
         let target = *self.target();
-        let elem = engine.introspector.query_label(target);
+        let elem = engine.introspector.query_label_ref(target);
         let span = self.span();
 
         let form = self.form(styles);

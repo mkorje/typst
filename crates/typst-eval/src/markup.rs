@@ -49,6 +49,17 @@ fn eval_markup<'a>(
                 let tail = eval_markup(vm, exprs)?;
                 seq.push(tail.styled_with_recipe(&mut vm.engine, vm.context, recipe)?)
             }
+            ast::Expr::NoNumberMarker(_) => {
+                if let Some(elem) = seq.iter_mut().rev().find(|node| node.is::<EquationElem>()) {
+                    elem.to_packed_mut::<EquationElem>().unwrap().push_numbering(None);
+                } else {
+                    vm.engine.sink.warn(warning!(
+                        expr.span(),
+                        "do not number marker is not attached to an equation";
+                        hint: "do not number markers only have an affect on equations",
+                    ));
+                }
+            }
             expr => match expr.eval(vm)? {
                 Value::Label(label) => {
                     if let Some(elem) =

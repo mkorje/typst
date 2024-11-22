@@ -813,6 +813,11 @@ impl<T: NativeElement> Packed<T> {
         (*self).clone()
     }
 
+    /// Extract the raw underlying element.
+    pub fn unpack_mut(&mut self) -> &mut T {
+        &mut *self
+    }
+
     /// The element's span.
     pub fn span(&self) -> Span {
         self.0.span()
