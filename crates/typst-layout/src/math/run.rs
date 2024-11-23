@@ -494,7 +494,10 @@ impl MathRunFrameBuilder {
 }
 
 fn affects_row_height(fragment: &MathFragment) -> bool {
-    !matches!(fragment, MathFragment::Align | MathFragment::Linebreak)
+    !matches!(
+        fragment,
+        MathFragment::Align | MathFragment::Linebreak | MathFragment::Tag(_)
+    )
 }
 
 /// Create the spacing between two fragments in a given style.
