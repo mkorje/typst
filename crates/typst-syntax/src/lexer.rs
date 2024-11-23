@@ -568,6 +568,8 @@ impl Lexer<'_> {
             '&' => SyntaxKind::MathAlignPoint,
             '√' | '∛' | '∜' => SyntaxKind::Root,
 
+            '<' if self.s.at(is_math_id_continue) => self.math_line_label(),
+
             // Identifiers.
             c if is_math_id_start(c) && self.s.at(is_math_id_continue) => {
                 self.s.eat_while(is_math_id_continue);
@@ -627,6 +629,19 @@ impl Lexer<'_> {
             self.s.jump(start + len);
         }
         SyntaxKind::Text
+    }
+
+    fn math_line_label(&mut self) -> SyntaxKind {
+        let label = self.s.eat_while(is_valid_in_math_line_label_literal);
+        if label.is_empty() {
+            return self.error("label cannot be empty");
+        }
+
+        if !self.s.eat_if('>') {
+            return self.error("unclosed label");
+        }
+
+        SyntaxKind::MathLineLabel
     }
 }
 
@@ -972,6 +987,12 @@ fn is_math_id_continue(c: char) -> bool {
 #[inline]
 fn is_valid_in_label_literal(c: char) -> bool {
     is_id_continue(c) || matches!(c, ':' | '.')
+}
+
+/// Whether a character can be part of a math line label literal's name.
+#[inline]
+fn is_valid_in_math_line_label_literal(c: char) -> bool {
+    is_math_id_continue(c) || matches!(c, ':' | '.')
 }
 
 /// Returns true if this string is valid in a label literal.

@@ -191,6 +191,8 @@ fn layout_realized(
         layout_box(elem, ctx, styles)?;
     } else if elem.is::<AlignPointElem>() {
         ctx.push(MathFragment::Align);
+    } else if elem.is::<LineLabelElem>() {
+        ctx.push(MathFragment::Linebreak);
     } else if let Some(elem) = elem.to_packed::<ClassElem>() {
         layout_class(elem, ctx, styles)?;
     } else if let Some(elem) = elem.to_packed::<AccentElem>() {

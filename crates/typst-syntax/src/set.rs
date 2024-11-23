@@ -63,6 +63,7 @@ pub const MATH_EXPR: SyntaxSet = syntax_set!(
     MathShorthand,
     Linebreak,
     MathAlignPoint,
+    MathLineLabel,
     Escape,
     Str,
     Root,

@@ -129,6 +129,8 @@ pub enum Expr<'a> {
     MathShorthand(MathShorthand<'a>),
     /// An alignment point in math: `&`.
     MathAlignPoint(MathAlignPoint<'a>),
+    /// A line label in math: `<eq1:a>`.
+    MathLineLabel(MathLineLabel<'a>),
     /// Matched delimiters in math: `[x + y]`.
     MathDelimited(MathDelimited<'a>),
     /// A base with optional attachments in math: `a_1^2`.
@@ -236,6 +238,7 @@ impl<'a> AstNode<'a> for Expr<'a> {
             SyntaxKind::MathIdent => node.cast().map(Self::MathIdent),
             SyntaxKind::MathShorthand => node.cast().map(Self::MathShorthand),
             SyntaxKind::MathAlignPoint => node.cast().map(Self::MathAlignPoint),
+            SyntaxKind::MathLineLabel => node.cast().map(Self::MathLineLabel),
             SyntaxKind::MathDelimited => node.cast().map(Self::MathDelimited),
             SyntaxKind::MathAttach => node.cast().map(Self::MathAttach),
             SyntaxKind::MathPrimes => node.cast().map(Self::MathPrimes),
@@ -300,6 +303,7 @@ impl<'a> AstNode<'a> for Expr<'a> {
             Self::MathIdent(v) => v.to_untyped(),
             Self::MathShorthand(v) => v.to_untyped(),
             Self::MathAlignPoint(v) => v.to_untyped(),
+            Self::MathLineLabel(v) => v.to_untyped(),
             Self::MathDelimited(v) => v.to_untyped(),
             Self::MathAttach(v) => v.to_untyped(),
             Self::MathPrimes(v) => v.to_untyped(),
@@ -795,6 +799,18 @@ impl MathShorthand<'_> {
 node! {
     /// An alignment point in math: `&`.
     MathAlignPoint
+}
+
+node! {
+    /// A line label in math: `<eq1:a>`.
+    MathLineLabel
+}
+
+impl<'a> MathLineLabel<'a> {
+    /// Get the label's text.
+    pub fn get(self) -> &'a str {
+        self.0.text().trim_start_matches('<').trim_end_matches('>')
+    }
 }
 
 node! {

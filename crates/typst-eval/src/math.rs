@@ -1,8 +1,8 @@
 use ecow::eco_format;
 use typst_library::diag::{At, SourceResult};
-use typst_library::foundations::{Content, NativeElement, Symbol, Value};
+use typst_library::foundations::{Content, Label, NativeElement, Symbol, Value};
 use typst_library::math::{
-    AlignPointElem, AttachElem, FracElem, LrElem, PrimesElem, RootElem,
+    AlignPointElem, AttachElem, FracElem, LineLabelElem, LrElem, PrimesElem, RootElem,
 };
 use typst_library::text::TextElem;
 use typst_syntax::ast::{self, AstNode};
@@ -41,6 +41,14 @@ impl Eval for ast::MathAlignPoint<'_> {
 
     fn eval(self, _: &mut Vm) -> SourceResult<Self::Output> {
         Ok(AlignPointElem::shared().clone())
+    }
+}
+
+impl Eval for ast::MathLineLabel<'_> {
+    type Output = Content;
+
+    fn eval(self, _: &mut Vm) -> SourceResult<Self::Output> {
+        Ok(LineLabelElem::new(Label::new(self.get())).pack())
     }
 }
 

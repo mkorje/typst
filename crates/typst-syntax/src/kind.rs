@@ -79,6 +79,8 @@ pub enum SyntaxKind {
     MathShorthand,
     /// An alignment point in math: `&`.
     MathAlignPoint,
+    /// A line label in math: `<eq1:a>`.
+    MathLineLabel,
     /// Matched delimiters in math: `[x + y]`.
     MathDelimited,
     /// A base with optional attachments in math: `a_1^2`.
@@ -404,6 +406,7 @@ impl SyntaxKind {
             Self::MathIdent => "math identifier",
             Self::MathShorthand => "math shorthand",
             Self::MathAlignPoint => "math alignment point",
+            Self::MathLineLabel => "label",
             Self::MathDelimited => "delimited math",
             Self::MathAttach => "math attachments",
             Self::MathFrac => "math fraction",

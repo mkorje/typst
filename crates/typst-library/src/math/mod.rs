@@ -24,11 +24,12 @@ pub use self::root::*;
 pub use self::style::*;
 pub use self::underover::*;
 
+use ecow::EcoString;
 use typst_utils::singleton;
 use unicode_math_class::MathClass;
 
 use crate::foundations::{
-    category, elem, Category, Content, Module, NativeElement, Scope,
+    category, elem, Category, Content, Label, Module, NativeElement, Repr, Scope,
 };
 use crate::layout::{Em, HElem};
 use crate::text::TextElem;
@@ -223,6 +224,20 @@ impl AlignPointElem {
     /// Get the globally shared alignment point element.
     pub fn shared() -> &'static Content {
         singleton!(Content, AlignPointElem::new().pack())
+    }
+}
+
+/// A line label in math: `<eq1:a>`.
+#[elem(Mathy, Repr)]
+pub struct LineLabelElem {
+    /// The underlying label.
+    #[required]
+    pub value: Label,
+}
+
+impl Repr for LineLabelElem {
+    fn repr(&self) -> EcoString {
+        "linebreak()".into()
     }
 }
 
