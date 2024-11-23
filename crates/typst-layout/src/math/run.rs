@@ -1,7 +1,9 @@
 use std::iter::once;
 
 use typst_library::foundations::{Resolve, StyleChain};
-use typst_library::layout::{Abs, AlignElem, Em, Frame, InlineItem, Point, Size};
+use typst_library::layout::{
+    Abs, AlignElem, Em, Frame, InlineItem, Point, Regions, Size,
+};
 use typst_library::math::{EquationElem, MathSize, MEDIUM, THICK, THIN};
 use typst_library::model::ParElem;
 use unicode_math_class::MathClass;
@@ -415,6 +417,79 @@ impl MathRunFrameBuilder {
             frame.push_frame(pos, sub);
         }
         frame
+    }
+
+    /// Consumes the builder and splits its rows to match the given regions
+    /// one-to-one, returning a Vec of builders.
+    pub fn region_split(self, breakable: bool, regions: Regions) -> Vec<Self> {
+        if !breakable {
+            return vec![self];
+        }
+
+        let width = self.size.x;
+
+        let mut rows = self.frames.into_iter().peekable();
+        let mut equation_builders = vec![];
+        let mut last_first_pos = Point::zero();
+        let mut regions = regions;
+
+        loop {
+            // Keep track of the position of the first row in this region,
+            // so that the offset can be reverted later.
+            let Some(&(_, first_pos)) = rows.peek() else { break };
+            last_first_pos = first_pos;
+
+            let mut frames = vec![];
+            let mut height = Abs::zero();
+            while let Some((sub, pos)) = rows.peek() {
+                let mut pos = *pos;
+                pos.y -= first_pos.y;
+
+                // Finish this region if the line doesn't fit. Only do it if
+                // we placed at least one line _or_ we still have non-last
+                // regions. Crucially, we don't want to infinitely create
+                // new regions which are too small.
+                if !regions.size.y.fits(sub.height() + pos.y)
+                    && (regions.may_progress()
+                        || (regions.may_break() && !frames.is_empty()))
+                {
+                    break;
+                }
+
+                let (sub, _) = rows.next().unwrap();
+                height = height.max(pos.y + sub.height());
+                frames.push((sub, pos));
+            }
+
+            equation_builders
+                .push(MathRunFrameBuilder { frames, size: Size::new(width, height) });
+            regions.next();
+        }
+
+        // Append remaining rows to the equation builder of the last region.
+        if let Some(equation_builder) = equation_builders.last_mut() {
+            equation_builder.frames.extend(rows.map(|(frame, mut pos)| {
+                pos.y -= last_first_pos.y;
+                (frame, pos)
+            }));
+
+            let height = equation_builder
+                .frames
+                .iter()
+                .map(|(frame, pos)| frame.height() + pos.y)
+                .max()
+                .unwrap_or(equation_builder.size.y);
+
+            equation_builder.size.y = height;
+        }
+
+        // Ensure that there is at least one frame, even for empty equations.
+        if equation_builders.is_empty() {
+            equation_builders
+                .push(MathRunFrameBuilder { frames: vec![], size: Size::zero() });
+        }
+
+        equation_builders
     }
 }
 
