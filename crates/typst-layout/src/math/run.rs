@@ -61,7 +61,7 @@ impl MathRun {
                 }
 
                 // New line, new things.
-                MathFragment::Linebreak => {
+                MathFragment::Linebreak(_) => {
                     resolved.push(fragment);
                     space = None;
                     last = None;
@@ -115,18 +115,21 @@ impl MathRun {
     /// Split by linebreaks, and copy [`MathFragment`]s into rows.
     pub fn rows(&self) -> Vec<Self> {
         self.0
-            .split(|frag| matches!(frag, MathFragment::Linebreak))
+            .split_inclusive(|frag| matches!(frag, MathFragment::Linebreak(_)))
             .map(|slice| Self(slice.to_vec()))
             .collect()
     }
 
     pub fn row_count(&self) -> usize {
-        let mut count =
-            1 + self.0.iter().filter(|f| matches!(f, MathFragment::Linebreak)).count();
+        let mut count = 1 + self
+            .0
+            .iter()
+            .filter(|f| matches!(f, MathFragment::Linebreak(_)))
+            .count();
 
         // A linebreak at the very end does not introduce an extra row.
         if let Some(f) = self.0.last() {
-            if matches!(f, MathFragment::Linebreak) {
+            if matches!(f, MathFragment::Linebreak(_)) {
                 count -= 1
             }
         }
@@ -367,7 +370,7 @@ impl MathRun {
     }
 
     pub fn is_multiline(&self) -> bool {
-        self.iter().any(|frag| matches!(frag, MathFragment::Linebreak))
+        self.iter().any(|frag| matches!(frag, MathFragment::Linebreak(_)))
     }
 }
 
@@ -496,7 +499,7 @@ impl MathRunFrameBuilder {
 fn affects_row_height(fragment: &MathFragment) -> bool {
     !matches!(
         fragment,
-        MathFragment::Align | MathFragment::Linebreak | MathFragment::Tag(_)
+        MathFragment::Align | MathFragment::Linebreak(_) | MathFragment::Tag(_)
     )
 }
 

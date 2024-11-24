@@ -108,6 +108,11 @@ pub fn layout_equation_block(
         .layout_into_run(&elem.body, styles)?
         .multiline_frame_builder(&ctx, styles);
 
+    ctx.layout_into_self(&elem.body, styles)?;
+    println!("\n{:?}\n", elem.body);
+    println!("\n{:?}\n", ctx.content);
+    println!("\n{:?}\n", ctx.fragments);
+
     let breakable = BlockElem::breakable_in(styles);
     let equation_builders = full_equation_builder.region_split(breakable, regions);
 

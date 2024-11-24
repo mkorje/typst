@@ -5,7 +5,7 @@ use smallvec::SmallVec;
 use ttf_parser::gsub::{AlternateSubstitution, SingleSubstitution, SubstitutionSubtable};
 use ttf_parser::opentype_layout::LayoutTable;
 use ttf_parser::{GlyphId, Rect};
-use typst_library::foundations::StyleChain;
+use typst_library::foundations::{Label, StyleChain};
 use typst_library::introspection::Tag;
 use typst_library::layout::{
     Abs, Axis, Corner, Em, Frame, FrameItem, HideElem, Point, Size, VAlignment,
@@ -26,7 +26,7 @@ pub enum MathFragment {
     Frame(FrameFragment),
     Spacing(Abs, bool),
     Space(Abs),
-    Linebreak,
+    Linebreak(Option<Label>),
     Align,
     Tag(Tag),
 }
@@ -89,7 +89,7 @@ impl MathFragment {
             Self::Frame(fragment) => fragment.class,
             Self::Spacing(_, _) => MathClass::Space,
             Self::Space(_) => MathClass::Space,
-            Self::Linebreak => MathClass::Space,
+            Self::Linebreak(_) => MathClass::Space,
             Self::Align => MathClass::Special,
             Self::Tag(_) => MathClass::Special,
         }

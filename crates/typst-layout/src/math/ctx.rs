@@ -32,6 +32,8 @@ pub struct MathContext<'a, 'v, 'e> {
     pub ssty_table: Option<GlyphwiseSubsts<'a>>,
     pub glyphwise_tables: Option<Vec<GlyphwiseSubsts<'a>>>,
     pub space_width: Em,
+    // Realized content.
+    pub content: Vec<Content>,
     // Mutable.
     pub fragments: Vec<MathFragment>,
 }
@@ -81,6 +83,7 @@ impl<'a, 'v, 'e> MathContext<'a, 'v, 'e> {
             ssty_table: feat(b"ssty"),
             glyphwise_tables,
             space_width,
+            content: vec![],
             fragments: vec![],
         }
     }
@@ -114,9 +117,11 @@ impl<'a, 'v, 'e> MathContext<'a, 'v, 'e> {
         // MathContext object, but for convenience this function shouldn't change
         // them, so we restore the MathContext's fragments after obtaining the
         // layout result.
-        let prev = std::mem::take(&mut self.fragments);
+        let prev_content = std::mem::take(&mut self.content);
+        let prev_fragments = std::mem::take(&mut self.fragments);
         self.layout_into_self(elem, styles)?;
-        Ok(std::mem::replace(&mut self.fragments, prev))
+        let _ = std::mem::replace(&mut self.content, prev_content);
+        Ok(std::mem::replace(&mut self.fragments, prev_fragments))
     }
 
     /// Layout the given element and return the result as a
@@ -139,7 +144,7 @@ impl<'a, 'v, 'e> MathContext<'a, 'v, 'e> {
     }
 
     /// Layout arbitrary content.
-    fn layout_into_self(
+    pub fn layout_into_self(
         &mut self,
         content: &Content,
         styles: StyleChain,
@@ -154,8 +159,22 @@ impl<'a, 'v, 'e> MathContext<'a, 'v, 'e> {
             styles,
         )?;
 
+        // let rows: Vec<_> = pairs
+        //     .clone()
+        //     .into_iter()
+        //     .map(|(elem, _)| elem)
+        //     .collect::<Vec<_>>()
+        //     .split_inclusive(|elem| elem.is::<LinebreakElem>() || elem.is::<LineLabelElem>())
+        //     .map(|slice| slice.to_vec())
+        //     .collect();
+        // println!("{:?}\n", rows);
+        // for (elem, _) in &pairs {
+        //     println!("\t{:?}", elem);
+        // }
         let outer = styles;
         for (elem, styles) in pairs {
+            self.content.push(elem.clone());
+
             // Hack because the font is fixed in math.
             if styles != outer && TextElem::font_in(styles) != TextElem::font_in(outer) {
                 let frame = layout_external(elem, self, styles)?;
@@ -182,7 +201,7 @@ fn layout_realized(
         let font_size = scaled_font_size(ctx, styles);
         ctx.push(MathFragment::Space(ctx.space_width.at(font_size)));
     } else if elem.is::<LinebreakElem>() {
-        ctx.push(MathFragment::Linebreak);
+        ctx.push(MathFragment::Linebreak(None));
     } else if let Some(elem) = elem.to_packed::<HElem>() {
         layout_h(elem, ctx, styles)?;
     } else if let Some(elem) = elem.to_packed::<TextElem>() {
@@ -191,8 +210,8 @@ fn layout_realized(
         layout_box(elem, ctx, styles)?;
     } else if elem.is::<AlignPointElem>() {
         ctx.push(MathFragment::Align);
-    } else if elem.is::<LineLabelElem>() {
-        ctx.push(MathFragment::Linebreak);
+    } else if let Some(elem) = elem.to_packed::<LineLabelElem>() {
+        ctx.push(MathFragment::Linebreak(Some(*elem.value())));
     } else if let Some(elem) = elem.to_packed::<ClassElem>() {
         layout_class(elem, ctx, styles)?;
     } else if let Some(elem) = elem.to_packed::<AccentElem>() {

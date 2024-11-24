@@ -88,7 +88,7 @@ pub fn layout_text(
             let mut fragments = vec![];
             for (i, piece) in text.split(is_newline).enumerate() {
                 if i != 0 {
-                    fragments.push(MathFragment::Linebreak);
+                    fragments.push(MathFragment::Linebreak(None));
                 }
                 if !piece.is_empty() {
                     fragments.push(layout_complex_text(piece, ctx, span, styles)?.into());
