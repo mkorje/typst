@@ -14,6 +14,7 @@ use crate::visualize::Stroke;
 
 const DEFAULT_ROW_GAP: Em = Em::new(0.2);
 const DEFAULT_COL_GAP: Em = Em::new(0.5);
+const DEFAULT_PADDING: Em = Em::new(0.16667);
 
 /// A column vector.
 ///
@@ -39,6 +40,16 @@ pub struct VecElem {
     /// ```
     #[default(DelimiterPair::PAREN)]
     pub delim: DelimiterPair,
+
+    /// The gap between the delimiters and the elements.
+    ///
+    /// ```example
+    /// #set math.vec(padding: 1em)
+    /// $ vec(1, 2) $
+    /// ```
+    #[resolve]
+    #[default(DEFAULT_PADDING.into())]
+    pub padding: Rel<Length>,
 
     /// The horizontal alignment that each element should have.
     ///
@@ -100,6 +111,16 @@ pub struct MatElem {
     /// ```
     #[default(DelimiterPair::PAREN)]
     pub delim: DelimiterPair,
+
+    /// The gap between the delimiters and the cells.
+    ///
+    /// ```example
+    /// #set math.mat(padding: 1em)
+    /// $ mat(1, 2; 3, 4) $
+    /// ```
+    #[resolve]
+    #[default(DEFAULT_PADDING.into())]
+    pub padding: Rel<Length>,
 
     /// The horizontal alignment that each cell should have.
     ///
@@ -243,6 +264,16 @@ pub struct CasesElem {
     /// ```
     #[default(DelimiterPair::BRACE)]
     pub delim: DelimiterPair,
+
+    /// The gap between the delimiter and the branches.
+    ///
+    /// ```example
+    /// #set math.cases(padding: 1em)
+    /// $ x = cases(1, 2) $
+    /// ```
+    #[resolve]
+    #[default(DEFAULT_PADDING.into())]
+    pub padding: Rel<Length>,
 
     /// Whether the direction of cases should be reversed.
     ///

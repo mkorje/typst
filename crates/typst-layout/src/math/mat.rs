@@ -10,7 +10,8 @@ use typst_syntax::Span;
 
 use super::{
     alignments, delimiter_alignment, stack, style_for_denominator, AlignmentResult,
-    FrameFragment, GlyphFragment, LeftRightAlternator, MathContext, DELIM_SHORT_FALL,
+    FrameFragment, GlyphFragment, LeftRightAlternator, MathContext, MathFragment,
+    DELIM_SHORT_FALL,
 };
 
 const VERTICAL_PADDING: Ratio = Ratio::new(0.1);
@@ -33,7 +34,15 @@ pub fn layout_vec(
         LeftRightAlternator::Right,
     )?;
 
-    layout_delimiters(ctx, styles, frame, delim.open(), delim.close(), elem.span())
+    layout_delimiters(
+        ctx,
+        styles,
+        frame,
+        delim.open(),
+        delim.close(),
+        elem.padding(styles),
+        elem.span(),
+    )
 }
 
 /// Lays out a [`MatElem`].
@@ -83,7 +92,15 @@ pub fn layout_mat(
         elem.span(),
     )?;
 
-    layout_delimiters(ctx, styles, frame, delim.open(), delim.close(), elem.span())
+    layout_delimiters(
+        ctx,
+        styles,
+        frame,
+        delim.open(),
+        delim.close(),
+        elem.padding(styles),
+        elem.span(),
+    )
 }
 
 /// Lays out a [`CasesElem`].
@@ -106,7 +123,7 @@ pub fn layout_cases(
     let (open, close) =
         if elem.reverse(styles) { (None, delim.close()) } else { (delim.open(), None) };
 
-    layout_delimiters(ctx, styles, frame, open, close, elem.span())
+    layout_delimiters(ctx, styles, frame, open, close, elem.padding(styles), elem.span())
 }
 
 /// Layout the inner contents of a vector.
@@ -301,6 +318,7 @@ fn layout_delimiters(
     mut frame: Frame,
     left: Option<char>,
     right: Option<char>,
+    padding: Rel<Abs>,
     span: Span,
 ) -> SourceResult<()> {
     let short_fall = DELIM_SHORT_FALL.resolve(styles);
@@ -308,17 +326,20 @@ fn layout_delimiters(
     let height = frame.height();
     let target = height + VERTICAL_PADDING.of(height);
     frame.set_baseline(height / 2.0 + axis);
+    let padding = padding.relative_to(ctx.region.size.x);
 
     if let Some(left) = left {
         let mut left = GlyphFragment::new(ctx, styles, left, span)
             .stretch_vertical(ctx, target, short_fall);
         left.align_on_axis(ctx, delimiter_alignment(left.c));
         ctx.push(left);
+        ctx.push(MathFragment::Spacing(padding, false));
     }
 
     ctx.push(FrameFragment::new(styles, frame));
 
     if let Some(right) = right {
+        ctx.push(MathFragment::Spacing(padding, false));
         let mut right = GlyphFragment::new(ctx, styles, right, span)
             .stretch_vertical(ctx, target, short_fall);
         right.align_on_axis(ctx, delimiter_alignment(right.c));
