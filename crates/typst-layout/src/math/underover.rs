@@ -208,9 +208,9 @@ fn layout_underoverline(
     let (extra_height, content, line_pos, content_pos, baseline, bar_height, line_adjust);
     match position {
         Position::Under => {
-            let sep = scaled!(ctx, styles, underbar_extra_descender);
-            bar_height = scaled!(ctx, styles, underbar_rule_thickness);
-            let gap = scaled!(ctx, styles, underbar_vertical_gap);
+            let sep = ctx.underbar_extra_descender().resolve(styles);
+            bar_height = ctx.underbar_rule_thickness().resolve(styles);
+            let gap = ctx.underbar_vertical_gap().resolve(styles);
             extra_height = sep + bar_height + gap;
 
             content = ctx.layout_into_fragment(body, styles)?;
@@ -221,9 +221,9 @@ fn layout_underoverline(
             line_adjust = -content.italics_correction();
         }
         Position::Over => {
-            let sep = scaled!(ctx, styles, overbar_extra_ascender);
-            bar_height = scaled!(ctx, styles, overbar_rule_thickness);
-            let gap = scaled!(ctx, styles, overbar_vertical_gap);
+            let sep = ctx.overbar_extra_ascender().resolve(styles);
+            bar_height = ctx.overbar_rule_thickness().resolve(styles);
+            let gap = ctx.overbar_vertical_gap().resolve(styles);
             extra_height = sep + bar_height + gap;
 
             let cramped = style_cramped();

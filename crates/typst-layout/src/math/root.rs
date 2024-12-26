@@ -1,5 +1,5 @@
 use typst_library::diag::SourceResult;
-use typst_library::foundations::{Packed, StyleChain};
+use typst_library::foundations::{Packed, Resolve, StyleChain};
 use typst_library::layout::{Abs, Frame, FrameItem, Point, Size};
 use typst_library::math::{EquationElem, MathSize, RootElem};
 use typst_library::text::TextElem;
@@ -21,16 +21,12 @@ pub fn layout_root(
     let radicand = elem.radicand();
     let span = elem.span();
 
-    let gap = scaled!(
-        ctx, styles,
-        text: radical_vertical_gap,
-        display: radical_display_style_vertical_gap,
-    );
-    let thickness = scaled!(ctx, styles, radical_rule_thickness);
-    let extra_ascender = scaled!(ctx, styles, radical_extra_ascender);
-    let kern_before = scaled!(ctx, styles, radical_kern_before_degree);
-    let kern_after = scaled!(ctx, styles, radical_kern_after_degree);
-    let raise_factor = percent!(ctx, radical_degree_bottom_raise_percent);
+    let gap = ctx.radical_vertical_gap(styles).resolve(styles);
+    let thickness = ctx.radical_rule_thickness().resolve(styles);
+    let extra_ascender = ctx.radical_extra_ascender().resolve(styles);
+    let kern_before = ctx.radical_kern_before_degree().resolve(styles);
+    let kern_after = ctx.radical_kern_after_degree().resolve(styles);
+    let raise_factor = ctx.radical_degree_bottom_raise_percent() as f64 / 100.0;
 
     // Layout radicand.
     let radicand = {
@@ -42,7 +38,7 @@ pub fn layout_root(
         if multiline {
             // Align the frame center line with the math axis.
             radicand.set_baseline(
-                radicand.height() / 2.0 + scaled!(ctx, styles, axis_height),
+                radicand.height() / 2.0 + ctx.axis_height().resolve(styles),
             );
         }
         radicand

@@ -2,7 +2,7 @@ use std::f64::consts::SQRT_2;
 
 use ecow::{eco_vec, EcoString};
 use typst_library::diag::SourceResult;
-use typst_library::foundations::{Packed, StyleChain, StyleVec};
+use typst_library::foundations::{Packed, Resolve, StyleChain, StyleVec};
 use typst_library::layout::{Abs, Size};
 use typst_library::math::{EquationElem, MathSize, MathVariant};
 use typst_library::text::{
@@ -24,7 +24,7 @@ pub fn layout_text(
     let span = elem.span();
     let mut chars = text.chars();
     let math_size = EquationElem::size_in(styles);
-    let mut dtls = ctx.dtls_table.is_some();
+    let mut dtls = ctx.dtls.is_some();
     let fragment: MathFragment = if let Some(mut glyph) = chars
         .next()
         .filter(|_| chars.next().is_none())
@@ -49,7 +49,9 @@ pub fn layout_text(
 
         if glyph.class == MathClass::Large {
             let mut variant = if math_size == MathSize::Display {
-                let height = scaled!(ctx, styles, display_operator_min_height)
+                let height = ctx
+                    .display_operator_min_height()
+                    .resolve(styles)
                     .max(SQRT_2 * glyph.height());
                 glyph.stretch_vertical(ctx, height, Abs::zero())
             } else {
@@ -92,7 +94,7 @@ pub fn layout_text(
                 }
             }
             let mut frame = MathRun::new(fragments).into_frame(styles);
-            let axis = scaled!(ctx, styles, axis_height);
+            let axis = ctx.axis_height().resolve(styles);
             frame.set_baseline(frame.height() / 2.0 + axis);
             FrameFragment::new(styles, frame).into()
         } else {

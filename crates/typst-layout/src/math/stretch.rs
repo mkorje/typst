@@ -7,8 +7,7 @@ use typst_library::math::StretchElem;
 use typst_utils::Get;
 
 use super::{
-    delimiter_alignment, GlyphFragment, MathContext, MathFragment, Scaled,
-    VariantFragment,
+    delimiter_alignment, GlyphFragment, MathContext, MathFragment, VariantFragment,
 };
 
 /// Maximum number of times extenders can be repeated.
@@ -82,16 +81,9 @@ pub fn stretch_fragment(
 /// can be stretched.
 fn stretch_axis(ctx: &mut MathContext, base: &GlyphFragment) -> Option<Axis> {
     let base_id = base.id;
-    let vertical = ctx
-        .table
-        .variants
-        .and_then(|variants| variants.vertical_constructions.get(base_id))
-        .map(|_| Axis::Y);
-    let horizontal = ctx
-        .table
-        .variants
-        .and_then(|variants| variants.horizontal_constructions.get(base_id))
-        .map(|_| Axis::X);
+    let variants = ctx.font.ttf().tables().math?.variants?;
+    let vertical = variants.vertical_constructions.get(base_id).map(|_| Axis::Y);
+    let horizontal = variants.horizontal_constructions.get(base_id).map(|_| Axis::X);
 
     match (vertical, horizontal) {
         (vertical, None) => vertical,
@@ -132,12 +124,14 @@ pub fn stretch_glyph(
         return base.into_variant();
     }
 
-    let mut min_overlap = Abs::zero();
-    let construction = ctx
-        .table
-        .variants
+    let min_overlap = ctx.min_connector_overlap().at(base.font_size);
+    let font = ctx.font.clone();
+    let construction = font
+        .ttf()
+        .tables()
+        .math
+        .and_then(|table| table.variants)
         .and_then(|variants| {
-            min_overlap = variants.min_connector_overlap.scaled(ctx, base.font_size);
             match axis {
                 Axis::X => variants.horizontal_constructions,
                 Axis::Y => variants.vertical_constructions,
@@ -177,6 +171,8 @@ fn assemble(
     target: Abs,
     axis: Axis,
 ) -> VariantFragment {
+    let scale = |x: u16| -> Abs { ctx.font.to_em(x).at(base.font_size) };
+
     // Determine the number of times the extenders need to be repeated as well
     // as a ratio specifying how much to spread the parts apart
     // (0 = maximal overlap, 1 = minimal overlap).
@@ -191,12 +187,10 @@ fn assemble(
         let mut growable = Abs::zero();
 
         while let Some(part) = parts.next() {
-            let mut advance = part.full_advance.scaled(ctx, base.font_size);
+            let mut advance = scale(part.full_advance);
             if let Some(next) = parts.peek() {
-                let max_overlap = part
-                    .end_connector_length
-                    .min(next.start_connector_length)
-                    .scaled(ctx, base.font_size);
+                let max_overlap =
+                    scale(part.end_connector_length.min(next.start_connector_length));
                 if max_overlap < min_overlap {
                     // This condition happening is indicative of a bug in the
                     // font.
@@ -231,12 +225,10 @@ fn assemble(
     let mut selected = vec![];
     let mut parts = parts(assembly, repeat).peekable();
     while let Some(part) = parts.next() {
-        let mut advance = part.full_advance.scaled(ctx, base.font_size);
+        let mut advance = scale(part.full_advance);
         if let Some(next) = parts.peek() {
-            let max_overlap = part
-                .end_connector_length
-                .min(next.start_connector_length)
-                .scaled(ctx, base.font_size);
+            let max_overlap =
+                scale(part.end_connector_length.min(next.start_connector_length));
             advance -= max_overlap;
             advance += ratio * (max_overlap - min_overlap);
         }
@@ -255,7 +247,7 @@ fn assemble(
             baseline = base.ascent;
         }
         Axis::Y => {
-            let axis = ctx.constants.axis_height().scaled(ctx, base.font_size);
+            let axis = ctx.axis_height().at(base.font_size);
             let width = selected.iter().map(|(f, _)| f.width).max().unwrap_or_default();
             size = Size::new(width, full);
             baseline = full / 2.0 + axis;

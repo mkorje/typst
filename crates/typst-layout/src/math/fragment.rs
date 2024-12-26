@@ -1,10 +1,8 @@
 use std::fmt::{self, Debug, Formatter};
 
-use rustybuzz::Feature;
 use smallvec::SmallVec;
-use ttf_parser::gsub::{AlternateSubstitution, SingleSubstitution, SubstitutionSubtable};
-use ttf_parser::opentype_layout::LayoutTable;
-use ttf_parser::{GlyphId, Rect};
+use ttf_parser::math::MathValue;
+use ttf_parser::GlyphId;
 use typst_library::foundations::StyleChain;
 use typst_library::introspection::Tag;
 use typst_library::layout::{
@@ -17,7 +15,7 @@ use typst_library::visualize::Paint;
 use typst_syntax::Span;
 use unicode_math_class::MathClass;
 
-use super::{stretch_glyph, MathContext, Scaled};
+use super::{stretch_glyph, MathContext};
 
 #[derive(Debug, Clone)]
 pub enum MathFragment {
@@ -253,7 +251,7 @@ pub struct GlyphFragment {
 
 impl GlyphFragment {
     pub fn new(ctx: &MathContext, styles: StyleChain, c: char, span: Span) -> Self {
-        let id = ctx.ttf.glyph_index(c).unwrap_or_default();
+        let id = ctx.index(c).unwrap_or_default();
         let id = Self::adjust_glyph_index(ctx, id);
         Self::with_id(ctx, styles, c, id, span)
     }
@@ -264,7 +262,7 @@ impl GlyphFragment {
         c: char,
         span: Span,
     ) -> Option<Self> {
-        let id = ctx.ttf.glyph_index(c)?;
+        let id = ctx.index(c)?;
         let id = Self::adjust_glyph_index(ctx, id);
         Some(Self::with_id(ctx, styles, c, id, span))
     }
@@ -312,8 +310,10 @@ impl GlyphFragment {
 
     /// Apply GSUB substitutions.
     fn adjust_glyph_index(ctx: &MathContext, id: GlyphId) -> GlyphId {
-        if let Some(glyphwise_tables) = &ctx.glyphwise_tables {
-            glyphwise_tables.iter().fold(id, |id, table| table.apply(id))
+        if let Some(glyphwise) = &ctx.glyphwise {
+            glyphwise.iter().fold(id, |id, index| {
+                ctx.glyphwise_substitution(*index, id).unwrap_or(id)
+            })
         } else {
             id
         }
@@ -322,28 +322,20 @@ impl GlyphFragment {
     /// Sets element id and boxes in appropriate way without changing other
     /// styles. This is used to replace the glyph with a stretch variant.
     pub fn set_id(&mut self, ctx: &MathContext, id: GlyphId) {
-        let advance = ctx.ttf.glyph_hor_advance(id).unwrap_or_default();
-        let italics = italics_correction(ctx, id, self.font_size).unwrap_or_default();
-        let bbox = ctx.ttf.glyph_bounding_box(id).unwrap_or(Rect {
-            x_min: 0,
-            y_min: 0,
-            x_max: 0,
-            y_max: 0,
-        });
+        let mut width = ctx.advance_width(id).at(self.font_size);
+        let italics = ctx.italics_correction(id).at(self.font_size);
+        let (ascent, descent) = ctx.height(id);
+        let accent_attach = ctx.top_accent_attachment(id).at(self.font_size);
 
-        let mut width = advance.scaled(ctx, self.font_size);
-        let accent_attach =
-            accent_attach(ctx, id, self.font_size).unwrap_or((width + italics) / 2.0);
-
-        let extended_shape = is_extended_shape(ctx, id);
+        let extended_shape = ctx.extended_shape(id);
         if !extended_shape {
             width += italics;
         }
 
         self.id = id;
         self.width = width;
-        self.ascent = bbox.y_max.scaled(ctx, self.font_size);
-        self.descent = -bbox.y_min.scaled(ctx, self.font_size);
+        self.ascent = ascent.at(self.font_size);
+        self.descent = descent.at(self.font_size);
         self.italics_correction = italics;
         self.accent_attach = accent_attach;
         self.extended_shape = extended_shape;
@@ -395,38 +387,30 @@ impl GlyphFragment {
     }
 
     pub fn make_script_size(&mut self, ctx: &MathContext) {
-        let alt_id =
-            ctx.ssty_table.as_ref().and_then(|ssty| ssty.try_apply(self.id, None));
+        let alt_id = ctx.alternate_substitution(ctx.ssty, 0, self.id);
         if let Some(alt_id) = alt_id {
             self.set_id(ctx, alt_id);
         }
     }
 
     pub fn make_script_script_size(&mut self, ctx: &MathContext) {
-        let alt_id = ctx.ssty_table.as_ref().and_then(|ssty| {
-            // We explicitly request to apply the alternate set with value 1,
-            // as opposed to the default value in ssty, as the former
-            // corresponds to second level scripts and the latter corresponds
-            // to first level scripts.
-            ssty.try_apply(self.id, Some(1))
-                .or_else(|| ssty.try_apply(self.id, None))
-        });
+        let alt_id = ctx.alternate_substitution(ctx.ssty, 1, self.id);
         if let Some(alt_id) = alt_id {
             self.set_id(ctx, alt_id);
+        } else {
+            self.make_script_size(ctx);
         }
     }
 
     pub fn make_dotless_form(&mut self, ctx: &MathContext) {
-        let alt_id =
-            ctx.dtls_table.as_ref().and_then(|dtls| dtls.try_apply(self.id, None));
+        let alt_id = ctx.single_substitution(ctx.dtls, self.id);
         if let Some(alt_id) = alt_id {
             self.set_id(ctx, alt_id);
         }
     }
 
     pub fn make_flattened_accent_form(&mut self, ctx: &MathContext) {
-        let alt_id =
-            ctx.flac_table.as_ref().and_then(|flac| flac.try_apply(self.id, None));
+        let alt_id = ctx.single_substitution(ctx.flac, self.id);
         if let Some(alt_id) = alt_id {
             self.set_id(ctx, alt_id);
         }
@@ -485,7 +469,7 @@ impl VariantFragment {
     /// to the given alignment on the axis.
     pub fn align_on_axis(&mut self, ctx: &MathContext, align: VAlignment) {
         let h = self.frame.height();
-        let axis = ctx.constants.axis_height().scaled(ctx, self.font_size);
+        let axis = ctx.axis_height().at(self.font_size);
         self.frame.set_baseline(align.inv().position(h + axis * 2.0));
     }
 }
@@ -563,37 +547,6 @@ impl FrameFragment {
     }
 }
 
-/// Look up the italics correction for a glyph.
-fn italics_correction(ctx: &MathContext, id: GlyphId, font_size: Abs) -> Option<Abs> {
-    Some(
-        ctx.table
-            .glyph_info?
-            .italic_corrections?
-            .get(id)?
-            .scaled(ctx, font_size),
-    )
-}
-
-/// Loop up the top accent attachment position for a glyph.
-fn accent_attach(ctx: &MathContext, id: GlyphId, font_size: Abs) -> Option<Abs> {
-    Some(
-        ctx.table
-            .glyph_info?
-            .top_accent_attachments?
-            .get(id)?
-            .scaled(ctx, font_size),
-    )
-}
-
-/// Look up whether a glyph is an extended shape.
-fn is_extended_shape(ctx: &MathContext, id: GlyphId) -> bool {
-    ctx.table
-        .glyph_info
-        .and_then(|info| info.extended_shapes)
-        .and_then(|info| info.get(id))
-        .is_some()
-}
-
 /// Look up a kerning value at a specific corner and height.
 fn kern_at_height(
     ctx: &MathContext,
@@ -602,7 +555,7 @@ fn kern_at_height(
     corner: Corner,
     height: Abs,
 ) -> Option<Abs> {
-    let kerns = ctx.table.glyph_info?.kern_infos?.get(id)?;
+    let kerns = ctx.font.ttf().tables().math?.glyph_info?.kern_infos?.get(id)?;
     let kern = match corner {
         Corner::TopLeft => kerns.top_left,
         Corner::TopRight => kerns.top_right,
@@ -610,12 +563,14 @@ fn kern_at_height(
         Corner::BottomLeft => kerns.bottom_left,
     }?;
 
+    let scale = |x: MathValue| -> Abs { ctx.font.to_em(x.value).at(font_size) };
+
     let mut i = 0;
-    while i < kern.count() && height > kern.height(i)?.scaled(ctx, font_size) {
+    while i < kern.count() && height > scale(kern.height(i)?) {
         i += 1;
     }
 
-    Some(kern.kern(i)?.scaled(ctx, font_size))
+    Some(scale(kern.kern(i)?))
 }
 
 /// Describes in which situation a frame should use limits for attachments.
@@ -667,57 +622,4 @@ impl Limits {
 /// Determines if the character is one of a variety of integral signs.
 fn is_integral_char(c: char) -> bool {
     ('∫'..='∳').contains(&c) || ('⨋'..='⨜').contains(&c)
-}
-
-/// An OpenType substitution table that is applicable to glyph-wise substitutions.
-pub enum GlyphwiseSubsts<'a> {
-    Single(SingleSubstitution<'a>),
-    Alternate(AlternateSubstitution<'a>, u32),
-}
-
-impl<'a> GlyphwiseSubsts<'a> {
-    pub fn new(gsub: Option<LayoutTable<'a>>, feature: Feature) -> Option<Self> {
-        let gsub = gsub?;
-        let table = gsub
-            .features
-            .find(feature.tag)
-            .and_then(|feature| feature.lookup_indices.get(0))
-            .and_then(|index| gsub.lookups.get(index))?;
-        let table = table.subtables.get::<SubstitutionSubtable>(0)?;
-        match table {
-            SubstitutionSubtable::Single(single_glyphs) => {
-                Some(Self::Single(single_glyphs))
-            }
-            SubstitutionSubtable::Alternate(alt_glyphs) => {
-                Some(Self::Alternate(alt_glyphs, feature.value))
-            }
-            _ => None,
-        }
-    }
-
-    pub fn try_apply(
-        &self,
-        glyph_id: GlyphId,
-        alt_value: Option<u32>,
-    ) -> Option<GlyphId> {
-        match self {
-            Self::Single(single) => match single {
-                SingleSubstitution::Format1 { coverage, delta } => coverage
-                    .get(glyph_id)
-                    .map(|_| GlyphId(glyph_id.0.wrapping_add(*delta as u16))),
-                SingleSubstitution::Format2 { coverage, substitutes } => {
-                    coverage.get(glyph_id).and_then(|idx| substitutes.get(idx))
-                }
-            },
-            Self::Alternate(alternate, value) => alternate
-                .coverage
-                .get(glyph_id)
-                .and_then(|idx| alternate.alternate_sets.get(idx))
-                .and_then(|set| set.alternates.get(alt_value.unwrap_or(*value) as u16)),
-        }
-    }
-
-    pub fn apply(&self, glyph_id: GlyphId) -> GlyphId {
-        self.try_apply(glyph_id, None).unwrap_or(glyph_id)
-    }
 }

@@ -113,9 +113,19 @@ impl Font {
             .map(|units| self.to_em(units))
     }
 
+    ///
+    pub fn space_width(&self) -> Option<Em> {
+        self.0.ttf.glyph_index(' ').and_then(|id| self.advance(id.0))
+    }
+
     /// Lookup a name by id.
     pub fn find_name(&self, id: u16) -> Option<String> {
         find_name(&self.0.ttf, id)
+    }
+
+    /// Whether the font has implemented the OpenType MATH table.
+    pub fn is_math(&self) -> bool {
+        self.0.ttf.tables().math.is_some()
     }
 
     /// A reference to the underlying `ttf-parser` face.

@@ -1,5 +1,5 @@
 use typst_library::diag::SourceResult;
-use typst_library::foundations::{Packed, StyleChain};
+use typst_library::foundations::{Packed, Resolve, StyleChain};
 use typst_library::layout::{Abs, Axis, Rel};
 use typst_library::math::{EquationElem, LrElem, MidElem};
 use unicode_math_class::MathClass;
@@ -41,7 +41,7 @@ pub fn layout_lr(
         .map_or(start_idx, |i| start_idx + i + 1);
     let inner_fragments = &mut fragments[start_idx..end_idx];
 
-    let axis = scaled!(ctx, styles, axis_height);
+    let axis = ctx.axis_height().resolve(styles);
     let max_extent = inner_fragments
         .iter()
         .map(|fragment| (fragment.ascent() - axis).max(fragment.descent() + axis))

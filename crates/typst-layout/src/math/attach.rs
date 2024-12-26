@@ -1,5 +1,5 @@
 use typst_library::diag::SourceResult;
-use typst_library::foundations::{Packed, StyleChain};
+use typst_library::foundations::{Packed, Resolve, StyleChain};
 use typst_library::layout::{Abs, Axis, Corner, Frame, Point, Rel, Size};
 use typst_library::math::{
     AttachElem, EquationElem, LimitsElem, PrimesElem, ScriptsElem, StretchElem,
@@ -215,7 +215,7 @@ fn layout_attachments(
     // `space_after_script` is extra spacing that is at the start before each
     // pre-script, and at the end after each post-script (see the MathConstants
     // table in the OpenType MATH spec).
-    let space_after_script = scaled!(ctx, styles, space_after_script);
+    let space_after_script = ctx.space_after_script().resolve(styles);
 
     // Calculate the distance each pre-script extends to the left of the base's
     // width.
@@ -379,14 +379,14 @@ fn compute_limit_shifts(
     // MathConstants table in the OpenType MATH spec).
 
     let t_shift = t.map_or_default(|t| {
-        let upper_gap_min = scaled!(ctx, styles, upper_limit_gap_min);
-        let upper_rise_min = scaled!(ctx, styles, upper_limit_baseline_rise_min);
+        let upper_gap_min = ctx.upper_limit_gap_min().resolve(styles);
+        let upper_rise_min = ctx.upper_limit_baseline_rise_min().resolve(styles);
         base.ascent() + upper_rise_min.max(upper_gap_min + t.descent())
     });
 
     let b_shift = b.map_or_default(|b| {
-        let lower_gap_min = scaled!(ctx, styles, lower_limit_gap_min);
-        let lower_drop_min = scaled!(ctx, styles, lower_limit_baseline_drop_min);
+        let lower_gap_min = ctx.lower_limit_gap_min().resolve(styles);
+        let lower_drop_min = ctx.lower_limit_baseline_drop_min().resolve(styles);
         base.descent() + lower_drop_min.max(lower_gap_min + b.ascent())
     });
 
@@ -403,19 +403,19 @@ fn compute_script_shifts(
     [tl, tr, bl, br]: [&Option<MathFragment>; 4],
 ) -> (Abs, Abs) {
     let sup_shift_up = if EquationElem::cramped_in(styles) {
-        scaled!(ctx, styles, superscript_shift_up_cramped)
+        ctx.superscript_shift_up_cramped().resolve(styles)
     } else {
-        scaled!(ctx, styles, superscript_shift_up)
+        ctx.superscript_shift_up().resolve(styles)
     };
 
-    let sup_bottom_min = scaled!(ctx, styles, superscript_bottom_min);
+    let sup_bottom_min = ctx.superscript_bottom_min().resolve(styles);
     let sup_bottom_max_with_sub =
-        scaled!(ctx, styles, superscript_bottom_max_with_subscript);
-    let sup_drop_max = scaled!(ctx, styles, superscript_baseline_drop_max);
-    let gap_min = scaled!(ctx, styles, sub_superscript_gap_min);
-    let sub_shift_down = scaled!(ctx, styles, subscript_shift_down);
-    let sub_top_max = scaled!(ctx, styles, subscript_top_max);
-    let sub_drop_min = scaled!(ctx, styles, subscript_baseline_drop_min);
+        ctx.superscript_bottom_max_with_subscript().resolve(styles);
+    let sup_drop_max = ctx.superscript_baseline_drop_max().resolve(styles);
+    let gap_min = ctx.sub_superscript_gap_min().resolve(styles);
+    let sub_shift_down = ctx.subscript_shift_down().resolve(styles);
+    let sub_top_max = ctx.subscript_top_max().resolve(styles);
+    let sub_drop_min = ctx.subscript_baseline_drop_min().resolve(styles);
 
     let mut shift_up = Abs::zero();
     let mut shift_down = Abs::zero();

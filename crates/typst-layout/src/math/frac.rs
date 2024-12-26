@@ -50,28 +50,12 @@ fn layout_frac_like(
     span: Span,
 ) -> SourceResult<()> {
     let short_fall = DELIM_SHORT_FALL.resolve(styles);
-    let axis = scaled!(ctx, styles, axis_height);
-    let thickness = scaled!(ctx, styles, fraction_rule_thickness);
-    let shift_up = scaled!(
-        ctx, styles,
-        text: fraction_numerator_shift_up,
-        display: fraction_numerator_display_style_shift_up,
-    );
-    let shift_down = scaled!(
-        ctx, styles,
-        text: fraction_denominator_shift_down,
-        display: fraction_denominator_display_style_shift_down,
-    );
-    let num_min = scaled!(
-        ctx, styles,
-        text: fraction_numerator_gap_min,
-        display: fraction_num_display_style_gap_min,
-    );
-    let denom_min = scaled!(
-        ctx, styles,
-        text: fraction_denominator_gap_min,
-        display: fraction_denom_display_style_gap_min,
-    );
+    let axis = ctx.axis_height().resolve(styles);
+    let thickness = ctx.fraction_rule_thickness().resolve(styles);
+    let shift_up = ctx.fraction_numerator_shift_up(styles).resolve(styles);
+    let shift_down = ctx.fraction_denominator_shift_down(styles).resolve(styles);
+    let num_min = ctx.fraction_numerator_gap_min(styles).resolve(styles);
+    let denom_min = ctx.fraction_denominator_gap_min(styles).resolve(styles);
 
     let num_style = style_for_numerator(styles);
     let num = ctx.layout_into_frame(num, styles.chain(&num_style))?;

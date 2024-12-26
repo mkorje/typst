@@ -304,7 +304,7 @@ fn layout_delimiters(
     span: Span,
 ) -> SourceResult<()> {
     let short_fall = DELIM_SHORT_FALL.resolve(styles);
-    let axis = scaled!(ctx, styles, axis_height);
+    let axis = ctx.axis_height().resolve(styles);
     let height = frame.height();
     let target = height + VERTICAL_PADDING.of(height);
     frame.set_baseline(height / 2.0 + axis);

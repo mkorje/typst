@@ -13,9 +13,10 @@ mod stretch;
 mod text;
 mod underover;
 
-use rustybuzz::Feature;
-use ttf_parser::Tag;
-use typst_library::diag::{bail, SourceResult};
+use ttf_parser::gsub::{SingleSubstitution, SubstitutionSubtable};
+use ttf_parser::opentype_layout::LookupIndex;
+use ttf_parser::{GlyphId, Rect, Tag};
+use typst_library::diag::SourceResult;
 use typst_library::engine::Engine;
 use typst_library::foundations::{Content, NativeElement, Packed, Resolve, StyleChain};
 use typst_library::introspection::{Counter, Locator, SplitLocator, TagElem};
@@ -31,12 +32,11 @@ use typst_library::text::{
     families, features, variant, Font, LinebreakElem, SpaceElem, TextEdgeBounds, TextElem,
 };
 use typst_library::World;
-use typst_syntax::Span;
 use typst_utils::Numeric;
 use unicode_math_class::MathClass;
 
 use self::fragment::{
-    FrameFragment, GlyphFragment, GlyphwiseSubsts, Limits, MathFragment, VariantFragment,
+    FrameFragment, GlyphFragment, Limits, MathFragment, VariantFragment,
 };
 use self::run::{LeftRightAlternator, MathRun, MathRunFrameBuilder};
 use self::shared::*;
@@ -53,10 +53,8 @@ pub fn layout_equation_inline(
 ) -> SourceResult<Vec<InlineItem>> {
     assert!(!elem.block(styles));
 
-    let font = find_math_font(engine, styles, elem.span())?;
-
     let mut locator = locator.split();
-    let mut ctx = MathContext::new(engine, &mut locator, styles, region, &font);
+    let mut ctx = MathContext::new(engine, &mut locator, styles, region);
 
     let scale_style = style_for_script_scale(&ctx);
     let styles = styles.chain(&scale_style);
@@ -80,7 +78,7 @@ pub fn layout_equation_inline(
 
         let slack = ParElem::leading_in(styles) * 0.7;
 
-        let (t, b) = font.edges(
+        let (t, b) = ctx.font.edges(
             TextElem::top_edge_in(styles),
             TextElem::bottom_edge_in(styles),
             TextElem::size_in(styles),
@@ -108,10 +106,9 @@ pub fn layout_equation_block(
     assert!(elem.block(styles));
 
     let span = elem.span();
-    let font = find_math_font(engine, styles, span)?;
 
     let mut locator = locator.split();
-    let mut ctx = MathContext::new(engine, &mut locator, styles, regions.base(), &font);
+    let mut ctx = MathContext::new(engine, &mut locator, styles, regions.base());
 
     let scale_style = style_for_script_scale(&ctx);
     let styles = styles.chain(&scale_style);
@@ -235,24 +232,6 @@ pub fn layout_equation_block(
     Ok(Fragment::frames(frames))
 }
 
-fn find_math_font(
-    engine: &mut Engine<'_>,
-    styles: StyleChain,
-    span: Span,
-) -> SourceResult<Font> {
-    let variant = variant(styles);
-    let world = engine.world;
-    let Some(font) = families(styles).find_map(|family| {
-        let id = world.book().select(family.as_str(), variant)?;
-        let font = world.font(id)?;
-        let _ = font.ttf().tables().math?.constants?;
-        Some(font)
-    }) else {
-        bail!(span, "current font does not support math");
-    };
-    Ok(font)
-}
-
 fn add_equation_number(
     equation_builder: MathRunFrameBuilder,
     number: Frame,
@@ -365,6 +344,44 @@ fn resize_equation(
     resizing_offset + Point::with_y(excess_above)
 }
 
+macro_rules! constants {
+    () => {};
+    ($name:ident; $($tail:tt)*) => {
+        #[allow(dead_code)]
+        fn $name(&self) -> Em {
+            let value = self.font.ttf().tables().math.and_then(|table| table.constants).map(|constants| constants.$name().value).unwrap();
+            self.font.to_em(value)
+        }
+        constants!($($tail)*);
+    };
+    (~ $name:ident; $($tail:tt)*) => {
+        #[allow(dead_code)]
+        fn $name(&self) -> Em {
+            let value = self.font.ttf().tables().math.and_then(|table| table.constants).map(|constants| constants.$name()).unwrap();
+            self.font.to_em(value)
+        }
+        constants!($($tail)*);
+    };
+    (% $name:ident; $($tail:tt)*) => {
+        #[allow(dead_code)]
+        fn $name(&self) -> i16 {
+            self.font.ttf().tables().math.and_then(|table| table.constants).map(|constants| constants.$name()).unwrap()
+        }
+        constants!($($tail)*);
+    };
+    ($text:ident, $display:ident; $($tail:tt)*) => {
+        #[allow(dead_code)]
+        fn $text(&self, styles: StyleChain) -> Em {
+            let value = self.font.ttf().tables().math.and_then(|table| table.constants).map(|constants| match EquationElem::size_in(styles) {
+                MathSize::Display => constants.$display().value,
+                _ => constants.$text().value,
+            }).unwrap();
+            self.font.to_em(value)
+        }
+        constants!($($tail)*);
+    };
+}
+
 /// The context for math layout.
 struct MathContext<'a, 'v, 'e> {
     // External.
@@ -372,65 +389,290 @@ struct MathContext<'a, 'v, 'e> {
     locator: &'v mut SplitLocator<'a>,
     region: Region,
     // Font-related.
-    font: &'a Font,
-    ttf: &'a ttf_parser::Face<'a>,
-    table: ttf_parser::math::Table<'a>,
-    constants: ttf_parser::math::Constants<'a>,
-    dtls_table: Option<GlyphwiseSubsts<'a>>,
-    flac_table: Option<GlyphwiseSubsts<'a>>,
-    ssty_table: Option<GlyphwiseSubsts<'a>>,
-    glyphwise_tables: Option<Vec<GlyphwiseSubsts<'a>>>,
-    space_width: Em,
+    font: Font,
+    flac: Option<LookupIndex>,
+    dtls: Option<LookupIndex>,
+    ssty: Option<LookupIndex>,
+    glyphwise: Option<Vec<(LookupIndex, u32)>>,
     // Mutable.
     fragments: Vec<MathFragment>,
 }
 
 impl<'a, 'v, 'e> MathContext<'a, 'v, 'e> {
+    /// Resolve the current font in `styles`.
+    fn current_font(engine: &mut Engine, styles: StyleChain) -> Font {
+        let variant = variant(styles);
+        let world = engine.world;
+        let id = families(styles)
+            .find_map(|family| world.book().select(family.as_str(), variant))
+            .unwrap();
+        world.font(id).unwrap()
+    }
+
     /// Create a new math context.
     fn new(
         engine: &'v mut Engine<'e>,
         locator: &'v mut SplitLocator<'a>,
-        styles: StyleChain<'a>,
+        styles: StyleChain,
         base: Size,
-        font: &'a Font,
     ) -> Self {
-        let math_table = font.ttf().tables().math.unwrap();
-        let gsub_table = font.ttf().tables().gsub;
-        let constants = math_table.constants.unwrap();
+        let font = Self::current_font(engine, styles);
 
         let feat = |tag: &[u8; 4]| {
-            GlyphwiseSubsts::new(gsub_table, Feature::new(Tag::from_bytes(tag), 0, ..))
+            font.ttf().tables().gsub.and_then(|gsub| {
+                gsub.features.find(Tag::from_bytes(tag))?.lookup_indices.get(0)
+            })
         };
 
         let features = features(styles);
-        let glyphwise_tables = Some(
+        let glyphwise = Some(
             features
                 .into_iter()
-                .filter_map(|feature| GlyphwiseSubsts::new(gsub_table, feature))
+                .filter_map(|feature| {
+                    let lookup = font.ttf().tables().gsub.and_then(|gsub| {
+                        gsub.features.find(feature.tag)?.lookup_indices.get(0)
+                    })?;
+                    Some((lookup, feature.value))
+                })
                 .collect(),
         );
-
-        let ttf = font.ttf();
-        let space_width = ttf
-            .glyph_index(' ')
-            .and_then(|id| ttf.glyph_hor_advance(id))
-            .map(|advance| font.to_em(advance))
-            .unwrap_or(THICK);
 
         Self {
             engine,
             locator,
             region: Region::new(base, Axes::splat(false)),
+            flac: feat(b"flac"),
+            dtls: feat(b"dtls"),
+            ssty: feat(b"ssty"),
+            glyphwise,
             font,
-            ttf,
-            table: math_table,
-            constants,
-            dtls_table: feat(b"dtls"),
-            flac_table: feat(b"flac"),
-            ssty_table: feat(b"ssty"),
-            glyphwise_tables,
-            space_width,
             fragments: vec![],
+        }
+    }
+
+    /// Update the current font using `styles`. Currently does not check if the
+    /// font has actually changed before proceeding, as features like stylistic
+    /// sets may have also changed.
+    fn update_font(&mut self, styles: StyleChain) {
+        let font = Self::current_font(self.engine, styles);
+
+        let feat = |tag: &[u8; 4]| {
+            font.ttf().tables().gsub.and_then(|gsub| {
+                gsub.features.find(Tag::from_bytes(tag))?.lookup_indices.get(0)
+            })
+        };
+        self.flac = feat(b"flac");
+        self.dtls = feat(b"dtls");
+        self.ssty = feat(b"ssty");
+
+        let features = features(styles);
+        self.glyphwise = Some(
+            features
+                .into_iter()
+                .filter_map(|feature| {
+                    let lookup = font.ttf().tables().gsub.and_then(|gsub| {
+                        gsub.features.find(feature.tag)?.lookup_indices.get(0)
+                    })?;
+                    Some((lookup, feature.value))
+                })
+                .collect(),
+        );
+        self.font = font;
+    }
+
+    ///
+    fn advance_width(&self, id: GlyphId) -> Em {
+        self.font
+            .to_em(self.font.ttf().glyph_hor_advance(id).unwrap_or_default())
+    }
+
+    ///
+    fn index(&self, code_point: char) -> Option<GlyphId> {
+        self.font.ttf().glyph_index(code_point)
+    }
+
+    ///
+    fn height(&self, id: GlyphId) -> (Em, Em) {
+        let bbox = self.font.ttf().glyph_bounding_box(id).unwrap_or(Rect {
+            x_min: 0,
+            y_min: 0,
+            x_max: 0,
+            y_max: 0,
+        });
+        let ascent = self.font.to_em(bbox.y_max);
+        let descent = -self.font.to_em(bbox.y_min);
+        (ascent, descent)
+    }
+
+    /// Look up the italics correction for a glyph.
+    fn italics_correction(&self, id: GlyphId) -> Em {
+        self.font
+            .ttf()
+            .tables()
+            .math
+            .and_then(|table| table.glyph_info?.italic_corrections?.get(id))
+            .map(|value| self.font.to_em(value.value))
+            .unwrap_or_default()
+    }
+
+    /// Look up the top accent attachment position for a glyph.
+    fn top_accent_attachment(&self, id: GlyphId) -> Em {
+        self.font
+            .ttf()
+            .tables()
+            .math
+            .and_then(|table| table.glyph_info?.top_accent_attachments?.get(id))
+            .map(|value| self.font.to_em(value.value))
+            .unwrap_or_else(|| {
+                (self.italics_correction(id) + self.advance_width(id)) / 2.0
+            })
+    }
+
+    /// Look up whether a glyph is an extended shape.
+    fn extended_shape(&self, id: GlyphId) -> bool {
+        self.font
+            .ttf()
+            .tables()
+            .math
+            .and_then(|table| table.glyph_info?.extended_shapes?.get(id))
+            .is_some()
+    }
+
+    ///
+    fn min_connector_overlap(&self) -> Em {
+        self.font
+            .ttf()
+            .tables()
+            .math
+            .and_then(|table| table.variants)
+            .map(|variants| self.font.to_em(variants.min_connector_overlap))
+            .unwrap_or_default()
+    }
+
+    // fn construction(&self, id: GlyphId, axis: Axis) -> ttf_parser::math::GlyphConstruction {
+    //     self.font.ttf().tables().math.and_then(|table| table.variants).and_then(|variants| match axis {
+    //         Axis::X => variants.horizontal_constructions,
+    //         Axis::Y => variants.vertical_constructions,
+    //     }.get(id)).unwrap_or(GlyphConstruction { assembly: None, variants: LazyArray16::new(&[]) })
+    // }
+
+    constants! {
+        % script_percent_scale_down;
+        % script_script_percent_scale_down;
+        ~ delimited_sub_formula_min_height;
+        ~ display_operator_min_height;
+        math_leading;
+        axis_height;
+        accent_base_height;
+        flattened_accent_base_height;
+        subscript_shift_down;
+        subscript_top_max;
+        subscript_baseline_drop_min;
+        superscript_shift_up;
+        superscript_shift_up_cramped;
+        superscript_bottom_min;
+        superscript_baseline_drop_max;
+        sub_superscript_gap_min;
+        superscript_bottom_max_with_subscript;
+        space_after_script;
+        upper_limit_gap_min;
+        upper_limit_baseline_rise_min;
+        lower_limit_gap_min;
+        lower_limit_baseline_drop_min;
+        stack_top_shift_up, stack_top_display_style_shift_up;
+        stack_bottom_shift_down, stack_bottom_display_style_shift_down;
+        stack_gap_min, stack_display_style_gap_min;
+        stretch_stack_top_shift_up;
+        stretch_stack_bottom_shift_down;
+        stretch_stack_gap_above_min;
+        stretch_stack_gap_below_min;
+        fraction_numerator_shift_up, fraction_numerator_display_style_shift_up;
+        fraction_denominator_shift_down, fraction_denominator_display_style_shift_down;
+        fraction_numerator_gap_min, fraction_num_display_style_gap_min;
+        fraction_rule_thickness;
+        fraction_denominator_gap_min, fraction_denom_display_style_gap_min;
+        skewed_fraction_horizontal_gap;
+        skewed_fraction_vertical_gap;
+        overbar_vertical_gap;
+        overbar_rule_thickness;
+        overbar_extra_ascender;
+        underbar_vertical_gap;
+        underbar_rule_thickness;
+        underbar_extra_descender;
+        radical_vertical_gap, radical_display_style_vertical_gap;
+        radical_rule_thickness;
+        radical_extra_ascender;
+        radical_kern_before_degree;
+        radical_kern_after_degree;
+        % radical_degree_bottom_raise_percent;
+    }
+
+    ///
+    fn single_substitution(
+        &self,
+        index: Option<LookupIndex>,
+        id: GlyphId,
+    ) -> Option<GlyphId> {
+        let Some(SubstitutionSubtable::Single(single)) =
+            self.font.ttf().tables().gsub.and_then(|gsub| {
+                gsub.lookups.get(index?)?.subtables.get::<SubstitutionSubtable>(0)
+            })
+        else {
+            return None;
+        };
+        match single {
+            SingleSubstitution::Format1 { coverage, delta } => {
+                coverage.get(id).map(|_| GlyphId(id.0.wrapping_add(delta as u16)))
+            }
+            SingleSubstitution::Format2 { coverage, substitutes } => {
+                coverage.get(id).and_then(|idx| substitutes.get(idx))
+            }
+        }
+    }
+
+    ///
+    fn alternate_substitution(
+        &self,
+        index: Option<LookupIndex>,
+        value: u16,
+        id: GlyphId,
+    ) -> Option<GlyphId> {
+        let Some(SubstitutionSubtable::Alternate(alternate)) =
+            self.font.ttf().tables().gsub.and_then(|gsub| {
+                gsub.lookups.get(index?)?.subtables.get::<SubstitutionSubtable>(0)
+            })
+        else {
+            return None;
+        };
+        alternate
+            .coverage
+            .get(id)
+            .and_then(|idx| alternate.alternate_sets.get(idx)?.alternates.get(value))
+    }
+
+    ///
+    fn glyphwise_substitution(
+        &self,
+        index: (LookupIndex, u32),
+        id: GlyphId,
+    ) -> Option<GlyphId> {
+        match self.font.ttf().tables().gsub.and_then(|gsub| {
+            gsub.lookups.get(index.0)?.subtables.get::<SubstitutionSubtable>(0)
+        })? {
+            SubstitutionSubtable::Single(single) => match single {
+                SingleSubstitution::Format1 { coverage, delta } => {
+                    coverage.get(id).map(|_| GlyphId(id.0.wrapping_add(delta as u16)))
+                }
+                SingleSubstitution::Format2 { coverage, substitutes } => {
+                    coverage.get(id).and_then(|idx| substitutes.get(idx))
+                }
+            },
+            SubstitutionSubtable::Alternate(alternate) => {
+                alternate.coverage.get(id).and_then(|idx| {
+                    alternate.alternate_sets.get(idx)?.alternates.get(index.1 as u16)
+                })
+            }
+            _ => None,
         }
     }
 
@@ -505,15 +747,10 @@ impl<'a, 'v, 'e> MathContext<'a, 'v, 'e> {
 
         let outer = styles;
         for (elem, styles) in pairs {
-            // Hack because the font is fixed in math.
-            if styles != outer && TextElem::font_in(styles) != TextElem::font_in(outer) {
-                let frame = layout_external(elem, self, styles)?;
-                self.push(FrameFragment::new(styles, frame).with_spaced(true));
-                continue;
-            }
-
+            self.update_font(styles);
             layout_realized(elem, self, styles)?;
         }
+        self.update_font(outer);
 
         Ok(())
     }
@@ -528,7 +765,9 @@ fn layout_realized(
     if let Some(elem) = elem.to_packed::<TagElem>() {
         ctx.push(MathFragment::Tag(elem.tag.clone()));
     } else if elem.is::<SpaceElem>() {
-        ctx.push(MathFragment::Space(ctx.space_width.resolve(styles)));
+        ctx.push(MathFragment::Space(
+            ctx.font.space_width().unwrap_or(THICK).resolve(styles),
+        ));
     } else if elem.is::<LinebreakElem>() {
         ctx.push(MathFragment::Linebreak);
     } else if let Some(elem) = elem.to_packed::<HElem>() {
@@ -596,7 +835,7 @@ fn layout_realized(
     } else {
         let mut frame = layout_external(elem, ctx, styles)?;
         if !frame.has_baseline() {
-            let axis = scaled!(ctx, styles, axis_height);
+            let axis = ctx.axis_height().resolve(styles);
             frame.set_baseline(frame.height() / 2.0 + axis);
         }
         ctx.push(

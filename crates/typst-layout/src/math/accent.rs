@@ -1,5 +1,5 @@
 use typst_library::diag::SourceResult;
-use typst_library::foundations::{Packed, StyleChain};
+use typst_library::foundations::{Packed, Resolve, StyleChain};
 use typst_library::layout::{Em, Frame, Point, Size};
 use typst_library::math::{Accent, AccentElem};
 
@@ -33,7 +33,7 @@ pub fn layout_accent(
     let mut glyph = GlyphFragment::new(ctx, styles, *c, elem.span());
 
     // Try to replace accent glyph with flattened variant.
-    let flattened_base_height = scaled!(ctx, styles, flattened_accent_base_height);
+    let flattened_base_height = ctx.flattened_accent_base_height().resolve(styles);
     if base.height() > flattened_base_height {
         glyph.make_flattened_accent_form(ctx);
     }
@@ -49,7 +49,7 @@ pub fn layout_accent(
     // baseline. Therefore, the default gap is the accent's negated descent
     // minus the accent base height. Only if the base is very small, we need
     // a larger gap so that the accent doesn't move too low.
-    let accent_base_height = scaled!(ctx, styles, accent_base_height);
+    let accent_base_height = ctx.accent_base_height().resolve(styles);
     let gap = -accent.descent() - base.height().min(accent_base_height);
     let size = Size::new(base.width(), accent.height() + gap + base.height());
     let accent_pos = Point::with_x(base_attach - accent_attach);
