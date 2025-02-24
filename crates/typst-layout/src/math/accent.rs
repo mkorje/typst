@@ -1,6 +1,6 @@
 use typst_library::diag::SourceResult;
 use typst_library::foundations::{Packed, StyleChain};
-use typst_library::layout::{Em, Frame, Point, Size};
+use typst_library::layout::{Abs, Em, Frame, Point, Size};
 use typst_library::math::{Accent, AccentElem};
 
 use super::{style_cramped, FrameFragment, GlyphFragment, MathContext, MathFragment};
@@ -45,15 +45,33 @@ pub fn layout_accent(
     let accent = variant.frame;
     let accent_attach = variant.accent_attach;
 
+    // Calculate the width of the final frame. In OpenType, mark glyphs
+    // usually have zero advance width (but their size variants do not), so we
+    // treat that case separately and assume it is entirely contained inside
+    // the width of the base.
+    let (width, base_x, accent_x) = if accent.width() == Abs::zero() {
+        (base.width(), Abs::zero(), base_attach - accent_attach)
+    } else {
+        let pre_width = accent_attach - base_attach;
+        let post_width = (accent.width() - accent_attach) - (base.width() - base_attach);
+        let width =
+            pre_width.max(Abs::zero()) + base.width() + post_width.max(Abs::zero());
+        if pre_width < Abs::zero() {
+            (width, Abs::zero(), -pre_width)
+        } else {
+            (width, pre_width, Abs::zero())
+        }
+    };
+
     // Descent is negative because the accent's ink bottom is above the
     // baseline. Therefore, the default gap is the accent's negated descent
     // minus the accent base height. Only if the base is very small, we need
     // a larger gap so that the accent doesn't move too low.
     let accent_base_height = scaled!(ctx, styles, accent_base_height);
     let gap = -accent.descent() - base.ascent().min(accent_base_height);
-    let size = Size::new(base.width(), accent.height() + gap + base.height());
-    let accent_pos = Point::with_x(base_attach - accent_attach);
-    let base_pos = Point::with_y(accent.height() + gap);
+    let size = Size::new(width, accent.height() + gap + base.height());
+    let accent_pos = Point::with_x(accent_x);
+    let base_pos = Point::new(base_x, accent.height() + gap);
     let baseline = base_pos.y + base.ascent();
     let base_italics_correction = base.italics_correction();
     let base_text_like = base.is_text_like();

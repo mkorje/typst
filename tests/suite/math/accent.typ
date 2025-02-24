@@ -16,6 +16,10 @@ $accent(ö, .), accent(v, <-), accent(ZZ, \u{0303})$
 // Test accent bounds.
 $sqrt(tilde(T)) + hat(f)/hat(g)$
 
+--- math-accent-wide-bounds ---
+// Test wide accent bounds.
+$x + dash(A, size: #2em) + y$
+
 --- math-accent-wide-base ---
 // Test wide base.
 $arrow("ABC" + d), tilde(sum)$
