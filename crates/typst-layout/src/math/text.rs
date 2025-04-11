@@ -197,10 +197,6 @@ fn styled_char(styles: StyleChain, c: char, auto_italic: bool) -> char {
             && matches!(variant, Sans | Serif),
     );
 
-    if let Some(c) = basic_exception(c) {
-        return c;
-    }
-
     if let Some(c) = latin_exception(c, variant, bold, italic) {
         return c;
     }
@@ -298,16 +294,6 @@ fn styled_char(styles: StyleChain, c: char, auto_italic: bool) -> char {
     };
 
     std::char::from_u32(start + (c as u32 - base as u32)).unwrap()
-}
-
-fn basic_exception(c: char) -> Option<char> {
-    Some(match c {
-        '〈' => '⟨',
-        '〉' => '⟩',
-        '《' => '⟪',
-        '》' => '⟫',
-        _ => return None,
-    })
 }
 
 fn latin_exception(
