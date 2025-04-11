@@ -413,8 +413,7 @@ dependencies = [
 [[package]]
 name = "codex"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "724d27a0ee38b700e5e164350e79aba601a0db673ac47fce1cb74c3e38864036"
+source = "git+https://github.com/mkorje/codex?rev=8cdf215#8cdf21525bba8af440c67f8d1bcc769822ef3c88"
 
 [[package]]
 name = "color-print"
@@ -3023,6 +3022,7 @@ version = "0.13.1"
 dependencies = [
  "az",
  "bumpalo",
+ "codex",
  "comemo",
  "ecow",
  "hypher",
