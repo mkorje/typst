@@ -20,8 +20,8 @@ use typst_library::foundations::{
 };
 use typst_library::introspection::{Counter, Locator, SplitLocator, TagElem};
 use typst_library::layout::{
-    Abs, AlignElem, Axes, BlockElem, BoxElem, Em, FixedAlignment, Fragment, Frame, HElem,
-    InlineItem, OuterHAlignment, PlaceElem, Point, Region, Regions, Size, Spacing,
+    Abs, AlignElem, Axes, BlockElem, BoxElem, Dir, Em, FixedAlignment, Fragment, Frame,
+    HElem, InlineItem, OuterHAlignment, PlaceElem, Point, Region, Regions, Size, Spacing,
     SpecificAlignment, VAlignment,
 };
 use typst_library::math::*;
@@ -54,9 +54,10 @@ pub fn layout_equation_inline(
     assert!(!elem.block(styles));
 
     let font = find_math_font(engine, styles, elem.span())?;
+    let dir = TextElem::dir_in(styles);
 
     let mut locator = locator.split();
-    let mut ctx = MathContext::new(engine, &mut locator, region, &font);
+    let mut ctx = MathContext::new(engine, &mut locator, region, &font, dir);
 
     let scale_style = style_for_script_scale(&ctx);
     let styles = styles.chain(&scale_style);
@@ -109,9 +110,10 @@ pub fn layout_equation_block(
 
     let span = elem.span();
     let font = find_math_font(engine, styles, span)?;
+    let dir = TextElem::dir_in(styles);
 
     let mut locator = locator.split();
-    let mut ctx = MathContext::new(engine, &mut locator, regions.base(), &font);
+    let mut ctx = MathContext::new(engine, &mut locator, regions.base(), &font, dir);
 
     let scale_style = style_for_script_scale(&ctx);
     let styles = styles.chain(&scale_style);
@@ -372,6 +374,7 @@ struct MathContext<'a, 'v, 'e> {
     region: Region,
     // Font-related.
     font: &'a Font,
+    dir: Dir,
     constants: ttf_parser::math::Constants<'a>,
     // Mutable.
     fragments: Vec<MathFragment>,
@@ -384,6 +387,7 @@ impl<'a, 'v, 'e> MathContext<'a, 'v, 'e> {
         locator: &'v mut SplitLocator<'a>,
         base: Size,
         font: &'a Font,
+        dir: Dir,
     ) -> Self {
         // These unwraps are safe as the font given is one returned by the
         // find_math_font function, which only returns fonts that have a math
@@ -395,6 +399,7 @@ impl<'a, 'v, 'e> MathContext<'a, 'v, 'e> {
             locator,
             region: Region::new(base, Axes::splat(false)),
             font,
+            dir,
             constants,
             fragments: vec![],
         }
@@ -479,6 +484,10 @@ impl<'a, 'v, 'e> MathContext<'a, 'v, 'e> {
             }
 
             layout_realized(elem, self, styles)?;
+        }
+
+        if self.dir == Dir::RTL {
+            self.fragments.reverse();
         }
 
         Ok(())

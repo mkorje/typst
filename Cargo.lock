@@ -413,7 +413,7 @@ dependencies = [
 [[package]]
 name = "codex"
 version = "0.1.1"
-source = "git+https://github.com/mkorje/codex?rev=1311ada#1311ada4fe2e152f0c2f5c579df30dba2fa36233"
+source = "git+https://github.com/mkorje/codex?rev=0e3be38#0e3be381d0f164d2886effb7fa37e00a6c803cfa"
 
 [[package]]
 name = "color-print"

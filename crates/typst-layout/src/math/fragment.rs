@@ -7,7 +7,7 @@ use typst_library::diag::warning;
 use typst_library::foundations::StyleChain;
 use typst_library::introspection::Tag;
 use typst_library::layout::{
-    Abs, Axes, Axis, Corner, Em, Frame, FrameItem, Point, Size, VAlignment,
+    Abs, Axes, Axis, Corner, Dir, Em, Frame, FrameItem, Point, Size, VAlignment,
 };
 use typst_library::math::{EquationElem, MathSize};
 use typst_library::text::{features, language, Font, Glyph, TextElem, TextItem};
@@ -277,7 +277,11 @@ impl GlyphFragment {
             rustybuzz::Script::from_iso15924_tag(ttf_parser::Tag::from_bytes(b"math"))
                 .unwrap(),
         );
-        buffer.set_direction(rustybuzz::Direction::LeftToRight);
+        buffer.set_direction(match TextElem::dir_in(styles) {
+            Dir::LTR => rustybuzz::Direction::LeftToRight,
+            Dir::RTL => rustybuzz::Direction::RightToLeft,
+            _ => unimplemented!("vertical math layout"),
+        });
         buffer.set_flags(BufferFlags::REMOVE_DEFAULT_IGNORABLES);
 
         let features = features(styles);

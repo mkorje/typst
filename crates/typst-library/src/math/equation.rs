@@ -12,12 +12,12 @@ use crate::foundations::{
 };
 use crate::introspection::{Count, Counter, CounterUpdate, Locatable};
 use crate::layout::{
-    AlignElem, Alignment, BlockElem, InlineElem, OuterHAlignment, SpecificAlignment,
+    AlignElem, Alignment, BlockElem, Dir, InlineElem, OuterHAlignment, SpecificAlignment,
     VAlignment,
 };
 use crate::math::MathSize;
 use crate::model::{Numbering, Outlinable, ParLine, Refable, Supplement};
-use crate::text::{FontFamily, FontList, FontWeight, LocalName, TextElem};
+use crate::text::{FontFamily, FontList, FontWeight, LocalName, TextDir, TextElem};
 
 /// A mathematical equation.
 ///
@@ -198,6 +198,7 @@ impl ShowSet for Packed<EquationElem> {
         out.set(TextElem::set_font(FontList(vec![FontFamily::new(
             "New Computer Modern Math",
         )])));
+        out.set(TextElem::set_dir(TextDir(Smart::Custom(Dir::LTR))));
         out
     }
 }
