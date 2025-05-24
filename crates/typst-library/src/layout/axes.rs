@@ -219,6 +219,14 @@ impl Axes<bool> {
             y: if self.y { t.y } else { f.y },
         }
     }
+
+    pub fn get_only(self) -> Option<Axis> {
+        match (self.x, self.y) {
+            (true, false) => Some(Axis::X),
+            (false, true) => Some(Axis::Y),
+            _ => None,
+        }
+    }
 }
 
 impl Not for Axes<bool> {

@@ -184,7 +184,7 @@ fn layout_body(
     // to ensure that normal matrices are aligned with others unless they are
     // way too big.
     let paren =
-        GlyphFragment::new(ctx, styles.chain(&denom_style), '(', Span::detached());
+        GlyphFragment::new(ctx.font, styles.chain(&denom_style), '(', Span::detached());
 
     for (column, col) in columns.iter().zip(&mut cols) {
         for (cell, (ascent, descent)) in column.iter().zip(&mut heights) {
@@ -313,18 +313,18 @@ fn layout_delimiters(
     frame.set_baseline(height / 2.0 + axis);
 
     if let Some(left) = left {
-        let mut left = GlyphFragment::new(ctx, styles, left, span)
-            .stretch_vertical(ctx, target, short_fall);
-        left.align_on_axis(ctx, delimiter_alignment(left.c));
+        let mut left = GlyphFragment::new(ctx.font, styles, left, span);
+        left.stretch_vertical(target, short_fall);
+        left.center_on_axis();
         ctx.push(left);
     }
 
     ctx.push(FrameFragment::new(styles, frame));
 
     if let Some(right) = right {
-        let mut right = GlyphFragment::new(ctx, styles, right, span)
-            .stretch_vertical(ctx, target, short_fall);
-        right.align_on_axis(ctx, delimiter_alignment(right.c));
+        let mut right = GlyphFragment::new(ctx.font, styles, right, span);
+        right.stretch_vertical(target, short_fall);
+        right.center_on_axis();
         ctx.push(right);
     }
 

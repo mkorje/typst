@@ -53,11 +53,11 @@ pub fn layout_lr(
         _ => {}
     }
 
-    // Handle MathFragment::Variant fragments that should be scaled up.
+    // Handle MathFragment::Glyph fragments that should be scaled up.
     for fragment in inner_fragments.iter_mut() {
-        if let MathFragment::Variant(ref mut variant) = fragment {
-            if variant.mid_stretched == Some(false) {
-                variant.mid_stretched = Some(true);
+        if let MathFragment::Glyph(ref mut glyph) = fragment {
+            if glyph.mid_stretched == Some(false) {
+                glyph.mid_stretched = Some(true);
                 scale(ctx, styles, fragment, relative_to, height, Some(MathClass::Large));
             }
         }
@@ -95,18 +95,9 @@ pub fn layout_mid(
     let mut fragments = ctx.layout_into_fragments(&elem.body, styles)?;
 
     for fragment in &mut fragments {
-        match fragment {
-            MathFragment::Glyph(glyph) => {
-                let mut new = glyph.clone().into_variant();
-                new.mid_stretched = Some(false);
-                new.class = MathClass::Fence;
-                *fragment = MathFragment::Variant(new);
-            }
-            MathFragment::Variant(variant) => {
-                variant.mid_stretched = Some(false);
-                variant.class = MathClass::Fence;
-            }
-            _ => {}
+        if let MathFragment::Glyph(ref mut glyph) = fragment {
+            glyph.mid_stretched = Some(false);
+            glyph.class = MathClass::Fence;
         }
     }
 
