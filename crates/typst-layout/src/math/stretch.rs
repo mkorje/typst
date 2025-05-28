@@ -46,6 +46,7 @@ pub fn stretch_fragment(
     stretch: Rel<Abs>,
     short_fall: Abs,
 ) {
+    let class = fragment.class();
     let glyph = match fragment {
         MathFragment::Glyph(glyph) => glyph.clone(),
         MathFragment::Variant(variant) => {
@@ -75,6 +76,8 @@ pub fn stretch_fragment(
     if axis == Axis::Y {
         variant.align_on_axis(ctx, delimiter_alignment(variant.c));
     }
+
+    variant.class = class;
 
     *fragment = MathFragment::Variant(variant);
 }

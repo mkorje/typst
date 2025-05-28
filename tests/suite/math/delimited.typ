@@ -81,7 +81,7 @@ $ lr(body) quad
 // Test that `mid` creates a Relation, but that can be overridden.
 $ (a | b) $
 $ (a mid(|) b) $
-$ (a class("unary", |) b) $
+$ (a class("unary", mid(|)) b) $
 
 --- math-lr-unbalanced ---
 // Test unbalanced delimiters.
