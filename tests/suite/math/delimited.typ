@@ -77,6 +77,65 @@ $ lr(body) quad
   lr(size: #1em, body) quad
   lr(size: #(1em+20%), body) $
 
+--- math-lr-mid-class ---
+// Test that `mid` creates a Relation, but that can be overridden.
+#set page(width: auto)
+#table(
+  columns: 3,
+  $(a | b) \
+    (a class("fence", |) b) \
+    (a class("relation", |) b) \
+    (a class("unary", |) b)$,
+  $(a mid(|) b) \
+    (a class("fence", mid(|)) b) \
+    (a class("relation", mid(|)) b) \
+    (a class("unary", mid(|)) b)$,
+  $(a mid(|) b) \
+    (a mid(class("fence", |)) b) \
+    (a mid(class("relation", |)) b) \
+    (a mid(class("unary", |)) b)$,
+)
+
+--- math-lr-mid-variant-class ---
+// Test that `mid` creates a Relation, but that can be overridden.
+#set page(width: auto)
+#set math.lr(size: 1.5em)
+#table(
+  columns: 3,
+  $(a | b) \
+    (a class("fence", |) b) \
+    (a class("relation", |) b) \
+    (a class("unary", |) b)$,
+  $(a mid(|) b) \
+    (a class("fence", mid(|)) b) \
+    (a class("relation", mid(|)) b) \
+    (a class("unary", mid(|)) b)$,
+  $(a mid(|) b) \
+    (a mid(class("fence", |)) b) \
+    (a mid(class("relation", |)) b) \
+    (a mid(class("unary", |)) b)$,
+)
+
+--- math-lr-mid-assembly-class ---
+// Test that `mid` creates a Relation, but that can be overridden.
+#set page(width: auto)
+#set math.lr(size: 4em)
+#table(
+  columns: 3,
+  $(a | b) \
+    (a class("fence", |) b) \
+    (a class("relation", |) b) \
+    (a class("unary", |) b)$,
+  $(a mid(|) b) \
+    (a class("fence", mid(|)) b) \
+    (a class("relation", mid(|)) b) \
+    (a class("unary", mid(|)) b)$,
+  $(a mid(|) b) \
+    (a mid(class("fence", |)) b) \
+    (a mid(class("relation", |)) b) \
+    (a mid(class("unary", |)) b)$,
+)
+
 --- math-lr-unbalanced ---
 // Test unbalanced delimiters.
 $ 1/(2 (x) $
