@@ -157,6 +157,51 @@ pub fn bb(
     body.styled(EquationElem::set_variant(Some(MathVariant::DoubleStruck)))
 }
 
+///
+#[func]
+pub fn isolated(
+    /// The content to style.
+    body: Content,
+) -> Content {
+    body.styled(EquationElem::set_variant(Some(MathVariant::Isolated)))
+}
+
+///
+#[func]
+pub fn initial(
+    /// The content to style.
+    body: Content,
+) -> Content {
+    body.styled(EquationElem::set_variant(Some(MathVariant::Initial)))
+}
+
+///
+#[func]
+pub fn tailed(
+    /// The content to style.
+    body: Content,
+) -> Content {
+    body.styled(EquationElem::set_variant(Some(MathVariant::Tailed)))
+}
+
+///
+#[func]
+pub fn stretched(
+    /// The content to style.
+    body: Content,
+) -> Content {
+    body.styled(EquationElem::set_variant(Some(MathVariant::Stretched)))
+}
+
+///
+#[func]
+pub fn looped(
+    /// The content to style.
+    body: Content,
+) -> Content {
+    body.styled(EquationElem::set_variant(Some(MathVariant::Looped)))
+}
+
 /// Forced display style in math.
 ///
 /// This is the normal size for block equations.
