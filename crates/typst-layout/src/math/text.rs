@@ -70,7 +70,7 @@ fn layout_inline_text(
     // Disable auto-italic.
     let italic = EquationElem::italic_in(styles).or(Some(false));
 
-    if text.chars().all(|c| c.is_ascii_digit() || c == '.') {
+    if text.chars().all(|c| c.is_numeric() || c == '.') {
         // Small optimization for numbers. Note that this lays out slightly
         // differently to normal text and is worth re-evaluating in the future.
         let mut fragments = vec![];

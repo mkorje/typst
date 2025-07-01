@@ -110,6 +110,12 @@ impl MathRun {
         self.0.iter()
     }
 
+    pub fn reverse(&mut self) {
+        for row in self.0.split_mut(|frag| matches!(frag, MathFragment::Linebreak)) {
+            row.reverse()
+        }
+    }
+
     /// Split by linebreaks, and copy [`MathFragment`]s into rows.
     pub fn rows(&self) -> Vec<Self> {
         self.0

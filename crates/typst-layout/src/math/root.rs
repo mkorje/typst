@@ -106,7 +106,7 @@ pub fn layout_root(
         frame.push_frame(index_pos, index);
     }
 
-    frame.push_frame(sqrt_pos, sqrt);
+    frame.push_frame(sqrt_pos, sqrt.mark_box());
     frame.push(
         line_pos,
         FrameItem::Shape(
@@ -120,8 +120,10 @@ pub fn layout_root(
         ),
     );
 
-    frame.push_frame(radicand_pos, radicand);
-    ctx.push(FrameFragment::new(styles, frame));
+    frame.push_frame(radicand_pos, radicand.mark_box());
+
+    println!("{:?}, {:?}", sqrt_pos, radicand_pos);
+    ctx.push(FrameFragment::new(styles, frame.mark_box()));
 
     Ok(())
 }

@@ -1,6 +1,6 @@
 use typst_library::diag::SourceResult;
 use typst_library::foundations::{Packed, StyleChain, SymbolElem};
-use typst_library::layout::{Abs, Axis, Corner, Frame, Point, Rel, Size};
+use typst_library::layout::{Abs, Axis, Corner, Dir, Frame, Point, Rel, Size};
 use typst_library::math::{
     AttachElem, EquationElem, LimitsElem, PrimesElem, ScriptsElem, StretchElem,
 };
@@ -24,6 +24,8 @@ pub fn layout_attach(
     ctx: &mut MathContext,
     styles: StyleChain,
 ) -> SourceResult<()> {
+    // TODO: Fix primes for RTL
+    // Need to perform prime swap from tr to tl (if in RTL) before merging happens...
     let merged = elem.merge_base();
     let elem = merged.as_ref().unwrap_or(elem);
     let stretch = stretch_size(styles, elem);
@@ -43,12 +45,23 @@ pub fn layout_attach(
     let b = elem.b(sub_style_chain);
 
     let limits = base.limits().active(styles);
-    let (t, tr) = match (t, tr) {
-        (Some(t), Some(tr)) if primed && !limits => (None, Some(tr + t)),
-        (Some(t), None) if !limits => (None, Some(t)),
-        (t, tr) => (t, tr),
+    let (tl, t, tr) = match (tl, t, tr, ctx.dir) {
+        (tl, Some(t), Some(tr), Dir::LTR) if primed && !limits => {
+            (tl, None, Some(tr + t))
+        }
+        (tl, Some(t), None, Dir::LTR) if !limits => (tl, None, Some(t)),
+        (Some(tl), Some(t), tr, Dir::RTL) if primed && !limits => {
+            (Some(t + tl), None, tr)
+        }
+        (None, Some(t), tr, Dir::RTL) if !limits => (Some(t), None, tr),
+        (tl, t, tr, _) => (tl, t, tr),
     };
-    let (b, br) = if limits || br.is_some() { (b, br) } else { (None, b) };
+
+    let (bl, b, br) = match ctx.dir {
+        Dir::LTR if !limits && br.is_none() => (bl, None, b),
+        Dir::RTL if !limits && bl.is_none() => (b, None, br),
+        _ => (bl, b, br),
+    };
 
     macro_rules! layout {
         ($content:ident, $style_chain:ident) => {
