@@ -192,6 +192,16 @@ impl MathFragment {
         }
     }
 
+    pub fn apply_italics_correction(&mut self) {
+        match self {
+            MathFragment::Glyph(glyph) => glyph.size.x += glyph.italics_correction,
+            MathFragment::Frame(fragment) => {
+                fragment.frame.size_mut().x += fragment.italics_correction
+            }
+            _ => {}
+        }
+    }
+
     /// If no kern table is provided for a corner, a kerning amount of zero is
     /// assumed.
     pub fn kern_at_height(&self, corner: Corner, height: Abs) -> Abs {
@@ -369,12 +379,10 @@ impl GlyphFragment {
         let id = GlyphId(self.item.glyphs[0].id);
 
         let extended_shape = is_extended_shape(&self.item.font, id);
-        let italics = italics_correction(&self.item.font, id).unwrap_or_default();
+        let italics = italics_correction(&self.item.font, id)
+            .map(|x| x.at(self.item.size))
+            .unwrap_or_default();
         let width = self.item.width();
-        if !extended_shape {
-            self.item.glyphs[0].x_advance += italics;
-        }
-        let italics = italics.at(self.item.size);
 
         let (ascent, descent) =
             ascent_descent(&self.item.font, id).unwrap_or((Em::zero(), Em::zero()));
@@ -389,10 +397,8 @@ impl GlyphFragment {
         let bottom_accent_attach = (width - italics) / 2.0;
 
         self.baseline = Some(ascent.at(self.item.size));
-        self.size = Size::new(
-            self.item.width(),
-            ascent.at(self.item.size) + descent.at(self.item.size),
-        );
+        self.size =
+            Size::new(width, ascent.at(self.item.size) + descent.at(self.item.size));
         self.italics_correction = italics;
         self.accent_attach = (top_accent_attach, bottom_accent_attach);
         self.extended_shape = extended_shape;
@@ -448,12 +454,7 @@ impl GlyphFragment {
         self.reset_glyph();
 
         // If the base glyph is good enough, use it.
-        let mut advance = self.size.get(axis);
-        if axis == Axis::X && !self.extended_shape {
-            // For consistency, we subtract the italics correction from the
-            // glyph's width if it was added in `update_glyph`.
-            advance -= self.italics_correction;
-        }
+        let advance = self.size.get(axis);
         if target <= advance {
             return;
         }

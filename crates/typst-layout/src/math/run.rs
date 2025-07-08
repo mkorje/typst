@@ -96,6 +96,12 @@ impl MathRun {
                 last = Some(resolved.len());
             }
 
+            if fragment.italics_correction().approx_empty() {
+                if let Some(last) = resolved.last_mut() {
+                    last.apply_italics_correction();
+                }
+            }
+
             resolved.push(fragment);
         }
 
@@ -312,10 +318,14 @@ impl MathRun {
         };
 
         let mut iter = self.0.into_iter().peekable();
-        while let Some(fragment) = iter.next() {
+        while let Some(mut fragment) = iter.next() {
             if space_is_visible && is_space(&fragment) {
                 items.push(InlineItem::Space(fragment.width(), true));
                 continue;
+            }
+
+            if iter.peek().is_none() {
+                fragment.apply_italics_correction();
             }
 
             let class = fragment.class();

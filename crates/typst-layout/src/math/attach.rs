@@ -5,6 +5,7 @@ use typst_library::math::{
     AttachElem, EquationElem, LimitsElem, PrimesElem, ScriptsElem, StretchElem,
 };
 use typst_utils::OptionExt;
+use unicode_math_class::MathClass;
 
 use super::{
     stretch_fragment, style_for_subscript, style_for_superscript, FrameFragment, Limits,
@@ -290,7 +291,10 @@ fn compute_post_script_widths(
     space_after_post_script: Abs,
 ) -> ((Abs, Abs), (Abs, Abs)) {
     let tr_values = tr.map_or_default(|tr| {
-        let kern = math_kern(base, tr, tr_shift, Corner::TopRight);
+        let ic = (!matches!(base.class(), MathClass::Large))
+            .then(|| base.italics_correction())
+            .unwrap_or_default();
+        let kern = math_kern(base, tr, tr_shift, Corner::TopRight) + ic;
         (space_after_post_script + tr.width() + kern, kern)
     });
 
@@ -298,8 +302,10 @@ fn compute_post_script_widths(
     // need to shift the post-subscript left by the base's italic correction
     // (see the kerning algorithm as described in the OpenType MATH spec).
     let br_values = br.map_or_default(|br| {
-        let kern = math_kern(base, br, br_shift, Corner::BottomRight)
-            - base.italics_correction();
+        let ic = (matches!(base.class(), MathClass::Large))
+            .then(|| base.italics_correction())
+            .unwrap_or_default();
+        let kern = math_kern(base, br, br_shift, Corner::BottomRight) - ic;
         (space_after_post_script + br.width() + kern, kern)
     });
 
