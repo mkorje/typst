@@ -147,6 +147,16 @@ fn head_element(info: &DocumentInfo) -> HtmlElement {
             .into(),
     );
 
+    children.push(
+        HtmlElement::new(tag::link)
+            .with_attr(attr::rel, "stylesheet")
+            .with_attr(
+                attr::href,
+                "https://fred-wang.github.io/MathFonts/NewComputerModern/mathfonts.css",
+            )
+            .into(),
+    );
+
     if let Some(title) = &info.title {
         children.push(
             HtmlElement::new(tag::title)

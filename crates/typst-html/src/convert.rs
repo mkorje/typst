@@ -126,5 +126,16 @@ fn handle(
 /// Checks whether the given element is an inline-level HTML element.
 pub fn is_inline(elem: &Content) -> bool {
     elem.to_packed::<HtmlElem>()
-        .is_some_and(|elem| tag::is_inline_by_default(elem.tag))
+        .is_some_and(|elem| tag::is_inline_by_default(elem.tag) || is_inline_math(elem))
+}
+
+/// Checks whether the given element is an inline math HTML element.
+pub fn is_inline_math(elem: &HtmlElem) -> bool {
+    elem.tag == tag::mathml::math
+        && elem.attrs.as_option().as_ref().is_some_and(|attrs| {
+            attrs
+                .0
+                .iter()
+                .any(|(key, value)| *key == attr::mathml::display && value == "inline")
+        })
 }
