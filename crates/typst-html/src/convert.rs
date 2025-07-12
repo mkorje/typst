@@ -3,11 +3,13 @@ use typst_library::engine::Engine;
 use typst_library::foundations::{Content, StyleChain, Target, TargetElem};
 use typst_library::introspection::{SplitLocator, TagElem};
 use typst_library::layout::{Abs, Axes, BlockBody, BlockElem, BoxElem, Region, Size};
+use typst_library::math::EquationElem;
 use typst_library::model::ParElem;
 use typst_library::routines::Pair;
 use typst_library::text::{LinebreakElem, SmartQuoteElem, SpaceElem, TextElem};
 
 use crate::fragment::html_fragment;
+use crate::mathml::mathml_fragment;
 use crate::{attr, tag, FrameElem, HtmlElem, HtmlElement, HtmlFrame, HtmlNode};
 
 /// Converts realized content into HTML nodes.
@@ -45,6 +47,18 @@ fn handle(
             span: elem.span(),
         };
         output.push(element.into());
+    } else if let Some(elem) = child.to_packed::<EquationElem>() {
+        let children =
+            mathml_fragment(engine, &elem.body, locator.next(&elem.span()), styles)?;
+        println!("{:?}\n", children);
+        let display = if elem.block.get(styles) { "block" } else { "inline" };
+        output.push(
+            HtmlElement::new(tag::mathml::math)
+                .with_attr(attr::mathml::display, display)
+                .with_children(children)
+                .spanned(elem.span())
+                .into(),
+        )
     } else if let Some(elem) = child.to_packed::<ParElem>() {
         let children =
             html_fragment(engine, &elem.body, locator.next(&elem.span()), styles)?;
@@ -126,16 +140,12 @@ fn handle(
 /// Checks whether the given element is an inline-level HTML element.
 pub fn is_inline(elem: &Content) -> bool {
     elem.to_packed::<HtmlElem>()
-        .is_some_and(|elem| tag::is_inline_by_default(elem.tag) || is_inline_math(elem))
+        .is_some_and(|elem| tag::is_inline_by_default(elem.tag))
+        || is_inline_equation(elem)
 }
 
-/// Checks whether the given element is an inline math HTML element.
-pub fn is_inline_math(elem: &HtmlElem) -> bool {
-    elem.tag == tag::mathml::math
-        && elem.attrs.as_option().as_ref().is_some_and(|attrs| {
-            attrs
-                .0
-                .iter()
-                .any(|(key, value)| *key == attr::mathml::display && value == "inline")
-        })
+/// Checks whether the given element is an inline EquationElem.
+pub fn is_inline_equation(elem: &Content) -> bool {
+    elem.to_packed::<EquationElem>()
+        .is_some_and(|elem| elem.block.as_option().is_some_and(|block| !block))
 }

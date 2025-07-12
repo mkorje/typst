@@ -1,198 +1,376 @@
 use codex::styling::{to_style, MathStyle};
+use comemo::{Track, Tracked, TrackedMut};
 use ecow::{eco_format, EcoString};
-use typst_library::diag::{warning, SourceResult};
-use typst_library::engine::Engine;
+use typst_library::diag::{warning, At, SourceResult};
+use typst_library::engine::{Engine, Route, Sink, Traced};
 use typst_library::foundations::{
     Content, NativeElement, Packed, StyleChain, SymbolElem,
 };
-use typst_library::introspection::Locator;
+use typst_library::introspection::{
+    Introspector, Locator, LocatorLink, SplitLocator, TagElem,
+};
 use typst_library::layout::{HElem, Spacing};
 use typst_library::math::*;
-use typst_library::routines::{Arenas, RealizationKind};
+use typst_library::routines::{Arenas, Pair, RealizationKind, Routines};
 use typst_library::text::{LinebreakElem, SpaceElem, TextElem};
+use typst_library::World;
 use typst_syntax::Span;
 use typst_utils::default_math_class;
 use unicode_math_class::MathClass;
 
-use crate::{attr::mathml as attr, css, tag::mathml as tag, HtmlAttrs, HtmlElem};
+use crate::fragment::html_fragment;
+use crate::{
+    attr::mathml as attr, css, tag::mathml as tag, HtmlAttrs, HtmlElem, HtmlElement,
+    HtmlNode,
+};
 
-pub fn show_equation(
-    content: &Content,
+/// Produce MathML nodes from content.
+#[typst_macros::time(name = "mathml fragment")]
+pub fn mathml_fragment(
     engine: &mut Engine,
+    content: &Content,
+    locator: Locator,
     styles: StyleChain,
-) -> SourceResult<Content> {
-    // TODO: Probably better to pass around a mutable vec instead of recursively returning content.
-    // TODO: Maybe should be chaining sup/sub/cramped etc. to stylechain as in
-    // typst-layout for math, so that introspection and all will work...?
-    // TODO: There is a lot of overlap with typst-layout for math. Maybe it
-    // could work to "merge" the two somewhat, and have a central interface in
-    // a new crate typst-math? No idea if this will turn out great...
-    // Could then try use "normal" show rules to display the elements, so that
-    // it gets done during realization automatically and better integrates with
-    // everything else (non-math stuff).
+) -> SourceResult<Vec<HtmlNode>> {
+    mathml_fragment_impl(
+        engine.routines,
+        engine.world,
+        engine.introspector,
+        engine.traced,
+        TrackedMut::reborrow_mut(&mut engine.sink),
+        engine.route.track(),
+        content,
+        locator.track(),
+        styles,
+    )
+}
 
-    // The locator is not used by HTML export, so we can just fabricate one.
-    let mut locator = Locator::root().split();
+/// The cached, internal implementation of [`mathml_fragment`].
+#[comemo::memoize]
+#[allow(clippy::too_many_arguments)]
+fn mathml_fragment_impl(
+    routines: &Routines,
+    world: Tracked<dyn World + '_>,
+    introspector: Tracked<Introspector>,
+    traced: Tracked<Traced>,
+    sink: TrackedMut<Sink>,
+    route: Tracked<Route>,
+    content: &Content,
+    locator: Tracked<Locator>,
+    styles: StyleChain,
+) -> SourceResult<Vec<HtmlNode>> {
+    let link = LocatorLink::new(locator);
+    let mut locator = Locator::link(&link).split();
+    let mut engine = Engine {
+        routines,
+        world,
+        introspector,
+        traced,
+        sink,
+        route: Route::extend(route),
+    };
+
+    engine.route.check_html_depth().at(content.span())?;
+
     let arenas = Arenas::default();
-    let pairs = (engine.routines.realize)(
+    let children = (engine.routines.realize)(
         RealizationKind::Math,
-        engine,
+        &mut engine,
         &mut locator,
         &arenas,
         content,
         styles,
     )?;
 
-    if let [(elem, styles)] = pairs[..] {
-        show_realized(elem, engine, styles)
-    } else {
-        let mut elems = vec![];
-        for (elem, styles) in pairs {
-            elems.push(show_realized(elem, engine, styles)?)
-        }
-        println!("{:?}\n", elems);
-        Ok(HtmlElem::new(tag::mrow)
-            .with_body(Some(Content::sequence(elems)))
-            .pack())
-    }
+    convert_to_nodes(&mut engine, &mut locator, children.iter().copied())
 }
 
-fn show_realized(
-    elem: &Content,
+/// Converts realized content into MathML nodes.
+fn convert_to_nodes<'a>(
     engine: &mut Engine,
+    locator: &mut SplitLocator,
+    children: impl IntoIterator<Item = Pair<'a>>,
+) -> SourceResult<Vec<HtmlNode>> {
+    let mut output = Vec::new();
+    for (child, styles) in children {
+        handle(engine, child, locator, styles, &mut output)?;
+    }
+    Ok(output)
+}
+
+/// Convert one element into HTML node(s).
+fn handle(
+    engine: &mut Engine,
+    child: &Content,
+    locator: &mut SplitLocator,
     styles: StyleChain,
-) -> SourceResult<Content> {
-    if let Some(elem) = elem.to_packed::<HElem>() {
-        show_h(elem, engine, styles)
-    // } else if let Some(elem) = elem.to_packed::<TagElem>() {
-    } else if let Some(elem) = elem.to_packed::<SpaceElem>() {
-        Ok(Content::empty())
-    // } else if let Some(elem) = elem.to_packed::<LinebreakElem>() {
-    // } else if let Some(elem) = elem.to_packed::<BoxElem>() {
-    // } else if let Some(elem) = elem.to_packed::<AlignPointElem>() {
-    // } else if let Some(elem) = elem.to_packed::<ClassElem>() {
-    } else if let Some(elem) = elem.to_packed::<SymbolElem>() {
-        show_symbol(elem, engine, styles)
-    } else if let Some(elem) = elem.to_packed::<TextElem>() {
-        show_text(elem, engine, styles)
-    } else if let Some(elem) = elem.to_packed::<OpElem>() {
-        show_op(elem, engine, styles)
-    } else if let Some(elem) = elem.to_packed::<RootElem>() {
-        show_root(elem, engine, styles)
-    } else if let Some(elem) = elem.to_packed::<LrElem>() {
-        show_lr(elem, engine, styles)
-    } else if let Some(elem) = elem.to_packed::<MidElem>() {
-        show_mid(elem, engine, styles)
-    } else if let Some(elem) = elem.to_packed::<FracElem>() {
-        show_frac(elem, engine, styles)
-    } else if let Some(elem) = elem.to_packed::<BinomElem>() {
-        show_binom(elem, engine, styles)
-    } else if let Some(elem) = elem.to_packed::<AccentElem>() {
-        show_accent(elem, engine, styles)
-    } else if let Some(elem) = elem.to_packed::<AttachElem>() {
-        show_attach(elem, engine, styles)
-    // } else if let Some(elem) = elem.to_packed::<PrimesElem>() {
-    // } else if let Some(elem) = elem.to_packed::<ScriptsElem>() {
-    // } else if let Some(elem) = elem.to_packed::<LimitsElem>() {
-    // } else if let Some(elem) = elem.to_packed::<StretchElem>() {
-    } else if let Some(elem) = elem.to_packed::<UnderbraceElem>() {
-        show_underover(
+    output: &mut Vec<HtmlNode>,
+) -> SourceResult<()> {
+    if let Some(elem) = child.to_packed::<TagElem>() {
+        output.push(HtmlNode::Tag(elem.tag.clone()));
+    } else if let Some(elem) = child.to_packed::<HElem>() {
+        // show_h(elem, engine, styles)
+    } else if let Some(elem) = child.to_packed::<SpaceElem>() {
+    } else if let Some(elem) = child.to_packed::<LinebreakElem>() {
+    } else if let Some(elem) = child.to_packed::<SymbolElem>() {
+        output.push(show_symbol(elem, styles).into());
+    } else if let Some(elem) = child.to_packed::<TextElem>() {
+        // show_text(elem, engine, styles)
+    } else if let Some(elem) = child.to_packed::<OpElem>() {
+        // Ideally this should use the text font, but the spec recommends mi...
+        // But we want mo so that we can use movablelimits!
+        // Quite the pickle
+        let text = group(mathml_fragment(
             engine,
+            &elem.text,
+            locator.next(&elem.text.span()),
             styles,
-            &elem.body,
-            elem.annotation.get_ref(styles),
-            '⏟',
-            Position::Under,
-            elem.span(),
-        )
-    } else if let Some(elem) = elem.to_packed::<OverbraceElem>() {
-        show_underover(
+        )?);
+        let limits = elem.limits.get(styles);
+        output.push(
+            HtmlElement::new(tag::mo)
+                .with_children(vec![text])
+                .with_attr(attr::movablelimits, eco_format!("{}", limits))
+                .with_attr(attr::lspace, "0em")
+                .with_attr(attr::rspace, "0em")
+                .spanned(elem.span())
+                .into(),
+        );
+    } else if let Some(elem) = child.to_packed::<RootElem>() {
+        let radicand = mathml_fragment(
             engine,
+            &elem.radicand,
+            locator.next(&elem.radicand.span()),
             styles,
-            &elem.body,
-            elem.annotation.get_ref(styles),
-            '⏞',
-            Position::Over,
-            elem.span(),
-        )
-    } else if let Some(elem) = elem.to_packed::<UnderbracketElem>() {
-        show_underover(
+        )?;
+        output.push(
+            if let Some(index) = elem.index.get_ref(styles) {
+                let index = group(mathml_fragment(
+                    engine,
+                    index,
+                    locator.next(&index.span()),
+                    styles,
+                )?);
+                HtmlElement::new(tag::mroot).with_children(vec![group(radicand), index])
+            } else {
+                HtmlElement::new(tag::msqrt).with_children(radicand)
+            }
+            .spanned(elem.span())
+            .into(),
+        );
+    } else if let Some(elem) = child.to_packed::<LrElem>() {
+        // Need to set class of opening and closing...
+        output.push(
+            HtmlElement::new(tag::mrow)
+                .with_children(mathml_fragment(
+                    engine,
+                    &elem.body,
+                    locator.next(&elem.span()),
+                    styles,
+                )?)
+                .spanned(elem.span())
+                .into(),
+        );
+    } else if let Some(elem) = child.to_packed::<MidElem>() {
+        // <mo fence="true" form="infix" stretchy="true"></mo>
+    } else if let Some(elem) = child.to_packed::<FracElem>() {
+        let num = group(mathml_fragment(
             engine,
+            &elem.num,
+            locator.next(&elem.num.span()),
             styles,
-            &elem.body,
-            elem.annotation.get_ref(styles),
-            '⎵',
-            Position::Under,
-            elem.span(),
-        )
-    } else if let Some(elem) = elem.to_packed::<OverbracketElem>() {
-        show_underover(
+        )?);
+        let denom = group(mathml_fragment(
             engine,
+            &elem.denom,
+            locator.next(&elem.denom.span()),
             styles,
-            &elem.body,
-            elem.annotation.get_ref(styles),
-            '⎴',
-            Position::Over,
-            elem.span(),
+        )?);
+        output.push(
+            HtmlElement::new(tag::mfrac)
+                .with_children(vec![num, denom])
+                .spanned(elem.span())
+                .into(),
         )
-    } else if let Some(elem) = elem.to_packed::<UnderparenElem>() {
-        show_underover(
+    } else if let Some(elem) = child.to_packed::<BinomElem>() {
+        // let upper = group(mathml_fragment(
+        //     engine,
+        //     &elem.upper,
+        //     locator.next(&elem.upper.span()),
+        //     styles,
+        // )?);
+        // let lower = group(mathml_fragment(
+        //     engine,
+        //     &elem.lower,
+        //     locator.next(&elem.lower.span()),
+        //     styles,
+        // )?);
+        // output.push(
+        //     HtmlElement::new(tag::mfrac)
+        //         .with_children(vec![upper, lower])
+        //         .with_attr(attr::linethickness, "0")
+        //         .into(),
+        // );
+        // let lower = show_equation(
+        //     &Content::sequence(
+        //         elem.lower
+        //             .iter()
+        //             .flat_map(|a| [SymbolElem::packed(','), a.clone()])
+        //             .skip(1),
+        //     ),
+        //     engine,
+        //     styles,
+        // )?;
+    } else if let Some(elem) = child.to_packed::<AccentElem>() {
+        let accent = elem.accent;
+        let (tag, attr) = if accent.is_bottom() {
+            (tag::munder, attr::accentunder)
+        } else {
+            (tag::mover, attr::accent)
+        };
+        let base = group(mathml_fragment(
             engine,
+            &elem.base,
+            locator.next(&elem.base.span()),
             styles,
-            &elem.body,
-            elem.annotation.get_ref(styles),
-            '⏝',
-            Position::Under,
-            elem.span(),
-        )
-    } else if let Some(elem) = elem.to_packed::<OverparenElem>() {
-        show_underover(
-            engine,
-            styles,
-            &elem.body,
-            elem.annotation.get_ref(styles),
-            '⏜',
-            Position::Over,
-            elem.span(),
-        )
-    } else if let Some(elem) = elem.to_packed::<UndershellElem>() {
-        show_underover(
-            engine,
-            styles,
-            &elem.body,
-            elem.annotation.get_ref(styles),
-            '⏡',
-            Position::Under,
-            elem.span(),
-        )
-    } else if let Some(elem) = elem.to_packed::<OvershellElem>() {
-        show_underover(
-            engine,
-            styles,
-            &elem.body,
-            elem.annotation.get_ref(styles),
-            '⏠',
-            Position::Over,
-            elem.span(),
-        )
-    } else if let Some(elem) = elem.to_packed::<MatElem>() {
-        show_mat(elem, engine, styles)
-    } else if let Some(elem) = elem.to_packed::<VecElem>() {
-        show_vec(elem, engine, styles)
-    } else if let Some(elem) = elem.to_packed::<CasesElem>() {
-        show_cases(elem, engine, styles)
-    } else if elem.can::<dyn Mathy>() {
-        // CancelElem, UnderlineElem, OverlineElem
+        )?);
+        let accent = HtmlElement::new(tag::mo)
+            .with_children(vec![HtmlNode::text(accent.0, elem.span())])
+            .into();
+        output.push(
+            HtmlElement::new(tag)
+                .with_attr(attr, "true")
+                .with_children(vec![base, accent])
+                .spanned(elem.span())
+                .into(),
+        );
+    } else if let Some(elem) = child.to_packed::<AttachElem>() {
+        // } else if let Some(elem) = child.to_packed::<PrimesElem>() {
+        // } else if let Some(elem) = child.to_packed::<ScriptsElem>() {
+        // } else if let Some(elem) = child.to_packed::<LimitsElem>() {
+        // } else if let Some(elem) = child.to_packed::<StretchElem>() {
+    } else if let Some(elem) = child.to_packed::<UnderbraceElem>() {
+        // show_underover(
+        //     engine,
+        //     styles,
+        //     &elem.body,
+        //     elem.annotation.get_ref(styles),
+        //     '⏟',
+        //     Position::Under,
+        //     elem.span(),
+        // )
+    } else if let Some(elem) = child.to_packed::<OverbraceElem>() {
+        // show_underover(
+        //     engine,
+        //     styles,
+        //     &elem.body,
+        //     elem.annotation.get_ref(styles),
+        //     '⏞',
+        //     Position::Over,
+        //     elem.span(),
+        // )
+    } else if let Some(elem) = child.to_packed::<UnderbracketElem>() {
+        // show_underover(
+        //     engine,
+        //     styles,
+        //     &elem.body,
+        //     elem.annotation.get_ref(styles),
+        //     '⎵',
+        //     Position::Under,
+        //     elem.span(),
+        // )
+    } else if let Some(elem) = child.to_packed::<OverbracketElem>() {
+        // show_underover(
+        //     engine,
+        //     styles,
+        //     &elem.body,
+        //     elem.annotation.get_ref(styles),
+        //     '⎴',
+        //     Position::Over,
+        //     elem.span(),
+        // )
+    } else if let Some(elem) = child.to_packed::<UnderparenElem>() {
+        // show_underover(
+        //     engine,
+        //     styles,
+        //     &elem.body,
+        //     elem.annotation.get_ref(styles),
+        //     '⏝',
+        //     Position::Under,
+        //     elem.span(),
+        // )
+    } else if let Some(elem) = child.to_packed::<OverparenElem>() {
+        // show_underover(
+        //     engine,
+        //     styles,
+        //     &elem.body,
+        //     elem.annotation.get_ref(styles),
+        //     '⏜',
+        //     Position::Over,
+        //     elem.span(),
+        // )
+    } else if let Some(elem) = child.to_packed::<UndershellElem>() {
+        // show_underover(
+        //     engine,
+        //     styles,
+        //     &elem.body,
+        //     elem.annotation.get_ref(styles),
+        //     '⏡',
+        //     Position::Under,
+        //     elem.span(),
+        // )
+    } else if let Some(elem) = child.to_packed::<OvershellElem>() {
+        // show_underover(
+        //     engine,
+        //     styles,
+        //     &elem.body,
+        //     elem.annotation.get_ref(styles),
+        //     '⏠',
+        //     Position::Over,
+        //     elem.span(),
+        // )
+    } else if let Some(elem) = child.to_packed::<MatElem>() {
+        // show_mat(elem, engine, styles)
+    } else if let Some(elem) = child.to_packed::<VecElem>() {
+        // show_vec(elem, engine, styles)
+    } else if let Some(elem) = child.to_packed::<CasesElem>() {
+        // show_cases(elem, engine, styles)
+        // } else if let Some(elem) = child.to_packed::<BoxElem>() {
+    } else if child.can::<dyn Mathy>() {
+        // CancelElem, UnderlineElem, OverlineElem, AlignPointElem, ClassElem
         engine.sink.warn(warning!(
-            elem.span(),
-            "{} was ignored during HTML export",
-            elem.elem().name()
+            child.span(),
+            "{} was ignored during MathML export",
+            child.elem().name()
         ));
-        Ok(Content::empty())
     } else {
-        println!("external: {:?}\n", elem.elem().name());
-        Ok(Content::empty())
-        // Ok(elem.clone())
+        // Arbitrary content is not allowed, as per the HTML spec.
+        // Only MathML token elements (mi, mo, mn, ms, and mtext),
+        // when descendants of HTML elements, may contain
+        // [phrasing content] from the HTML namespace.
+        // https://html.spec.whatwg.org/#phrasing-content-2
+        //
+        // In MathML 3, nothing is allowed except MathML elements.
+        // Further, nesting root-level math elements is disallowed.
+        //
+        // Since the math element is considered phrasing content,
+        // it can be nested in MathML Core (as long as it is itself
+        // within a MathML token element).
+        engine.sink.warn(warning!(
+            child.span(),
+            "{} was ignored during MathML export",
+            child.elem().name()
+        ));
+        // output.extend(html_fragment(engine, child, locator.next(&child.span()), styles)?);
+    }
+    Ok(())
+}
+
+fn group(mut output: Vec<HtmlNode>) -> HtmlNode {
+    if output.len() != 1 {
+        HtmlElement::new(tag::mrow).with_children(output).into()
+    } else {
+        output.remove(0)
     }
 }
 
@@ -205,11 +383,7 @@ fn show_h(elem: &Packed<HElem>, _: &mut Engine, _: StyleChain) -> SourceResult<C
     Ok(HtmlElem::new(tag::mspace).with_styles(inline).pack())
 }
 
-fn show_symbol(
-    elem: &Packed<SymbolElem>,
-    _: &mut Engine,
-    styles: StyleChain,
-) -> SourceResult<Content> {
+fn show_symbol(elem: &Packed<SymbolElem>, styles: StyleChain) -> HtmlElement {
     // Can't check if the font has the dtls feature...
 
     let variant = styles.get(EquationElem::variant);
@@ -275,11 +449,12 @@ fn show_symbol(
         }
     };
 
-    Ok(HtmlElem::new(tag)
-        .with_body(Some(TextElem::packed(text)))
-        .with_attrs(attrs)
-        .pack()
-        .spanned(elem.span()))
+    HtmlElement {
+        tag,
+        attrs,
+        children: vec![HtmlNode::text(text, elem.span())],
+        span: elem.span(),
+    }
 }
 
 fn show_text(
@@ -310,144 +485,7 @@ fn show_text(
         .spanned(elem.span()))
 }
 
-fn show_op(
-    elem: &Packed<OpElem>,
-    engine: &mut Engine,
-    styles: StyleChain,
-) -> SourceResult<Content> {
-    // Ideally this should use the text font, but the spec recommends mi...
-    // But we want mo so that we can use movablelimits!
-    // Quite the pickle
-    let text = show_equation(&elem.text, engine, styles)?;
-    let limits = elem.limits.get(styles);
-    Ok(HtmlElem::new(tag::mo)
-        .with_body(Some(text))
-        .with_attr(attr::movablelimits, eco_format!("{}", limits))
-        .with_attr(attr::lspace, "0em")
-        .with_attr(attr::rspace, "0em")
-        .pack()
-        .spanned(elem.span()))
-}
-
-fn show_root(
-    elem: &Packed<RootElem>,
-    engine: &mut Engine,
-    styles: StyleChain,
-) -> SourceResult<Content> {
-    let radicand = show_equation(&elem.radicand, engine, styles)?;
-    let index = elem.index.get_ref(styles);
-    if let Some(index) = index {
-        let index = show_equation(index, engine, styles)?;
-        Ok(HtmlElem::new(tag::mroot)
-            .with_body(Some(radicand + index))
-            .pack()
-            .spanned(elem.span()))
-    } else {
-        Ok(HtmlElem::new(tag::msqrt)
-            .with_body(Some(radicand))
-            .pack()
-            .spanned(elem.span()))
-    }
-}
-
-fn show_lr(
-    elem: &Packed<LrElem>,
-    engine: &mut Engine,
-    styles: StyleChain,
-) -> SourceResult<Content> {
-    // Need to set class of opening and closing...
-    show_equation(&elem.body, engine, styles)
-}
-
-fn show_mid(
-    elem: &Packed<MidElem>,
-    engine: &mut Engine,
-    styles: StyleChain,
-) -> SourceResult<Content> {
-    // <mo fence="true" form="infix" stretchy="true"></mo>
-    show_equation(&elem.body, engine, styles)
-}
-
-fn show_frac(
-    elem: &Packed<FracElem>,
-    engine: &mut Engine,
-    styles: StyleChain,
-) -> SourceResult<Content> {
-    let num = show_equation(&elem.num, engine, styles)?;
-    let denom = show_equation(&elem.denom, engine, styles)?;
-    Ok(HtmlElem::new(tag::mfrac)
-        .with_body(Some(num + denom))
-        .pack()
-        .spanned(elem.span()))
-}
-
-fn show_binom(
-    elem: &Packed<BinomElem>,
-    engine: &mut Engine,
-    styles: StyleChain,
-) -> SourceResult<Content> {
-    let upper = show_equation(&elem.upper, engine, styles)?;
-    let lower = show_equation(
-        &Content::sequence(
-            elem.lower
-                .iter()
-                .flat_map(|a| [SymbolElem::packed(','), a.clone()])
-                .skip(1),
-        ),
-        engine,
-        styles,
-    )?;
-
-    let mut seq = vec![];
-    seq.push(show_equation(&SymbolElem::packed('('), engine, styles)?);
-    seq.push(
-        HtmlElem::new(tag::mfrac)
-            .with_body(Some(upper + lower))
-            .with_attr(attr::linethickness, "0")
-            .pack(),
-    );
-    seq.push(show_equation(&SymbolElem::packed(')'), engine, styles)?);
-
-    Ok(HtmlElem::new(tag::mrow)
-        .with_body(Some(Content::sequence(seq)))
-        .pack()
-        .spanned(elem.span()))
-}
-
-fn show_accent(
-    elem: &Packed<AccentElem>,
-    engine: &mut Engine,
-    styles: StyleChain,
-) -> SourceResult<Content> {
-    let accent = elem.accent;
-    let (tag, attr) = if accent.is_bottom() {
-        (tag::munder, attr::accentunder)
-    } else {
-        (tag::mover, attr::accent)
-    };
-
-    let base = show_equation(&elem.base, engine, styles)?;
-    let accent = HtmlElem::new(tag::mo)
-        .with_body(Some(TextElem::packed(accent.0)))
-        .pack();
-
-    Ok(HtmlElem::new(tag)
-        .with_body(Some(base + accent))
-        .with_attr(attr, "true")
-        .pack()
-        .spanned(elem.span()))
-}
-
-fn show_primes(
-    elem: &Packed<PrimesElem>,
-    engine: &mut Engine,
-    styles: StyleChain,
-) -> SourceResult<Content> {
-    // <mo></mo>
-    todo!()
-}
-
-fn show_attach(
+/*fn show_attach(
     elem: &Packed<AttachElem>,
     engine: &mut Engine,
     styles: StyleChain,
@@ -714,3 +752,4 @@ fn show_cases(
         .pack()
         .spanned(elem.span()))
 }
+*/

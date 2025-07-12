@@ -1,6 +1,7 @@
 use std::num::NonZeroUsize;
 
 use codex::styling::MathVariant;
+use ecow::EcoString;
 use typst_utils::NonZeroExt;
 use unicode_math_class::MathClass;
 
@@ -98,6 +99,9 @@ pub struct EquationElem {
     /// $ F_n = floor(1 / sqrt(5) phi.alt^n) $
     /// ```
     pub supplement: Smart<Option<Supplement>>,
+
+    /// A text describing the image.
+    pub alt: Option<EcoString>,
 
     /// The contents of the equation.
     #[required]

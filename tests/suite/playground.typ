@@ -282,7 +282,7 @@
 )
 
 --- playground-2 html ---
-Testing some math $a + b + c #box[blah] #html.frame($ sum_(i = 0)^oo $) + d$ a box!
+Testing some math $a + b + c #box[blah] #html.frame($ sum_(i = 0)^oo $) + #html.div[Blah] + d$ a box!
 // #let html = [
 //   + wow
 //   + a list
@@ -296,3 +296,5 @@ Testing some math $a + b + c #box[blah] #html.frame($ sum_(i = 0)^oo $) + d$ a b
 //   sqrt(x) root(4, x) sqrt(x + y) root(x + y, 4)
 // $
 
+
+$a + b = #html.div[Blah] c$
