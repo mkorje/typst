@@ -3030,6 +3030,7 @@ name = "typst-html"
 version = "0.13.1"
 dependencies = [
  "bumpalo",
+ "codex",
  "comemo",
  "ecow",
  "palette",
@@ -3041,6 +3042,7 @@ dependencies = [
  "typst-syntax",
  "typst-timing",
  "typst-utils",
+ "unicode-math-class",
 ]
 
 [[package]]

@@ -226,6 +226,7 @@ mod exceptions {
     pub const LIST: &[&str] = &[
         "accept-charset",
         "allowfullscreen",
+        "annotation-xml",
         "aria-activedescendant",
         "aria-autocomplete",
         "aria-colcount",
@@ -264,6 +265,9 @@ mod exceptions {
         "h5",
         "h6",
         "historical-ligatures",
+        "linethickness",
+        "mmultiscripts",
+        "movablelimits",
         "number-clearance",
         "number-margin",
         "numbering-scope",
