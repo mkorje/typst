@@ -704,6 +704,12 @@ impl Serialize for Content {
     }
 }
 
+impl FromIterator<Content> for Content {
+    fn from_iter<T: IntoIterator<Item = Content>>(iter: T) -> Self {
+        Self::sequence(iter)
+    }
+}
+
 /// A sequence of content.
 #[elem(Debug, Repr)]
 pub struct SequenceElem {
