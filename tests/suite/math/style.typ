@@ -1,6 +1,6 @@
 // Test text styling in math.
 
---- math-style-italic-default ---
+--- math-style-italic-default render html ---
 // Test italic defaults.
 $a, A, delta, ϵ, partial, Delta, ϴ$
 
@@ -41,16 +41,16 @@ $h, bb(N), cal(R), Theta, italic(Theta), sans(Theta), sans(italic(Theta)) \
  bb(i), bb(italic(i)), italic(bb(i)), bb(j), bb(italic(j)), italic(bb(j)) \
  bb(D), bb(italic(D)), italic(bb(D))$
 
---- math-style-greek-exceptions ---
+--- math-style-greek-exceptions render html ---
 // Test a few greek exceptions.
-$bb(Gamma) , bb(gamma), bb(Pi), bb(pi), bb(sum)$
+$bb(Gamma), bb(gamma), bb(Pi), bb(pi), bb(sum)$
 
---- math-style-hebrew-exceptions ---
+--- math-style-hebrew-exceptions render html ---
 // Test hebrew exceptions.
 $aleph, beth, gimel, daleth$ \
 $upright(aleph), upright(beth), upright(gimel), upright(daleth)$
 
---- math-style-script ---
+--- math-style-script render html ---
 // Test variation selectors for scr and cal.
 $cal(A) scr(A) bold(cal(O)) scr(bold(O))$
 

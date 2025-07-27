@@ -8,6 +8,7 @@ use typst_library::foundations::{
 use typst_library::introspection::{Counter, Locator};
 use typst_library::layout::resolve::{Cell, CellGrid, Entry, table_to_cellgrid};
 use typst_library::layout::{OuterVAlignment, Sizing};
+use typst_library::math::EquationElem;
 use typst_library::model::{
     Attribution, CiteElem, CiteGroup, Destination, EmphElem, EnumElem, FigureCaption,
     FigureElem, HeadingElem, LinkElem, LinkTarget, ListElem, ParbreakElem, QuoteElem,
@@ -19,6 +20,7 @@ use typst_library::text::{
 };
 use typst_library::visualize::{Color, ImageElem};
 
+use crate::math::show_equation;
 use crate::{FrameElem, HtmlAttrs, HtmlElem, HtmlTag, attr, css, tag};
 
 /// Registers show rules for the [HTML target](Target::Html).
@@ -53,6 +55,9 @@ pub fn register(rules: &mut NativeRuleMap) {
 
     // Visualize.
     rules.register(Html, IMAGE_RULE);
+
+    // Math.
+    rules.register(Html, EQUATION_RULE);
 
     // For the HTML target, `html.frame` is a primitive. In the laid-out target,
     // it should be a no-op so that nested frames don't break (things like `show
@@ -474,4 +479,21 @@ const IMAGE_RULE: ShowFn<ImageElem> = |elem, engine, styles| {
     }
 
     Ok(HtmlElem::new(tag::img).with_attrs(attrs).with_styles(inline).pack())
+};
+
+const EQUATION_RULE: ShowFn<EquationElem> = |elem, engine, styles| {
+    let mut attrs = HtmlAttrs::new();
+    if elem.block.get(styles) {
+        attrs.push(attr::mathml::display, "block");
+    }
+
+    // The locator is not used by HTML export, so we can just fabricate one.
+    let mut locator = Locator::root().split();
+    let body = show_equation(&elem.body, engine, &mut locator, styles)?;
+
+    Ok(HtmlElem::new(tag::mathml::math)
+        .with_attrs(attrs)
+        .with_body(Some(body))
+        .pack()
+        .spanned(elem.span()))
 };

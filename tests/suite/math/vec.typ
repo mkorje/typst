@@ -17,11 +17,11 @@ $ vec(
   "a a a" & "a" & "a a a",
 ) $
 
---- math-vec-wide ---
+--- math-vec-wide render html ---
 // Test wide cell.
 $ v = vec(1, 2+3, 4) $
 
---- math-vec-delim-set ---
+--- math-vec-delim-set render html ---
 // Test alternative delimiter.
 #set math.vec(delim: "[")
 $ vec(1, 2) $

@@ -9,7 +9,7 @@ mod dom;
 mod encode;
 mod fragment;
 mod link;
-mod mathml;
+mod math;
 mod rules;
 mod tag;
 mod typed;

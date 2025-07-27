@@ -11,7 +11,7 @@ $mat() dot
  mat(1, 2; 3, 4) dot
  mat(1 + &2, 1/2; &3, 4)$
 
---- math-mat-sparse ---
+--- math-mat-sparse render html ---
 // Test sparse matrix.
 $ mat(
   1, 2, ..., 10;
@@ -28,7 +28,7 @@ $ mat(
   zeta, alpha;
 ) $
 
---- math-mat-delim-set ---
+--- math-mat-delim-set render html ---
 // Test alternative delimiter with set rule.
 #set math.mat(delim: "[")
 $ mat(1, 2; 3, 4) $
@@ -263,7 +263,7 @@ $ mat(a; b; c) mat(a \ b \ c) $
 --- math-mat-vec-cases-unity ---
 // Test that matrices, vectors, and cases are all laid out the same.
 $ mat(z_(n_p); a^2)
-  vec(z_(n_p), a^2) 
+  vec(z_(n_p), a^2)
   cases(reverse: #true, delim: \(, z_(n_p), a^2)
   cases(delim: \(, z_(n_p), a^2) $
 
