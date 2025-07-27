@@ -1,6 +1,6 @@
-use crate::foundations::{Content, Packed, elem};
+use crate::foundations::{Content, elem};
 use crate::layout::{Length, Rel};
-use crate::math::{EquationElem, Mathy};
+use crate::math::Mathy;
 
 /// A base with optional attachments.
 ///
@@ -40,45 +40,6 @@ pub struct AttachElem {
 
     /// The bottom-right attachment (after the base).
     pub br: Option<Content>,
-}
-
-impl Packed<AttachElem> {
-    /// If an AttachElem's base is also an AttachElem, merge attachments into the
-    /// base AttachElem where possible.
-    pub fn merge_base(&self) -> Option<Self> {
-        // Extract from an EquationElem.
-        let mut base = &self.base;
-        while let Some(equation) = base.to_packed::<EquationElem>() {
-            base = &equation.body;
-        }
-
-        // Move attachments from elem into base where possible.
-        if let Some(base) = base.to_packed::<AttachElem>() {
-            let mut elem = self.clone();
-            let mut base = base.clone();
-
-            macro_rules! merge {
-                ($content:ident) => {
-                    if !base.$content.is_set() && elem.$content.is_set() {
-                        base.$content = elem.$content.clone();
-                        elem.$content.unset();
-                    }
-                };
-            }
-
-            merge!(t);
-            merge!(b);
-            merge!(tl);
-            merge!(tr);
-            merge!(bl);
-            merge!(br);
-
-            elem.base = base.pack();
-            return Some(elem);
-        }
-
-        None
-    }
 }
 
 /// Grouped primes.

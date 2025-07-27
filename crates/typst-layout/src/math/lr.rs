@@ -1,7 +1,7 @@
 use typst_library::diag::SourceResult;
 use typst_library::foundations::{Packed, StyleChain};
 use typst_library::layout::{Abs, Axis, Rel};
-use typst_library::math::{EquationElem, LrElem, MidElem};
+use typst_library::math::{LrElem, MidElem};
 use typst_utils::SliceExt;
 use unicode_math_class::MathClass;
 
@@ -14,20 +14,7 @@ pub fn layout_lr(
     ctx: &mut MathContext,
     styles: StyleChain,
 ) -> SourceResult<()> {
-    // Extract from an EquationElem.
-    let mut body = &elem.body;
-    if let Some(equation) = body.to_packed::<EquationElem>() {
-        body = &equation.body;
-    }
-
-    // Extract implicit LrElem.
-    if let Some(lr) = body.to_packed::<LrElem>()
-        && lr.size.get(styles).is_one()
-    {
-        body = &lr.body;
-    }
-
-    let mut fragments = ctx.layout_into_fragments(body, styles)?;
+    let mut fragments = ctx.layout_into_fragments(&elem.body, styles)?;
 
     // Ignore leading and trailing ignorant fragments.
     let (start_idx, end_idx) = fragments.split_prefix_suffix(|f| f.is_ignorant());

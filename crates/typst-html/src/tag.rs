@@ -249,6 +249,7 @@ pub fn is_inline_by_default(tag: HtmlTag) -> bool {
             | self::sup
             | self::var
             | self::u
+            | self::mathml::math
     )
 }
 
@@ -267,12 +268,52 @@ pub fn is_tabular_by_default(tag: HtmlTag) -> bool {
             | self::caption
             | self::col
             | self::colgroup
+            | self::mathml::mtable
+            | self::mathml::mtr
+            | self::mathml::mtd
     )
 }
 
 /// Whether this is a foreign element which has a self-closing tag.
 pub fn is_foreign_self_closing(tag: HtmlTag) -> bool {
     self::mathml::is_self_closing(tag)
+}
+
+pub fn is_mathml(tag: HtmlTag) -> bool {
+    use self::mathml::*;
+    matches!(
+        tag,
+        annotation
+            | annotation_xml
+            | maction
+            | math
+            | merror
+            | mfrac
+            | mi
+            | mmultiscripts
+            | mn
+            | mo
+            | mover
+            | mpadded
+            | mphantom
+            | mprescripts
+            | mroot
+            | mrow
+            | ms
+            | mspace
+            | msqrt
+            | mstyle
+            | msub
+            | msubsup
+            | msup
+            | mtable
+            | mtd
+            | mtext
+            | mtr
+            | munder
+            | munderover
+            | semantics
+    )
 }
 
 /// Elements in the MathML namespace.

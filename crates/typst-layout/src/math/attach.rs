@@ -24,8 +24,6 @@ pub fn layout_attach(
     ctx: &mut MathContext,
     styles: StyleChain,
 ) -> SourceResult<()> {
-    let merged = elem.merge_base();
-    let elem = merged.as_ref().unwrap_or(elem);
     let stretch = stretch_size(styles, elem);
 
     let mut base = ctx.layout_into_fragment(&elem.base, styles)?;

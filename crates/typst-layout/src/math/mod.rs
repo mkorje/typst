@@ -460,7 +460,7 @@ impl<'a, 'v, 'e> MathContext<'a, 'v, 'e> {
         styles: StyleChain,
     ) -> SourceResult<()> {
         let arenas = Arenas::default();
-        let pairs = (self.engine.routines.realize)(
+        let mut children = (self.engine.routines.realize)(
             RealizationKind::Math,
             self.engine,
             self.locator,
@@ -469,8 +469,11 @@ impl<'a, 'v, 'e> MathContext<'a, 'v, 'e> {
             styles,
         )?;
 
+        // Perform some preprocessing on children.
+        prepare(&arenas, &mut children);
+
         let outer = styles;
-        for (elem, styles) in pairs {
+        for (elem, styles) in children {
             // Hack because the font is fixed in math.
             if styles != outer
                 && styles.get_ref(TextElem::font) != outer.get_ref(TextElem::font)
@@ -618,8 +621,8 @@ fn layout_class(
     ctx: &mut MathContext,
     styles: StyleChain,
 ) -> SourceResult<()> {
-    let style = EquationElem::class.set(Some(elem.class)).wrap();
-    let mut fragment = ctx.layout_into_fragment(&elem.body, styles.chain(&style))?;
+    // let style = EquationElem::class.set(Some(elem.class)).wrap();
+    let mut fragment = ctx.layout_into_fragment(&elem.body, styles)?;
     fragment.set_class(elem.class);
     fragment.set_limits(Limits::for_class(elem.class));
     ctx.push(fragment);

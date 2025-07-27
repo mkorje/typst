@@ -1,6 +1,6 @@
 // Test roots.
 
---- math-root-basic ---
+--- math-root-basic render html ---
 // Test root with more than one character.
 $A = sqrt(x + y) = c$
 
