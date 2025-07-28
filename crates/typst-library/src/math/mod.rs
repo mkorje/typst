@@ -5,6 +5,7 @@ mod attach;
 mod cancel;
 mod equation;
 mod frac;
+mod fragment;
 mod lr;
 mod matrix;
 mod op;
@@ -17,6 +18,7 @@ pub use self::attach::*;
 pub use self::cancel::*;
 pub use self::equation::*;
 pub use self::frac::*;
+pub use self::fragment::*;
 pub use self::lr::*;
 pub use self::matrix::*;
 pub use self::op::*;
@@ -28,10 +30,8 @@ use typst_utils::singleton;
 use unicode_math_class::MathClass;
 
 use crate::foundations::{Content, Module, NativeElement, Scope, elem};
-use crate::introspection::TagElem;
-use crate::layout::{Em, HElem, PlaceElem};
-use crate::routines::{Arenas, Pair};
-use crate::text::{LinebreakElem, SpaceElem, TextElem};
+use crate::layout::{Em, HElem};
+use crate::text::TextElem;
 
 // Spacings.
 pub const THIN: Em = Em::new(1.0 / 6.0);
@@ -148,117 +148,4 @@ pub struct ClassElem {
     /// The content to which the class is applied.
     #[required]
     pub body: Content,
-}
-
-/// Performs some basic processing on the pairs returned from realization.
-pub fn prepare<'a>(arenas: &'a Arenas, children: &mut Vec<Pair<'a>>) {
-    for (child, _styles) in children.iter_mut() {
-        if let Some(elem) = child.to_packed::<LrElem>()
-            && let Some(lr) = extract_from_eq(&elem.body).to_packed::<LrElem>()
-            && !lr.size.is_set()
-        {
-            let mut new = LrElem::new(lr.body.clone());
-            if elem.size.is_set() {
-                new.size = elem.size.clone();
-            };
-            *child = arenas.content.alloc(new.pack().spanned(elem.span()));
-        } else if let Some(elem) = child.to_packed::<AttachElem>()
-            && let Some(attach) = extract_from_eq(&elem.base).to_packed::<AttachElem>()
-        {
-            let mut new = AttachElem::new(Content::empty());
-            let mut base = attach.clone();
-
-            macro_rules! merge {
-                ($content:ident) => {
-                    if elem.$content.is_set() {
-                        if !base.$content.is_set() {
-                            base.$content = elem.$content.clone();
-                        } else {
-                            new.$content = elem.$content.clone();
-                        }
-                    }
-                };
-            }
-
-            merge!(t);
-            merge!(b);
-            merge!(tl);
-            merge!(tr);
-            merge!(bl);
-            merge!(br);
-
-            new.base = base.pack().spanned(attach.span());
-            *child = arenas.content.alloc(new.pack().spanned(elem.span()));
-        }
-    }
-
-    // println!("{:?}\n", children.iter().map(|x| x.0).collect::<Vec<_>>());
-    /*let mut last = None;
-    let mut space = None;
-    for (child, styles) in children {
-        // Keep space only if supported by spaced fragments.
-        if child.is::<SpaceElem>() {
-            if last.is_some() {
-                space = Some(child);
-            }
-            continue;
-        } else if let Some(elem) = child.to_packed::<HElem>() {
-            last = None;
-            space = None;
-
-            // if let Spacing::Rel(rel) = elem.amount
-            //     && rel.rel.is_zero()
-            // {
-            //     ctx.push(MathFragment::Spacing(rel.abs.resolve(styles), elem.weak.get(styles)));
-            // }
-            if elem.weak.get(*styles) {
-                // check prev child
-                // if None, continue
-                // if weak spacing, then set prev child's spacing width to max with elem's width
-                // else do nothing.
-            }
-
-            // push it
-            continue;
-        } else if child.is::<AlignPointElem>() {
-            // push it
-            continue;
-        } else if child.is::<LinebreakElem>() {
-            //push it
-            space = None;
-            last = None;
-            continue;
-        }
-
-        // Convert variable operators to binary operators if something precedes
-        // them and they are not preceded by a operator or comparator.
-        // check if child's class is Vary and if
-        // if true, then set the child's class to binary.
-
-        // Insert spacing between the last and this non-ignornat item.
-        if !child.is::<TagElem>() && !child.is::<PlaceElem>() {
-            // if last is not none and spacing returns something
-            // spacing(last, space.take(), child)
-            // then insert after last the returned spacing.
-
-            // last = set to index of current child.
-        }
-    }
-
-    // pop last child if it was weak spacing
-    children.pop_if(|(child, styles)| {
-        child
-            .to_packed::<HElem>()
-            .map(|elem| elem.weak.get(*styles))
-            .unwrap_or(false)
-    });*/
-}
-
-/// Recursively extracts the body while the content is an [`EquationElem`].
-fn extract_from_eq(content: &Content) -> &Content {
-    let mut body = content;
-    while let Some(equation) = body.to_packed::<EquationElem>() {
-        body = &equation.body;
-    }
-    body
 }

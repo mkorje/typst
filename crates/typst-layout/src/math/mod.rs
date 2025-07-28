@@ -36,7 +36,7 @@ use typst_utils::Numeric;
 use unicode_math_class::MathClass;
 
 use self::fragment::{
-    FrameFragment, GlyphFragment, Limits, MathFragment, has_dtls_feat, stretch_axes,
+    FrameFragment, GlyphFragment, MathFragment, has_dtls_feat, stretch_axes,
 };
 use self::run::{LeftRightAlternator, MathRun, MathRunFrameBuilder};
 use self::shared::*;
@@ -460,31 +460,36 @@ impl<'a, 'v, 'e> MathContext<'a, 'v, 'e> {
         styles: StyleChain,
     ) -> SourceResult<()> {
         let arenas = Arenas::default();
-        let mut children = (self.engine.routines.realize)(
-            RealizationKind::Math,
-            self.engine,
-            self.locator,
-            &arenas,
-            content,
-            styles,
-        )?;
-
-        // Perform some preprocessing on children.
-        prepare(&arenas, &mut children);
+        let nodes = math_nodes(self.engine, self.locator, &arenas, content, styles)?;
 
         let outer = styles;
-        for (elem, styles) in children {
-            // Hack because the font is fixed in math.
-            if styles != outer
-                && styles.get_ref(TextElem::font) != outer.get_ref(TextElem::font)
-            {
-                let frame = layout_external(elem, self, styles)?;
-                self.push(FrameFragment::new(styles, frame).with_spaced(true));
-                continue;
+        for node in nodes {
+            match node {
+                MathNode::Align => self.push(MathFragment::Align),
+                MathNode::Linebreak => self.push(MathFragment::Linebreak),
+                MathNode::Tag(tag) => self.push(MathFragment::Tag(tag.clone())),
+                MathNode::Spacing(Abs, bool) => {
+                    self.push(MathFragment::Spacing(Abs, bool))
+                }
+                MathNode::Space(styles) => {
+                    let space_width = self.font.space_width().unwrap_or(THICK);
+                    self.push(MathFragment::Space(space_width.resolve(styles)));
+                }
+                MathNode::Item(item) => {}
+                MathNode::Group(group) => {}
             }
-
-            layout_realized(elem, self, styles)?;
         }
+
+        // Hack because the font is fixed in math.
+        // if styles != outer
+        //     && styles.get_ref(TextElem::font) != outer.get_ref(TextElem::font)
+        // {
+        //     let frame = layout_external(elem, self, styles)?;
+        //     self.push(FrameFragment::new(styles, frame).with_spaced(true));
+        //     continue;
+        // }
+
+        // layout_realized(elem, self, styles)?;
 
         Ok(())
     }
@@ -496,35 +501,18 @@ fn layout_realized(
     ctx: &mut MathContext,
     styles: StyleChain,
 ) -> SourceResult<()> {
-    if let Some(elem) = elem.to_packed::<TagElem>() {
-        ctx.push(MathFragment::Tag(elem.tag.clone()));
-    } else if elem.is::<SpaceElem>() {
-        let space_width = ctx.font.space_width().unwrap_or(THICK);
-        ctx.push(MathFragment::Space(space_width.resolve(styles)));
-    } else if elem.is::<LinebreakElem>() {
-        ctx.push(MathFragment::Linebreak);
-    } else if let Some(elem) = elem.to_packed::<HElem>() {
-        layout_h(elem, ctx, styles)?;
-    } else if let Some(elem) = elem.to_packed::<TextElem>() {
+    if let Some(elem) = elem.to_packed::<TextElem>() {
         self::text::layout_text(elem, ctx, styles)?;
     } else if let Some(elem) = elem.to_packed::<SymbolElem>() {
         self::text::layout_symbol(elem, ctx, styles)?;
     } else if let Some(elem) = elem.to_packed::<BoxElem>() {
         layout_box(elem, ctx, styles)?;
-    } else if elem.is::<AlignPointElem>() {
-        ctx.push(MathFragment::Align);
-    } else if let Some(elem) = elem.to_packed::<ClassElem>() {
-        layout_class(elem, ctx, styles)?;
     } else if let Some(elem) = elem.to_packed::<AccentElem>() {
         self::accent::layout_accent(elem, ctx, styles)?;
     } else if let Some(elem) = elem.to_packed::<AttachElem>() {
         self::attach::layout_attach(elem, ctx, styles)?;
     } else if let Some(elem) = elem.to_packed::<PrimesElem>() {
         self::attach::layout_primes(elem, ctx, styles)?;
-    } else if let Some(elem) = elem.to_packed::<ScriptsElem>() {
-        self::attach::layout_scripts(elem, ctx, styles)?;
-    } else if let Some(elem) = elem.to_packed::<LimitsElem>() {
-        self::attach::layout_limits(elem, ctx, styles)?;
     } else if let Some(elem) = elem.to_packed::<CancelElem>() {
         self::cancel::layout_cancel(elem, ctx, styles)?
     } else if let Some(elem) = elem.to_packed::<FracElem>() {
@@ -541,8 +529,6 @@ fn layout_realized(
         self::mat::layout_mat(elem, ctx, styles)?
     } else if let Some(elem) = elem.to_packed::<CasesElem>() {
         self::mat::layout_cases(elem, ctx, styles)?
-    } else if let Some(elem) = elem.to_packed::<OpElem>() {
-        layout_op(elem, ctx, styles)?
     } else if let Some(elem) = elem.to_packed::<RootElem>() {
         self::root::layout_root(elem, ctx, styles)?
     } else if let Some(elem) = elem.to_packed::<StretchElem>() {
@@ -597,62 +583,6 @@ fn layout_box(
         ctx.region.size,
     )?;
     ctx.push(FrameFragment::new(styles, frame).with_spaced(true));
-    Ok(())
-}
-
-/// Lays out an [`HElem`].
-fn layout_h(
-    elem: &Packed<HElem>,
-    ctx: &mut MathContext,
-    styles: StyleChain,
-) -> SourceResult<()> {
-    if let Spacing::Rel(rel) = elem.amount
-        && rel.rel.is_zero()
-    {
-        ctx.push(MathFragment::Spacing(rel.abs.resolve(styles), elem.weak.get(styles)));
-    }
-    Ok(())
-}
-
-/// Lays out a [`ClassElem`].
-#[typst_macros::time(name = "math.class", span = elem.span())]
-fn layout_class(
-    elem: &Packed<ClassElem>,
-    ctx: &mut MathContext,
-    styles: StyleChain,
-) -> SourceResult<()> {
-    // let style = EquationElem::class.set(Some(elem.class)).wrap();
-    let mut fragment = ctx.layout_into_fragment(&elem.body, styles)?;
-    fragment.set_class(elem.class);
-    fragment.set_limits(Limits::for_class(elem.class));
-    ctx.push(fragment);
-    Ok(())
-}
-
-/// Lays out an [`OpElem`].
-#[typst_macros::time(name = "math.op", span = elem.span())]
-fn layout_op(
-    elem: &Packed<OpElem>,
-    ctx: &mut MathContext,
-    styles: StyleChain,
-) -> SourceResult<()> {
-    let fragment = ctx.layout_into_fragment(&elem.text, styles)?;
-    let italics = fragment.italics_correction();
-    let accent_attach = fragment.accent_attach();
-    let text_like = fragment.is_text_like();
-
-    ctx.push(
-        FrameFragment::new(styles, fragment.into_frame())
-            .with_class(MathClass::Large)
-            .with_italics_correction(italics)
-            .with_accent_attach(accent_attach)
-            .with_text_like(text_like)
-            .with_limits(if elem.limits.get(styles) {
-                Limits::Display
-            } else {
-                Limits::Never
-            }),
-    );
     Ok(())
 }
 
