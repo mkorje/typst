@@ -35,17 +35,7 @@ pub fn show_equation(
     styles: StyleChain,
 ) -> SourceResult<Content> {
     let arenas = Arenas::default();
-    let mut children = (engine.routines.realize)(
-        RealizationKind::Math,
-        engine,
-        locator,
-        &arenas,
-        content,
-        styles,
-    )?;
-
-    // Perform some preprocessing on the children.
-    prepare(&arenas, &mut children);
+    let nodes = math_nodes(engine, locator, &arenas, content, styles);
 
     let mut output = Vec::new();
     for (child, styles) in children {

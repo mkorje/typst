@@ -1,5 +1,27 @@
---- playground-test ---
-$ accent(x + y, ⏞) overbrace(x + y) $
+--- testing html ---
+$ x = -1 $
+vs
+$ x - 1, class("unary", AA)x $
+
+--- playground-test render html ---
+Wow a paragraph
+$ mat(1, 2; 3, 4) $
+continuing on...
+$ a + mat(delim: #none, 1, 2; 3, 4) + b $
+blah
+
+new par $x + z$, but
+$ 10 $
+Wowzers
+
+$ 20 $
+Test
+
+Test paragraph.
+New line!
+
+$ x + y + z $
+
 --- playground html ---
 
 #let misc-tests = (
