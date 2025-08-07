@@ -53,7 +53,7 @@ pub fn layout_equation_inline(
     styles: StyleChain,
     region: Size,
 ) -> SourceResult<Vec<InlineItem>> {
-    assert!(!elem.block.get(styles));
+    assert!(!elem.display.get(styles));
 
     let span = elem.span();
     let font = get_font(engine.world, styles, span)?;
@@ -107,9 +107,45 @@ pub fn layout_equation_block(
     engine: &mut Engine,
     locator: Locator,
     styles: StyleChain,
+    region: Size,
+) -> SourceResult<Vec<Frame>> {
+    assert!(elem.display.get(styles));
+
+    let span = elem.span();
+    let font = find_math_font(engine, styles, span)?;
+
+    let mut locator = locator.split();
+    let mut ctx = MathContext::new(engine, &mut locator, region, &font);
+
+    let scale_style = style_for_script_scale(&ctx);
+    let styles = styles.chain(&scale_style);
+
+    let align = elem.align.resolve(styles);
+    let full_equation_builder = ctx
+        .layout_into_run(&elem.body, styles)?
+        .multiline_frame_builder(Some(align), styles);
+
+    let width = full_equation_builder.size.x;
+    Ok(full_equation_builder
+        .frames
+        .into_iter()
+        .map(|x| {
+            let mut frame = x.0;
+            frame.size_mut().x = width;
+            frame.translate(Point::with_x(x.1.x));
+            frame
+        })
+        .collect())
+}
+
+/*pub fn layout_equation_block_old(
+    elem: &Packed<EquationElem>,
+    engine: &mut Engine,
+    locator: Locator,
+    styles: StyleChain,
     regions: Regions,
 ) -> SourceResult<Fragment> {
-    assert!(elem.block.get(styles));
+    assert!(elem.display.get(styles));
 
     let span = elem.span();
     let font = get_font(engine.world, styles, span)?;
@@ -237,7 +273,7 @@ pub fn layout_equation_block(
         .collect();
 
     Ok(Fragment::frames(frames))
-}
+}*/
 
 fn add_equation_number(
     equation_builder: MathRunFrameBuilder,

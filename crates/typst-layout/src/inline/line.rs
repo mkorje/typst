@@ -27,6 +27,7 @@ const LINE_SEPARATOR: char = '\u{2028}'; // We use LS to distinguish justified b
 /// first and last one since they may be broken apart by the start or end of the
 /// line, respectively. But even those can partially reuse previous results when
 /// the break index is safe-to-break per rustybuzz.
+#[derive(Debug)]
 pub struct Line<'a> {
     /// The items the line is made of.
     pub items: Items<'a>,
@@ -518,12 +519,13 @@ pub fn commit(
 
     // Build the frames and determine the height and baseline.
     let mut frames = vec![];
+    let mut numbering = true;
     for &(idx, ref item) in line.items.indexed_iter() {
         let mut push = |offset: &mut Abs, frame: Frame, idx: usize| {
             let width = frame.width();
             top.set_max(frame.baseline());
             bottom.set_max(frame.size().y - frame.baseline());
-            frames.push((*offset, frame, idx));
+            frames.push((*offset, frame, None, idx));
             *offset += width;
         };
 
@@ -559,9 +561,31 @@ pub fn commit(
             Item::Tag(tag) => {
                 let mut frame = Frame::soft(Size::zero());
                 frame.push(Point::zero(), FrameItem::Tag((*tag).clone()));
-                frames.push((offset, frame, idx));
+                frames.push((offset, frame, None, idx));
             }
             Item::Skip(_) => {}
+            Item::Line(frame, align, number, start, end) => {
+                numbering = *number;
+                let mut idx_offset = 0;
+                if let Some(start) = start {
+                    let mut frame = Frame::soft(Size::zero());
+                    frame.push(Point::zero(), FrameItem::Tag((*start).clone()));
+                    frames.push((offset, frame, None, idx));
+                    idx_offset += 1;
+                }
+
+                let width = frame.width();
+                top.set_max(frame.baseline());
+                bottom.set_max(frame.size().y - frame.baseline());
+                frames.push((offset, frame.clone(), Some(*align), idx + idx_offset));
+                offset += width;
+
+                if let Some(end) = end {
+                    let mut frame = Frame::soft(Size::zero());
+                    frame.push(Point::zero(), FrameItem::Tag((*end).clone()));
+                    frames.push((offset, frame, None, idx + idx_offset + 1));
+                }
+            }
         }
     }
 
@@ -574,18 +598,18 @@ pub fn commit(
     let mut output = Frame::soft(size);
     output.set_baseline(top);
 
-    if let Some(marker) = &p.config.numbering_marker {
+    if numbering && let Some(marker) = &p.config.numbering_marker {
         add_par_line_marker(&mut output, marker, engine, locator, top);
     }
 
     // Ensure that the final frame's items are in logical order rather than in
     // visual order. This is important because it affects the order of elements
     // during introspection and thus things like counters.
-    frames.sort_unstable_by_key(|(_, _, idx)| *idx);
+    frames.sort_unstable_by_key(|(_, _, _, idx)| *idx);
 
     // Construct the line's frame.
-    for (offset, frame, _) in frames {
-        let x = offset + p.config.align.position(remaining);
+    for (offset, frame, align, __) in frames {
+        let x = offset + align.unwrap_or(p.config.align).position(remaining);
         let y = top - frame.baseline();
         output.push_frame(Point::new(x, y), frame);
     }

@@ -1,7 +1,7 @@
 Typst has special [syntax]($syntax/#math) and library functions to typeset
 mathematical formulas. Math formulas can be displayed inline with text or as
-separate blocks. They will be typeset into their own block if they start and end
-with at least one space (e.g. `[$ x^2 $]`).
+full width display equations. They will be typeset into a display equation if
+they start and end with at least one space (e.g. `[$ x^2 $]`).
 
 # Variables
 In math, single letters are always displayed as is. Multiple letters, however,

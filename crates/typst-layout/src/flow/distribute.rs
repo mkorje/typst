@@ -5,8 +5,8 @@ use typst_library::layout::{
 use typst_utils::Numeric;
 
 use super::{
-    Child, Composer, FlowResult, LineChild, MultiChild, MultiSpill, PlacedChild,
-    SingleChild, Stop, Work,
+    Child, Composer, FlowResult, LineChild, MultiChild, MultiLineChild, MultiSpill,
+    PlacedChild, SingleChild, Stop, Work,
 };
 
 /// Distributes as many children as fit from `composer.work` into the first
@@ -133,6 +133,7 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
             Child::Rel(amount, weakness) => self.rel(*amount, *weakness),
             Child::Fr(fr) => self.fr(*fr),
             Child::Line(line) => self.line(line)?,
+            Child::MultiLine(multi_line) => self.multi_line(multi_line)?,
             Child::Single(single) => self.single(single)?,
             Child::Multi(multi) => self.multi(multi)?,
             Child::Placed(placed) => self.placed(placed)?,
@@ -245,6 +246,25 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         }
 
         self.frame(line.frame.clone(), line.align, false, false)
+    }
+
+    /// Processes grouped lines of a paragraph.
+    fn multi_line(&mut self, multi_line: &'b MultiLineChild) -> FlowResult<()> {
+        // If the line doesn't fit and a followup region may improve things,
+        // finish the region.
+        let height = multi_line.frames.iter().map(|frame| frame.height()).sum::<Abs>();
+        if !self.regions.size.y.fits(height) && self.regions.may_progress() {
+            return Err(Stop::Finish(false));
+        }
+
+        for (i, frame) in multi_line.frames.iter().enumerate() {
+            if i > 0 {
+                self.rel(multi_line.leading.into(), 5);
+            }
+
+            self.frame(frame.clone(), multi_line.align, false, false)?;
+        }
+        Ok(())
     }
 
     /// Processes an unbreakable block.

@@ -821,8 +821,8 @@ impl<'a> Equation<'a> {
         self.0.cast_first()
     }
 
-    /// Whether the equation should be displayed as a separate block.
-    pub fn block(self) -> bool {
+    /// Whether the equation should be a display equation.
+    pub fn display(self) -> bool {
         let is_space = |node: Option<&SyntaxNode>| {
             node.map(SyntaxNode::kind) == Some(SyntaxKind::Space)
         };

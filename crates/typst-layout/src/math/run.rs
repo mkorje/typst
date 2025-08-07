@@ -1,7 +1,9 @@
 use std::iter::once;
 
 use typst_library::foundations::{Resolve, StyleChain};
-use typst_library::layout::{Abs, AlignElem, Em, Frame, InlineItem, Point, Size};
+use typst_library::layout::{
+    Abs, AlignElem, Em, FixedAlignment, Frame, InlineItem, Point, Size,
+};
 use typst_library::math::{EquationElem, MEDIUM, MathSize, THICK, THIN};
 use typst_library::model::ParElem;
 use unicode_math_class::MathClass;
@@ -165,7 +167,7 @@ impl MathRun {
         if !self.is_multiline() {
             self.into_line_frame(&[], LeftRightAlternator::Right)
         } else {
-            self.multiline_frame_builder(styles).build()
+            self.multiline_frame_builder(None, styles).build()
         }
     }
 
@@ -189,7 +191,11 @@ impl MathRun {
     /// Returns a builder that lays out the [`MathFragment`]s into a possibly
     /// multi-row [`Frame`]. The rows are aligned using the same set of alignment
     /// points computed from them as a whole.
-    pub fn multiline_frame_builder(self, styles: StyleChain) -> MathRunFrameBuilder {
+    pub fn multiline_frame_builder(
+        self,
+        align: Option<FixedAlignment>,
+        styles: StyleChain,
+    ) -> MathRunFrameBuilder {
         let rows: Vec<_> = self.rows();
         let row_count = rows.len();
         let alignments = alignments(&rows);
@@ -200,7 +206,11 @@ impl MathRun {
             TIGHT_LEADING.resolve(styles)
         };
 
-        let align = styles.resolve(AlignElem::alignment).x;
+        let align = if styles.get(EquationElem::display) {
+            styles.resolve(EquationElem::align)
+        } else {
+            styles.resolve(AlignElem::alignment).x
+        };
         let mut frames: Vec<(Frame, Point)> = vec![];
         let mut size = Size::zero();
         for (i, row) in rows.into_iter().enumerate() {
@@ -399,6 +409,7 @@ impl Iterator for LeftRightAlternator {
 }
 
 /// How the rows from the [`MathRun`] should be aligned and merged into a [`Frame`].
+#[derive(Debug)]
 pub struct MathRunFrameBuilder {
     /// The size of the resulting frame.
     pub size: Size,
