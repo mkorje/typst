@@ -4,6 +4,7 @@ use typst_library::introspection::{SplitLocator, Tag, TagElem};
 use typst_library::layout::{
     Abs, BoxElem, Dir, Fr, Frame, HElem, InlineElem, InlineItem, Sizing, Spacing,
 };
+use typst_library::math::EquationElem;
 use typst_library::routines::Pair;
 use typst_library::text::{
     LinebreakElem, SmartQuoteElem, SmartQuoter, SmartQuotes, SpaceElem, TextElem,
@@ -19,6 +20,7 @@ use crate::modifiers::{FrameModifiers, FrameModify, layout_and_modify};
 // full text.
 const SPACING_REPLACE: &str = " "; // Space
 const OBJ_REPLACE: &str = "\u{FFFC}"; // Object Replacement Character
+const LINE_REPLACE: &str = "\u{FFFC}\n";
 
 // Unicode BiDi control characters.
 const LTR_EMBEDDING: &str = "\u{202A}";
@@ -43,6 +45,9 @@ pub enum Item<'a> {
     /// An item that is invisible and needs to be skipped, e.g. a Unicode
     /// isolate.
     Skip(&'static str),
+    /// Layouted full line with the given horizontal alignment, and whether it
+    /// should be numbered.
+    Line(Frame, FixedAlignment, bool, Option<&'a Tag>, Option<&'a Tag>),
 }
 
 impl<'a> Item<'a> {
@@ -71,6 +76,7 @@ impl<'a> Item<'a> {
             Self::Frame(_) => OBJ_REPLACE,
             Self::Tag(_) => "",
             Self::Skip(s) => s,
+            Self::Line(_, _, _, _, _) => LINE_REPLACE,
         }
     }
 
@@ -87,6 +93,7 @@ impl<'a> Item<'a> {
             Self::Frame(frame) => frame.width(),
             Self::Fractional(_, _) | Self::Tag(_) => Abs::zero(),
             Self::Skip(_) => Abs::zero(),
+            Self::Line(frame, _, _, _, _) => frame.width(),
         }
     }
 }
@@ -137,11 +144,13 @@ pub fn collect<'a>(
         collector.spans.push(1, Span::detached());
     }
 
+    let mut prev_line = false;
     for &(child, styles) in children {
         let prev_len = collector.full.len();
 
         if child.is::<SpaceElem>() {
             collector.push_text(" ", styles);
+            prev_line = true;
         } else if let Some(elem) = child.to_packed::<TextElem>() {
             collector.build_text(styles, |full| {
                 let dir = styles.resolve(TextElem::dir);
@@ -165,6 +174,7 @@ pub fn collect<'a>(
                     full.push_str(POP_EMBEDDING);
                 }
             });
+            prev_line = true;
         } else if let Some(elem) = child.to_packed::<HElem>() {
             if elem.amount.is_zero() {
                 continue;
@@ -177,11 +187,13 @@ pub fn collect<'a>(
                     elem.weak.get(styles),
                 ),
             });
+            prev_line = true;
         } else if let Some(elem) = child.to_packed::<LinebreakElem>() {
             collector.push_text(
                 if elem.justify.get(styles) { "\u{2028}" } else { "\n" },
                 styles,
             );
+            prev_line = true;
         } else if let Some(elem) = child.to_packed::<SmartQuoteElem>() {
             let double = elem.double.get(styles);
             if elem.enabled.get(styles) {
@@ -197,6 +209,60 @@ pub fn collect<'a>(
                 collector.push_text(quote, styles);
             } else {
                 collector.push_text(if double { "\"" } else { "'" }, styles);
+            }
+            prev_line = true;
+        } else if let Some(elem) = child.to_packed::<EquationElem>() {
+            if elem.display.get(styles) {
+                let Segment::Item(Item::Tag(start_tag)) =
+                    collector.segments.pop().unwrap()
+                else {
+                    unreachable!()
+                };
+                if prev_line {
+                    collector.push_text("\n", styles); // or "\u{2028}"? should maybe let user pick
+                }
+                for (i, line) in crate::math::layout_equation_block(
+                    elem,
+                    engine,
+                    locator.next(&elem.span()),
+                    styles,
+                    region,
+                )?
+                .into_iter()
+                .enumerate()
+                {
+                    let start = if i == 0 { Some(start_tag) } else { None };
+                    collector.push_item(Item::Line(
+                        line,
+                        elem.align.resolve(styles),
+                        styles.get_ref(ParLine::numbering).is_some(),
+                        start,
+                        None,
+                    ));
+                }
+                prev_line = false;
+            } else {
+                collector.push_item(Item::Skip(LTR_ISOLATE));
+                for item in crate::math::layout_equation_inline(
+                    elem,
+                    engine,
+                    locator.next(&elem.span()),
+                    styles,
+                    region,
+                )? {
+                    match item {
+                        InlineItem::Space(space, weak) => {
+                            collector.push_item(Item::Absolute(space, weak));
+                        }
+                        InlineItem::Frame(mut frame) => {
+                            frame.modify(&FrameModifiers::get_in(styles));
+                            apply_shift(&engine.world, &mut frame, styles);
+                            collector.push_item(Item::Frame(frame));
+                        }
+                    }
+                }
+                collector.push_item(Item::Skip(POP_ISOLATE));
+                prev_line = true;
             }
         } else if let Some(elem) = child.to_packed::<InlineElem>() {
             collector.push_item(Item::Skip(LTR_ISOLATE));
@@ -215,6 +281,7 @@ pub fn collect<'a>(
             }
 
             collector.push_item(Item::Skip(POP_ISOLATE));
+            prev_line = true;
         } else if let Some(elem) = child.to_packed::<BoxElem>() {
             let loc = locator.next(&elem.span());
             if let Sizing::Fr(v) = elem.width.get(styles) {
@@ -226,6 +293,7 @@ pub fn collect<'a>(
                 apply_shift(&engine.world, &mut frame, styles);
                 collector.push_item(Item::Frame(frame));
             }
+            prev_line = true;
         } else if let Some(elem) = child.to_packed::<TagElem>() {
             collector.push_item(Item::Tag(&elem.tag));
         } else {
@@ -293,6 +361,11 @@ impl<'a> Collector<'a> {
             ) => {
                 *prev_amount = (*prev_amount).max(*amount);
             }
+            (Some(Segment::Item(Item::Line(_, _, _, _, end))), Item::Tag(tag))
+                if end.is_none() =>
+            {
+                *end = Some(tag)
+            }
 
             _ => {
                 self.full.push_str(item.textual());
@@ -303,7 +376,7 @@ impl<'a> Collector<'a> {
 }
 
 /// Maps byte offsets back to spans.
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct SpanMapper(Vec<(usize, Span)>);
 
 impl SpanMapper {

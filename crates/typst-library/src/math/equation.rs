@@ -10,17 +10,15 @@ use crate::foundations::{
     Content, NativeElement, Packed, ShowSet, Smart, StyleChain, Styles, Synthesize, elem,
 };
 use crate::introspection::{Count, Counter, CounterUpdate, Locatable};
-use crate::layout::{
-    AlignElem, Alignment, BlockElem, OuterHAlignment, SpecificAlignment, VAlignment,
-};
+use crate::layout::{HAlignment, OuterHAlignment, SpecificAlignment, VAlignment};
 use crate::math::MathSize;
 use crate::model::{Numbering, Outlinable, ParLine, Refable, Supplement};
 use crate::text::{FontFamily, FontList, FontWeight, LocalName, TextElem};
 
 /// A mathematical equation.
 ///
-/// Can be displayed inline with text or as a separate block. An equation
-/// becomes block-level through the presence of whitespace after the opening
+/// Can be displayed inline with text or inline with full width. An equation
+/// becomes a display one through the presence of whitespace after the opening
 /// dollar sign and whitespace before the closing dollar sign.
 ///
 /// # Example
@@ -36,22 +34,27 @@ use crate::text::{FontFamily, FontList, FontWeight, LocalName, TextElem};
 /// $ sum_(k=1)^n k = (n(n+1)) / 2 $
 /// ```
 ///
-/// By default, block-level equations will not break across pages. This can be
-/// changed through `{show math.equation: set block(breakable: true)}`.
-///
 /// # Syntax
 /// This function also has dedicated syntax: Write mathematical markup within
 /// dollar signs to create an equation. Starting and ending the equation with
-/// whitespace lifts it into a separate block that is centered horizontally.
-/// For more details about math syntax, see the
+/// whitespace lifts it onto separate lines, full width and centered
+/// horizontally. For more details about math syntax, see the
 /// [main math page]($category/math).
 #[elem(Locatable, Synthesize, ShowSet, Count, LocalName, Refable, Outlinable)]
 pub struct EquationElem {
-    /// Whether the equation is displayed as a separate block.
+    /// Whether the equation is displayed as full width.
     #[default(false)]
-    pub block: bool,
+    pub display: bool,
 
-    /// How to [number]($numbering) block-level equations.
+    /// How to align display equations.
+    #[default(HAlignment::Center)]
+    pub align: HAlignment,
+
+    /// Whether lines of a display equation can break across pages.
+    #[default(false)]
+    pub breakable: bool,
+
+    /// How to [number]($numbering) display equations.
     ///
     /// ```example
     /// #set math.equation(numbering: "(1)")
@@ -167,9 +170,7 @@ impl Synthesize for Packed<EquationElem> {
 impl ShowSet for Packed<EquationElem> {
     fn show_set(&self, styles: StyleChain) -> Styles {
         let mut out = Styles::new();
-        if self.block.get(styles) {
-            out.set(AlignElem::alignment, Alignment::CENTER);
-            out.set(BlockElem::breakable, false);
+        if self.display.get(styles) {
             out.set(ParLine::numbering, None);
             out.set(EquationElem::size, MathSize::Display);
         } else {
@@ -186,7 +187,7 @@ impl ShowSet for Packed<EquationElem> {
 
 impl Count for Packed<EquationElem> {
     fn update(&self) -> Option<CounterUpdate> {
-        (self.block.get(StyleChain::default()) && self.numbering().is_some())
+        (self.display.get(StyleChain::default()) && self.numbering().is_some())
             .then(|| CounterUpdate::Step(NonZeroUsize::ONE))
     }
 }
@@ -215,7 +216,7 @@ impl Refable for Packed<EquationElem> {
 
 impl Outlinable for Packed<EquationElem> {
     fn outlined(&self) -> bool {
-        self.block.get(StyleChain::default()) && self.numbering().is_some()
+        self.display.get(StyleChain::default()) && self.numbering().is_some()
     }
 
     fn prefix(&self, numbers: Content) -> Content {

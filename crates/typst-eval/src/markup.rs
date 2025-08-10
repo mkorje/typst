@@ -272,7 +272,7 @@ impl Eval for ast::Equation<'_> {
 
     fn eval(self, vm: &mut Vm) -> SourceResult<Self::Output> {
         let body = self.body().eval(vm)?;
-        let block = self.block();
-        Ok(EquationElem::new(body).with_block(block).pack())
+        let display = self.display();
+        Ok(EquationElem::new(body).with_display(display).pack())
     }
 }

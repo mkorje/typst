@@ -53,7 +53,7 @@ pub fn layout_equation_inline(
     styles: StyleChain,
     region: Size,
 ) -> SourceResult<Vec<InlineItem>> {
-    assert!(!elem.block.get(styles));
+    assert!(!elem.display.get(styles));
 
     let span = elem.span();
     let font = get_font(engine.world, styles, span)?;
@@ -107,136 +107,36 @@ pub fn layout_equation_block(
     engine: &mut Engine,
     locator: Locator,
     styles: StyleChain,
-    regions: Regions,
-) -> SourceResult<Fragment> {
-    assert!(elem.block.get(styles));
+    region: Size,
+) -> SourceResult<Vec<Frame>> {
+    assert!(elem.display.get(styles));
 
     let span = elem.span();
     let font = get_font(engine.world, styles, span)?;
     warn_non_math_font(&font, engine, span);
 
     let mut locator = locator.split();
-    let mut ctx = MathContext::new(engine, &mut locator, regions.base(), font.clone());
+    let mut ctx = MathContext::new(engine, &mut locator, region, font.clone());
 
     let scale_style = style_for_script_scale(&font);
     let styles = styles.chain(&scale_style);
 
+    let align = elem.align.resolve(styles);
     let full_equation_builder = ctx
         .layout_into_run(&elem.body, styles)?
-        .multiline_frame_builder(styles);
+        .multiline_frame_builder(Some(align), styles);
+
     let width = full_equation_builder.size.x;
-
-    let equation_builders = if styles.get(BlockElem::breakable) {
-        let mut rows = full_equation_builder.frames.into_iter().peekable();
-        let mut equation_builders = vec![];
-        let mut last_first_pos = Point::zero();
-        let mut regions = regions;
-
-        loop {
-            // Keep track of the position of the first row in this region,
-            // so that the offset can be reverted later.
-            let Some(&(_, first_pos)) = rows.peek() else { break };
-            last_first_pos = first_pos;
-
-            let mut frames = vec![];
-            let mut height = Abs::zero();
-            while let Some((sub, pos)) = rows.peek() {
-                let mut pos = *pos;
-                pos.y -= first_pos.y;
-
-                // Finish this region if the line doesn't fit. Only do it if
-                // we placed at least one line _or_ we still have non-last
-                // regions. Crucially, we don't want to infinitely create
-                // new regions which are too small.
-                if !regions.size.y.fits(sub.height() + pos.y)
-                    && (regions.may_progress()
-                        || (regions.may_break() && !frames.is_empty()))
-                {
-                    break;
-                }
-
-                let (sub, _) = rows.next().unwrap();
-                height = height.max(pos.y + sub.height());
-                frames.push((sub, pos));
-            }
-
-            equation_builders
-                .push(MathRunFrameBuilder { frames, size: Size::new(width, height) });
-            regions.next();
-        }
-
-        // Append remaining rows to the equation builder of the last region.
-        if let Some(equation_builder) = equation_builders.last_mut() {
-            equation_builder.frames.extend(rows.map(|(frame, mut pos)| {
-                pos.y -= last_first_pos.y;
-                (frame, pos)
-            }));
-
-            let height = equation_builder
-                .frames
-                .iter()
-                .map(|(frame, pos)| frame.height() + pos.y)
-                .max()
-                .unwrap_or(equation_builder.size.y);
-
-            equation_builder.size.y = height;
-        }
-
-        // Ensure that there is at least one frame, even for empty equations.
-        if equation_builders.is_empty() {
-            equation_builders
-                .push(MathRunFrameBuilder { frames: vec![], size: Size::zero() });
-        }
-
-        equation_builders
-    } else {
-        vec![full_equation_builder]
-    };
-
-    let Some(numbering) = elem.numbering.get_ref(styles) else {
-        let frames = equation_builders
-            .into_iter()
-            .map(MathRunFrameBuilder::build)
-            .collect();
-        return Ok(Fragment::frames(frames));
-    };
-
-    let pod = Region::new(regions.base(), Axes::splat(false));
-    let counter = Counter::of(EquationElem::ELEM)
-        .display_at_loc(engine, elem.location().unwrap(), styles, numbering)?
-        .spanned(span);
-    let number = crate::layout_frame(engine, &counter, locator.next(&()), styles, pod)?;
-
-    static NUMBER_GUTTER: Em = Em::new(0.5);
-    let full_number_width = number.width() + NUMBER_GUTTER.resolve(styles);
-
-    let number_align = match elem.number_align.get(styles) {
-        SpecificAlignment::H(h) => SpecificAlignment::Both(h, VAlignment::Horizon),
-        SpecificAlignment::V(v) => SpecificAlignment::Both(OuterHAlignment::End, v),
-        SpecificAlignment::Both(h, v) => SpecificAlignment::Both(h, v),
-    };
-
-    // Add equation numbers to each equation region.
-    let region_count = equation_builders.len();
-    let frames = equation_builders
+    Ok(full_equation_builder
+        .frames
         .into_iter()
-        .map(|builder| {
-            if builder.frames.is_empty() && region_count > 1 {
-                // Don't number empty regions, but do number empty equations.
-                return builder.build();
-            }
-            add_equation_number(
-                builder,
-                number.clone(),
-                number_align.resolve(styles),
-                styles.get(AlignElem::alignment).resolve(styles).x,
-                regions.size.x,
-                full_number_width,
-            )
+        .map(|x| {
+            let mut frame = x.0;
+            frame.size_mut().x = width;
+            frame.translate(Point::with_x(x.1.x));
+            frame
         })
-        .collect();
-
-    Ok(Fragment::frames(frames))
+        .collect())
 }
 
 fn add_equation_number(

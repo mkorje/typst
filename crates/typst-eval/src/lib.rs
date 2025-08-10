@@ -146,7 +146,7 @@ pub fn eval_string(
         }
         SyntaxMode::Math => Value::Content(
             EquationElem::new(root.cast::<ast::Math>().unwrap().eval(&mut vm)?)
-                .with_block(false)
+                .with_display(false)
                 .pack()
                 .spanned(span),
         ),

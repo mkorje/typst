@@ -11,8 +11,8 @@ use typst_library::foundations::{
 use typst_library::introspection::{Counter, Locator, LocatorLink};
 use typst_library::layout::{
     Abs, AlignElem, Alignment, Axes, BlockBody, BlockElem, ColumnsElem, Em, GridCell,
-    GridChild, GridElem, GridItem, HAlignment, HElem, HideElem, InlineElem, LayoutElem,
-    Length, MoveElem, OuterVAlignment, PadElem, PlaceElem, PlacementScope, Region, Rel,
+    GridChild, GridElem, GridItem, HAlignment, HElem, HideElem, LayoutElem, Length,
+    MoveElem, OuterVAlignment, PadElem, PlaceElem, PlacementScope, Region, Rel,
     RepeatElem, RotateElem, ScaleElem, Sides, Size, Sizing, SkewElem, Spacing,
     StackChild, StackElem, TrackSizings, VElem,
 };
@@ -98,9 +98,6 @@ pub fn register(rules: &mut NativeRuleMap) {
     rules.register(Paged, POLYGON_RULE);
     rules.register(Paged, CURVE_RULE);
     rules.register(Paged, PATH_RULE);
-
-    // Math.
-    rules.register(Paged, EQUATION_RULE);
 
     // PDF.
     rules.register(Paged, ATTACH_RULE);
@@ -835,15 +832,6 @@ const CURVE_RULE: ShowFn<CurveElem> = |elem, _, _| {
 
 const PATH_RULE: ShowFn<PathElem> = |elem, _, _| {
     Ok(BlockElem::single_layouter(elem.clone(), crate::shapes::layout_path).pack())
-};
-
-const EQUATION_RULE: ShowFn<EquationElem> = |elem, _, styles| {
-    if elem.block.get(styles) {
-        Ok(BlockElem::multi_layouter(elem.clone(), crate::math::layout_equation_block)
-            .pack())
-    } else {
-        Ok(InlineElem::layouter(elem.clone(), crate::math::layout_equation_inline).pack())
-    }
 };
 
 const ATTACH_RULE: ShowFn<AttachElem> = |_, _, _| Ok(Content::empty());

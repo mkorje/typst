@@ -343,6 +343,14 @@ fn visit_show_rules<'a>(
     content: &'a Content,
     styles: StyleChain<'a>,
 ) -> SourceResult<bool> {
+    if matches!(s.kind, RealizationKind::LayoutDocument { .. })
+        && content.is::<EquationElem>()
+    {
+        // Delay preparing equations at the top level to preserve tags.
+
+        return Ok(false);
+    }
+
     // Determines whether and how to proceed with show rule application.
     let Some(Verdict { prepared, mut map, step }) = verdict(s.engine, content, styles)
     else {
@@ -889,6 +897,7 @@ static PAR: GroupingRule = GroupingRule {
             || elem == SmartQuoteElem::ELEM
             || elem == InlineElem::ELEM
             || elem == BoxElem::ELEM
+            || elem == EquationElem::ELEM
             || match state.kind {
                 RealizationKind::HtmlDocument { is_inline, .. }
                 | RealizationKind::HtmlFragment { is_inline, .. } => is_inline(content),
@@ -1311,6 +1320,10 @@ fn collapse_spaces(buf: &mut Vec<Pair>, start: usize) {
             if elem.amount.is_fractional() || elem.weak.get(styles) {
                 destruct_space(buf, &mut k, &mut state);
             }
+        } else if let Some(elem) = content.to_packed::<EquationElem>()
+            && elem.display.get(styles)
+        {
+            destruct_space(buf, &mut k, &mut state)
         } else {
             state = SpaceState::Supportive;
         };

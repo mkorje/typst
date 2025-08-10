@@ -14,10 +14,11 @@ use typst_library::introspection::{
 };
 use typst_library::layout::{
     Abs, AlignElem, Alignment, Axes, BlockElem, ColbreakElem, FixedAlignment, FlushElem,
-    Fr, Fragment, Frame, PagebreakElem, PlaceElem, PlacementScope, Ratio, Region,
-    Regions, Rel, Size, Sizing, Spacing, VElem,
+    Fr, Fragment, Frame, FrameItem, PagebreakElem, PlaceElem, PlacementScope, Ratio,
+    Region, Regions, Rel, Size, Sizing, Spacing, VElem,
 };
-use typst_library::model::ParElem;
+use typst_library::math::EquationElem;
+use typst_library::model::{ParElem, ParLineMarker};
 use typst_library::routines::{Pair, Routines};
 use typst_library::text::TextElem;
 use typst_utils::SliceExt;
@@ -109,9 +110,9 @@ impl<'a> Collector<'a, '_, '_> {
 
     /// Perform collection for inline-level children.
     fn run_inline(mut self) -> SourceResult<Vec<Child<'a>>> {
-        // Extract leading and trailing tags.
-        let (start, end) = self.children.split_prefix_suffix(|(c, _)| c.is::<TagElem>());
+        let (start, end) = extract_tags(self.children);
         let inner = &self.children[start..end];
+        dbg!(inner);
 
         // Compute the shared styles, ignoring tags.
         let styles = StyleChain::trunk(inner.iter().map(|&(_, s)| s)).unwrap_or_default();
@@ -170,6 +171,7 @@ impl<'a> Collector<'a, '_, '_> {
             self.par_situation,
         )?
         .into_frames();
+        dbg!(&lines);
 
         let spacing = elem.spacing.resolve(styles);
         let leading = elem.leading.resolve(styles);
@@ -205,9 +207,56 @@ impl<'a> Collector<'a, '_, '_> {
         let back_2 = height_at(len.saturating_sub(2));
         let back_1 = height_at(len.saturating_sub(1));
 
-        for (i, frame) in lines.into_iter().enumerate() {
+        let start_eq = |frame: &Frame| {
+            if let Some((_, FrameItem::Tag(Tag::Start(elem)))) = frame.items().nth(0)
+                && elem.is::<ParLineMarker>()
+            {
+                frame.items().nth(2)
+            } else {
+                frame.items().nth(0)
+            }
+            .is_some_and(|(_, item)| {
+                if let FrameItem::Tag(Tag::Start(elem)) = item {
+                    elem.to_packed::<EquationElem>().is_some_and(|eq| {
+                        eq.display.as_option().unwrap()
+                            && !eq.breakable.as_option().unwrap()
+                    })
+                } else {
+                    false
+                }
+            })
+        };
+        let end_eq = |frame: &Frame| {
+            if let Some((_, FrameItem::Tag(Tag::Start(elem)))) = frame.items().nth(0)
+                && elem.is::<ParLineMarker>()
+            {
+                frame.items().skip(2).last().is_some_and(|(_, item)| {
+                    matches!(item, FrameItem::Tag(Tag::End(_, _)))
+                })
+            } else {
+                frame.items().last().is_some_and(|(_, item)| {
+                    matches!(item, FrameItem::Tag(Tag::End(_, _)))
+                })
+            }
+        };
+
+        let mut i = 0;
+        while i < lines.len() {
             if i > 0 {
                 self.output.push(Child::Rel(leading.into(), 5));
+            }
+
+            if start_eq(&lines[i]) {
+                let end = (i..lines.len()).find(|i| end_eq(&lines[*i])).unwrap();
+                if end != i {
+                    self.output.push(Child::MultiLine(self.boxed(MultiLineChild {
+                        frames: lines[i..=end].to_vec(),
+                        align,
+                        leading,
+                    })));
+                    i = end + 1;
+                    continue;
+                }
             }
 
             // To prevent widows and orphans, we require enough space for
@@ -221,11 +270,15 @@ impl<'a> Collector<'a, '_, '_> {
             } else if prevent_widows && i >= 2 && i + 2 == len {
                 back_2 + leading + back_1
             } else {
-                frame.height()
+                lines[i].height()
             };
 
-            self.output
-                .push(Child::Line(self.boxed(LineChild { frame, align, need })));
+            self.output.push(Child::Line(self.boxed(LineChild {
+                frame: lines[i].clone(),
+                align,
+                need,
+            })));
+            i += 1;
         }
     }
 
@@ -353,6 +406,8 @@ pub enum Child<'a> {
     Fr(Fr),
     /// An already layouted line of a paragraph.
     Line(BumpBox<'a, LineChild>),
+    /// A group of already layouted lines of a paragraph that aren't breakable.
+    MultiLine(BumpBox<'a, MultiLineChild>),
     /// An unbreakable block.
     Single(BumpBox<'a, SingleChild<'a>>),
     /// A breakable block.
@@ -371,6 +426,14 @@ pub struct LineChild {
     pub frame: Frame,
     pub align: Axes<FixedAlignment>,
     pub need: Abs,
+}
+
+/// A child that encapsulates a group of layouted lines of a paragraph.
+#[derive(Debug)]
+pub struct MultiLineChild {
+    pub frames: Vec<Frame>,
+    pub align: Axes<FixedAlignment>,
+    pub leading: Abs,
 }
 
 /// A child that encapsulates a prepared unbreakable block.
@@ -706,4 +769,43 @@ impl<T> Debug for CachedCell<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.pad("CachedCell(..)")
     }
+}
+
+/// Extract leading and trailing tags, but keep tags around an EquationElem.
+fn extract_tags<'a, 'x>(children: &'x [Pair<'a>]) -> (usize, usize) {
+    let Some(start) = children.iter().position(|(c, _)| {
+        !(c.is::<TagElem>()
+            && match &c.to_packed::<TagElem>().unwrap().tag {
+                Tag::Start(elem) => !elem.is::<EquationElem>(),
+                _ => true,
+            })
+    }) else {
+        return (children.len(), children.len());
+    };
+
+    let mut eq_tag_start = None;
+    let mut eq_tag_end = None;
+    for (i, pair) in children.iter().enumerate().skip(start) {
+        if let Some(tag) = pair.0.to_packed::<TagElem>()
+            && let Tag::Start(elem) = &tag.tag
+            && elem.is::<EquationElem>()
+        {
+            eq_tag_start = Some(i);
+        } else if let Some(tag) = pair.0.to_packed::<TagElem>()
+            && let Tag::End(..) = &tag.tag
+            && eq_tag_start.is_some()
+        {
+            eq_tag_end = Some(i);
+            eq_tag_start = None;
+        }
+    }
+
+    let s = eq_tag_end.unwrap_or(start) + 1;
+    let end = children
+        .iter()
+        .skip(s)
+        .rposition(|(c, _)| !c.is::<TagElem>())
+        .map_or(s, |i| s + i + 1);
+
+    (start, end)
 }

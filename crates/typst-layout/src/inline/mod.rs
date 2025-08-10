@@ -16,8 +16,11 @@ use typst_library::World;
 use typst_library::diag::SourceResult;
 use typst_library::engine::{Engine, Route, Sink, Traced};
 use typst_library::foundations::{Packed, Smart, StyleChain};
-use typst_library::introspection::{Introspector, Locator, LocatorLink, SplitLocator};
+use typst_library::introspection::{
+    Introspector, Locator, LocatorLink, SplitLocator, Tag, TagElem,
+};
 use typst_library::layout::{Abs, AlignElem, Dir, FixedAlignment, Fragment, Size};
+use typst_library::math::EquationElem;
 use typst_library::model::{
     EnumElem, FirstLineIndent, Linebreaks, ListElem, ParElem, ParLine, ParLineMarker,
     TermsElem,
@@ -103,6 +106,7 @@ fn layout_par_impl(
         &elem.body,
         styles,
     )?;
+    dbg!(&children);
 
     layout_inline_impl(
         &mut engine,
@@ -204,6 +208,12 @@ fn configuration(
                     None => false,
                 }
                 && shared.resolve(AlignElem::alignment).x == dir.start().into()
+                // No first-line indent if a display equation begins the
+                // paragraph.
+                && !children.first().and_then(|(elem, _)| elem.to_packed::<TagElem>()).is_some_and(|tag| match &tag.tag {
+                    Tag::Start(elem) => elem.to_packed::<EquationElem>().is_some_and(|eq| eq.display.as_option().unwrap()),
+                    _ => false,
+                })
             {
                 amount.at(font_size)
             } else {
@@ -261,6 +271,7 @@ struct ConfigBase {
 }
 
 /// Shared configuration for the whole inline layout.
+#[derive(Debug)]
 struct Config {
     /// Whether to justify text.
     justify: bool,
