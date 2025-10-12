@@ -193,3 +193,11 @@ pub const value: HtmlAttr = HtmlAttr::constant("value");
 pub const width: HtmlAttr = HtmlAttr::constant("width");
 pub const wrap: HtmlAttr = HtmlAttr::constant("wrap");
 pub const writingsuggestions: HtmlAttr = HtmlAttr::constant("writingsuggestions");
+
+/// MathML attributes.
+/// (Only a subset of the ones defined in MathML Core at the moment.)
+pub mod mathml {
+    use crate::HtmlAttr;
+
+    pub const display: HtmlAttr = HtmlAttr::constant("display");
+}
