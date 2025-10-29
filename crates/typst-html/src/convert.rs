@@ -4,6 +4,7 @@ use typst_library::engine::Engine;
 use typst_library::foundations::{Content, Packed, StyleChain, Target, TargetElem};
 use typst_library::introspection::{SplitLocator, TagElem};
 use typst_library::layout::{Abs, Axes, HElem, Region, Size};
+use typst_library::math::{EquationElem, MathContext};
 use typst_library::routines::Pair;
 use typst_library::text::{
     LinebreakElem, SmartQuoteElem, SmartQuoter, SmartQuotes, SpaceElem, TextElem,
@@ -12,6 +13,7 @@ use typst_library::text::{
 use typst_syntax::Span;
 
 use crate::fragment::{html_block_fragment, html_inline_fragment};
+use crate::mathml::handle_math;
 use crate::{FrameElem, HtmlElem, HtmlElement, HtmlFrame, HtmlNode, attr, css, tag};
 
 /// What and how to convert.
@@ -125,6 +127,19 @@ fn handle(
             SmartQuotes::fallback(double)
         };
         handle_text(converter, quote.into(), child.span());
+    } else if let Some(elem) = child.to_packed::<EquationElem>() {
+        let locator = converter.locator.next(&elem.span());
+        let mut locator = locator.split();
+        let mut ctx = MathContext::new(converter.engine, &mut locator);
+        let run = ctx.resolve_into_run(&elem.body, styles)?;
+        let children = handle_math(&run)?;
+        let display = if elem.block.get(styles) { "block" } else { "inline" };
+        converter.push(
+            HtmlElement::new(tag::mathml::math)
+                .with_attr(attr::mathml::display, display)
+                .with_children(children)
+                .spanned(elem.span()),
+        );
     } else if let Some(elem) = child.to_packed::<FrameElem>() {
         let locator = converter.locator.next(&elem.span());
         let style = TargetElem::target.set(Target::Paged).wrap();

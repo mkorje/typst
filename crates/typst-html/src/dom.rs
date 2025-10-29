@@ -111,14 +111,26 @@ impl HtmlElement {
     /// Attach children to the element.
     ///
     /// Note: This overwrites potential previous children.
-    pub fn with_children(mut self, children: EcoVec<HtmlNode>) -> Self {
-        self.children = children;
+    pub fn with_children(mut self, children: impl Into<EcoVec<HtmlNode>>) -> Self {
+        self.children = children.into();
         self
     }
 
     /// Add an attribute to the element.
     pub fn with_attr(mut self, key: HtmlAttr, value: impl Into<EcoString>) -> Self {
         self.attrs.push(key, value);
+        self
+    }
+
+    /// Adds an attribute to the element if value is not `None`.
+    pub fn with_optional_attr(
+        mut self,
+        key: HtmlAttr,
+        value: Option<impl Into<EcoString>>,
+    ) -> Self {
+        if let Some(value) = value {
+            self.attrs.push(key, value)
+        }
         self
     }
 

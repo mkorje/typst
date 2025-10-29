@@ -1,8 +1,12 @@
 use ecow::EcoString;
+use unicode_math_class::MathClass;
 
-use crate::foundations::{Content, NativeElement, Scope, SymbolElem, elem};
+use crate::diag::SourceResult;
+use crate::foundations::{
+    Content, NativeElement, Packed, Scope, StyleChain, SymbolElem, elem,
+};
 use crate::layout::HElem;
-use crate::math::{Mathy, THIN, upright};
+use crate::math::{Limits, MathContext, Mathy, THIN, upright};
 use crate::text::TextElem;
 
 /// A text operator in an equation.
@@ -29,6 +33,23 @@ pub struct OpElem {
     /// Whether the operator should show attachments as limits in display mode.
     #[default(false)]
     pub limits: bool,
+}
+
+pub fn resolve_op(
+    elem: &Packed<OpElem>,
+    ctx: &mut MathContext,
+    styles: StyleChain,
+) -> SourceResult<()> {
+    // TODO: should be wrapped to match typst-layout
+    let mut item = ctx.resolve_into_item(&elem.text, styles)?;
+    item.set_class(MathClass::Large);
+    item.set_limits(if elem.limits.get(styles) {
+        Limits::Display
+    } else {
+        Limits::Never
+    });
+    ctx.push(item);
+    Ok(())
 }
 
 macro_rules! ops {

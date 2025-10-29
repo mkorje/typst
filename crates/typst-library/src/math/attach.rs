@@ -1,6 +1,13 @@
-use crate::foundations::{Content, Packed, elem};
-use crate::layout::{Length, Rel};
-use crate::math::{EquationElem, Mathy};
+use typst_utils::default_math_class;
+use unicode_math_class::MathClass;
+
+use crate::diag::SourceResult;
+use crate::foundations::{Content, Packed, StyleChain, SymbolElem, elem};
+use crate::layout::{Abs, Length, Rel};
+use crate::math::{
+    EquationElem, GroupItem, MathContext, MathItem, MathSize, Mathy, ScriptsItem,
+    style_for_subscript, style_for_superscript,
+};
 
 /// A base with optional attachments.
 ///
@@ -79,6 +86,94 @@ impl Packed<AttachElem> {
 
         None
     }
+
+    /// Get the size to stretch the base to.
+    pub fn stretch_size(&self, styles: StyleChain) -> Option<Rel<Abs>> {
+        // Extract from an EquationElem.
+        let mut base = &self.base;
+        while let Some(equation) = base.to_packed::<EquationElem>() {
+            base = &equation.body;
+        }
+
+        base.to_packed::<StretchElem>()
+            .map(|stretch| stretch.size.resolve(styles))
+    }
+}
+
+pub fn resolve_attach(
+    elem: &Packed<AttachElem>,
+    ctx: &mut MathContext,
+    styles: StyleChain,
+) -> SourceResult<()> {
+    let merged = elem.merge_base();
+    let elem = merged.as_ref().unwrap_or(elem);
+    // let stretch = elem.stretch_size(styles);
+
+    let base = ctx.resolve_into_run(&elem.base, styles)?;
+    let sup_style = style_for_superscript(styles);
+    let sup_style_chain = styles.chain(&sup_style);
+    let tl = elem.tl.get_cloned(sup_style_chain);
+    let tr = elem.tr.get_cloned(sup_style_chain);
+    let primed = tr.as_ref().is_some_and(|content| content.is::<PrimesElem>());
+    let t = elem.t.get_cloned(sup_style_chain);
+
+    let sub_style = style_for_subscript(styles);
+    let sub_style_chain = styles.chain(&sub_style);
+    let bl = elem.bl.get_cloned(sub_style_chain);
+    let br = elem.br.get_cloned(sub_style_chain);
+    let b = elem.b.get_cloned(sub_style_chain);
+
+    let limits = base.into_item(styles).limits().active(styles);
+    let (t, tr) = match (t, tr) {
+        (Some(t), Some(tr)) if primed && !limits => (None, Some(tr + t)),
+        (Some(t), None) if !limits => (None, Some(t)),
+        (t, tr) => (t, tr),
+    };
+    let (b, br) = if limits || br.is_some() { (b, br) } else { (None, b) };
+
+    macro_rules! layout {
+        ($content:ident, $style_chain:ident) => {
+            $content
+                .map(|elem| ctx.resolve_into_run(&elem, $style_chain))
+                .transpose()
+        };
+    }
+
+    // // Layout the top and bottom attachments early so we can measure their
+    // // widths, in order to calculate what the stretch size is relative to.
+    // let t = layout!(t, sup_style_chain)?;
+    // let b = layout!(b, sub_style_chain)?;
+    // if let Some(stretch) = stretch {
+    //     let relative_to_width = measure!(t, width).max(measure!(b, width));
+    //     stretch_fragment(
+    //         ctx,
+    //         &mut base,
+    //         Some(Axis::X),
+    //         Some(relative_to_width),
+    //         stretch,
+    //         Abs::zero(),
+    //     );
+    // }
+
+    let top = layout!(t, sup_style_chain)?;
+    let bottom = layout!(b, sub_style_chain)?;
+    let top_left = layout!(tl, sup_style_chain)?;
+    let bottom_left = layout!(bl, sub_style_chain)?;
+    let top_right = layout!(tr, sup_style_chain)?;
+    let bottom_right = layout!(br, sub_style_chain)?;
+
+    ctx.push(ScriptsItem::new(
+        base,
+        top,
+        bottom,
+        top_left,
+        bottom_left,
+        top_right,
+        bottom_right,
+        styles,
+    ));
+
+    Ok(())
 }
 
 /// Grouped primes.
@@ -98,6 +193,37 @@ pub struct PrimesElem {
     pub count: usize,
 }
 
+pub fn resolve_primes(
+    elem: &Packed<PrimesElem>,
+    ctx: &mut MathContext,
+    styles: StyleChain,
+) -> SourceResult<()> {
+    match elem.count {
+        count @ 1..=4 => {
+            let c = match count {
+                1 => '′',
+                2 => '″',
+                3 => '‴',
+                4 => '⁗',
+                _ => unreachable!(),
+            };
+            let f = ctx
+                .resolve_into_item(&SymbolElem::packed(c).spanned(elem.span()), styles)?;
+            ctx.push(f);
+        }
+        count => {
+            // Custom amount of primes
+            let prime = ctx.resolve_into_item(
+                &SymbolElem::packed('′').spanned(elem.span()),
+                styles,
+            )?;
+            let items = std::iter::repeat_n(prime, count).collect();
+            ctx.push(GroupItem::new(items, styles));
+        }
+    }
+    Ok(())
+}
+
 /// Forces a base to display attachments as scripts.
 ///
 /// ```example
@@ -108,6 +234,17 @@ pub struct ScriptsElem {
     /// The base to attach the scripts to.
     #[required]
     pub body: Content,
+}
+
+pub fn resolve_scripts(
+    elem: &Packed<ScriptsElem>,
+    ctx: &mut MathContext,
+    styles: StyleChain,
+) -> SourceResult<()> {
+    let mut item = ctx.resolve_into_item(&elem.body, styles)?;
+    item.set_limits(Limits::Never);
+    ctx.push(item);
+    Ok(())
 }
 
 /// Forces a base to display attachments as limits.
@@ -127,6 +264,18 @@ pub struct LimitsElem {
     /// typically a good idea to disable this.
     #[default(true)]
     pub inline: bool,
+}
+
+pub fn resolve_limits(
+    elem: &Packed<LimitsElem>,
+    ctx: &mut MathContext,
+    styles: StyleChain,
+) -> SourceResult<()> {
+    let mut item = ctx.resolve_into_item(&elem.body, styles)?;
+    let limits = if elem.inline.get(styles) { Limits::Always } else { Limits::Display };
+    item.set_limits(limits);
+    ctx.push(item);
+    Ok(())
 }
 
 /// Stretches a glyph.
@@ -154,4 +303,68 @@ pub struct StretchElem {
     /// its attachments.
     #[default(Rel::one())]
     pub size: Rel<Length>,
+}
+
+pub fn resolve_stretch(
+    elem: &Packed<StretchElem>,
+    ctx: &mut MathContext,
+    styles: StyleChain,
+) -> SourceResult<()> {
+    let mut item = ctx.resolve_into_item(&elem.body, styles)?;
+    if let MathItem::Glyph(ref mut glyph) = item {
+        glyph.stretch = Some((elem.size.resolve(styles), false));
+    }
+    ctx.push(item);
+    Ok(())
+}
+
+/// Describes in which situation a frame should use limits for attachments.
+#[derive(Debug, Copy, Clone)]
+pub enum Limits {
+    /// Always scripts.
+    Never,
+    /// Display limits only in `display` math.
+    Display,
+    /// Always limits.
+    Always,
+}
+
+impl Limits {
+    /// The default limit configuration if the given character is the base.
+    pub fn for_char(c: char) -> Self {
+        match default_math_class(c) {
+            Some(MathClass::Large) => {
+                if is_integral_char(c) {
+                    Limits::Never
+                } else {
+                    Limits::Display
+                }
+            }
+            Some(MathClass::Relation) => Limits::Always,
+            _ => Limits::Never,
+        }
+    }
+
+    /// The default limit configuration for a math class.
+    pub fn for_class(class: MathClass) -> Self {
+        match class {
+            MathClass::Large => Self::Display,
+            MathClass::Relation => Self::Always,
+            _ => Self::Never,
+        }
+    }
+
+    /// Whether limits should be displayed in this context.
+    pub fn active(&self, styles: StyleChain) -> bool {
+        match self {
+            Self::Always => true,
+            Self::Display => styles.get(EquationElem::size) == MathSize::Display,
+            Self::Never => false,
+        }
+    }
+}
+
+/// Determines if the character is one of a variety of integral signs.
+fn is_integral_char(c: char) -> bool {
+    ('∫'..='∳').contains(&c) || ('⨋'..='⨜').contains(&c)
 }

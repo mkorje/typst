@@ -1,8 +1,14 @@
-use typst_syntax::Spanned;
+use typst_syntax::{Span, Spanned};
 
-use crate::diag::bail;
-use crate::foundations::{Cast, Content, Value, elem};
-use crate::math::Mathy;
+use crate::diag::{SourceResult, bail};
+use crate::foundations::{
+    Cast, Content, NativeElement, Packed, StyleChain, SymbolElem, Value, elem,
+};
+use crate::layout::Rel;
+use crate::math::{
+    FractionItem, GroupItem, LrElem, MathContext, MathItem, Mathy, SkewedFractionItem,
+    style_for_denominator, style_for_numerator,
+};
 
 /// A mathematical fraction.
 ///
@@ -79,6 +85,33 @@ pub struct FracElem {
     pub denom_deparenthesized: bool,
 }
 
+pub fn resolve_frac(
+    elem: &Packed<FracElem>,
+    ctx: &mut MathContext,
+    styles: StyleChain,
+) -> SourceResult<()> {
+    match elem.style.get(styles) {
+        FracStyle::Skewed => resolve_skewed_frac(ctx, styles, &elem.num, &elem.denom),
+        FracStyle::Horizontal => resolve_horizontal_frac(
+            ctx,
+            styles,
+            &elem.num,
+            &elem.denom,
+            elem.span(),
+            elem.num_deparenthesized.get(styles),
+            elem.denom_deparenthesized.get(styles),
+        ),
+        FracStyle::Vertical => resolve_vertical_frac_like(
+            ctx,
+            styles,
+            &elem.num,
+            std::slice::from_ref(&elem.denom),
+            false,
+            elem.span(),
+        ),
+    }
+}
+
 /// Fraction style
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Hash, Cast)]
 pub enum FracStyle {
@@ -117,4 +150,118 @@ pub struct BinomElem {
         values.into_iter().map(|spanned| spanned.v.display()).collect()
     )]
     pub lower: Vec<Content>,
+}
+
+pub fn resolve_binom(
+    elem: &Packed<BinomElem>,
+    ctx: &mut MathContext,
+    styles: StyleChain,
+) -> SourceResult<()> {
+    resolve_vertical_frac_like(ctx, styles, &elem.upper, &elem.lower, true, elem.span())
+}
+
+/// Resolve a vertical fraction or binomial.
+fn resolve_vertical_frac_like(
+    ctx: &mut MathContext,
+    styles: StyleChain,
+    num: &Content,
+    denom: &[Content],
+    binom: bool,
+    span: Span,
+) -> SourceResult<()> {
+    let num_style = style_for_numerator(styles);
+    let numerator = ctx.resolve_into_run(num, styles.chain(&num_style))?;
+
+    let denom_style = style_for_denominator(styles);
+    let denominator = ctx.resolve_into_run(
+        &Content::sequence(
+            // Add a comma between each element.
+            denom
+                .iter()
+                .flat_map(|a| [SymbolElem::packed(',').spanned(span), a.clone()])
+                .skip(1),
+        ),
+        styles.chain(&denom_style),
+    )?;
+
+    let frac = FractionItem::new(numerator, denominator, !binom, styles);
+
+    if binom {
+        let mut left =
+            ctx.resolve_into_item(&SymbolElem::packed('(').spanned(span), styles)?;
+        if let MathItem::Glyph(ref mut glyph) = left {
+            glyph.stretch = Some((Rel::one(), true));
+        }
+
+        let mut right =
+            ctx.resolve_into_item(&SymbolElem::packed(')').spanned(span), styles)?;
+        if let MathItem::Glyph(ref mut glyph) = right {
+            glyph.stretch = Some((Rel::one(), true));
+        }
+
+        ctx.push(GroupItem::new(vec![left, frac.into(), right], styles));
+    } else {
+        ctx.push(frac);
+    }
+
+    Ok(())
+}
+
+// Resolve a horizontal fraction
+fn resolve_horizontal_frac(
+    ctx: &mut MathContext,
+    styles: StyleChain,
+    num: &Content,
+    denom: &Content,
+    span: Span,
+    num_deparen: bool,
+    denom_deparen: bool,
+) -> SourceResult<()> {
+    let num = if num_deparen {
+        &LrElem::new(Content::sequence(vec![
+            SymbolElem::packed('('),
+            num.clone(),
+            SymbolElem::packed(')'),
+        ]))
+        .pack()
+    } else {
+        num
+    };
+    let num = ctx.resolve_into_item(num, styles)?;
+    ctx.push(num);
+
+    let slash = ctx.resolve_into_item(&SymbolElem::packed('/').spanned(span), styles)?;
+    ctx.push(slash);
+
+    let denom = if denom_deparen {
+        &LrElem::new(Content::sequence(vec![
+            SymbolElem::packed('('),
+            denom.clone(),
+            SymbolElem::packed(')'),
+        ]))
+        .pack()
+    } else {
+        denom
+    };
+    let denom = ctx.resolve_into_item(denom, styles)?;
+    ctx.push(denom);
+
+    Ok(())
+}
+
+/// Resolve a skewed fraction.
+fn resolve_skewed_frac(
+    ctx: &mut MathContext,
+    styles: StyleChain,
+    num: &Content,
+    denom: &Content,
+) -> SourceResult<()> {
+    let num_style = style_for_numerator(styles);
+    let numerator = ctx.resolve_into_run(num, styles.chain(&num_style))?;
+    let denom_style = style_for_denominator(styles);
+    let denominator = ctx.resolve_into_run(denom, styles.chain(&denom_style))?;
+
+    ctx.push(SkewedFractionItem::new(numerator, denominator, styles));
+
+    Ok(())
 }

@@ -8,11 +8,12 @@ mod frac;
 mod lr;
 mod matrix;
 mod op;
+mod resolve;
 mod root;
 mod style;
 mod underover;
 
-pub use self::accent::{Accent, AccentElem};
+pub use self::accent::{Accent, AccentElem, resolve_accent};
 pub use self::attach::*;
 pub use self::cancel::*;
 pub use self::equation::*;
@@ -20,6 +21,7 @@ pub use self::frac::*;
 pub use self::lr::*;
 pub use self::matrix::*;
 pub use self::op::*;
+pub use self::resolve::*;
 pub use self::root::*;
 pub use self::style::*;
 pub use self::underover::*;
@@ -27,7 +29,10 @@ pub use self::underover::*;
 use typst_utils::singleton;
 use unicode_math_class::MathClass;
 
-use crate::foundations::{Content, Module, NativeElement, Scope, elem};
+use crate::diag::SourceResult;
+use crate::foundations::{
+    Content, Module, NativeElement, Packed, Scope, StyleChain, elem,
+};
 use crate::layout::{Em, HElem};
 use crate::text::TextElem;
 
@@ -146,4 +151,17 @@ pub struct ClassElem {
     /// The content to which the class is applied.
     #[required]
     pub body: Content,
+}
+
+pub fn resolve_class(
+    elem: &Packed<ClassElem>,
+    ctx: &mut MathContext,
+    styles: StyleChain,
+) -> SourceResult<()> {
+    let style = EquationElem::class.set(Some(elem.class)).wrap();
+    let mut item = ctx.resolve_into_item(&elem.body, styles.chain(&style))?;
+    item.set_class(elem.class);
+    item.set_limits(Limits::for_class(elem.class));
+    ctx.push(item);
+    Ok(())
 }
