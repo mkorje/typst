@@ -5,7 +5,7 @@ use typst_library::foundations::{Content, Packed, StyleChain, Target, TargetElem
 use typst_library::introspection::{SplitLocator, TagElem};
 use typst_library::layout::{Abs, Axes, HElem, Region, Size};
 use typst_library::math::{EquationElem, MathContext};
-use typst_library::routines::Pair;
+use typst_library::routines::{Arenas, Pair};
 use typst_library::text::{
     LinebreakElem, SmartQuoteElem, SmartQuoter, SmartQuotes, SpaceElem, TextElem,
     is_default_ignorable,
@@ -130,7 +130,8 @@ fn handle(
     } else if let Some(elem) = child.to_packed::<EquationElem>() {
         let locator = converter.locator.next(&elem.span());
         let mut locator = locator.split();
-        let mut ctx = MathContext::new(converter.engine, &mut locator);
+        let arenas = Arenas::default();
+        let mut ctx = MathContext::new(converter.engine, &mut locator, &arenas);
         let run = ctx.resolve_into_run(&elem.body, styles)?;
         let children = handle_math(&run)?;
         let display = if elem.block.get(styles) { "block" } else { "inline" };

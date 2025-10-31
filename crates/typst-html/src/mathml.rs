@@ -76,7 +76,7 @@ fn convert_math_to_nodes(run: &MathRun) -> SourceResult<Vec<HtmlNode>> {
     while let Some((i, item)) = items.next() {
         match item {
             MathItem::Tag(tag) => nodes.push(HtmlNode::Tag(tag.clone())),
-            MathItem::Space | MathItem::Linebreak => unreachable!(),
+            MathItem::Space | MathItem::Linebreak => {}
             MathItem::Glyph(glyph) => {
                 // TODO: keep track of current Form.
                 // https://www.w3.org/TR/mathml-core/#dfn-algorithm-for-determining-the-form-of-an-embellished-operator
@@ -206,7 +206,14 @@ fn convert_math_to_nodes(run: &MathRun) -> SourceResult<Vec<HtmlNode>> {
 
             // Ignored
             // TODO: align should be unreachable
-            MathItem::SkewedFraction(_) | MathItem::Align => {}
+            MathItem::SkewedFraction(_)
+            | MathItem::External(_)
+            | MathItem::Box(_)
+            | MathItem::Cancel(_)
+            | MathItem::Line(_)
+            | MathItem::Primes(_)
+            | MathItem::Align
+            | _ => {}
         }
     }
 

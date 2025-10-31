@@ -140,5 +140,12 @@ fn scale(
     // This unwrap doesn't really matter. If it is None, then the fragment
     // won't be stretchable anyways.
     let short_fall = DELIM_SHORT_FALL.at(fragment.font_size().unwrap_or_default());
-    stretch_fragment(ctx, fragment, Some(Axis::Y), Some(relative_to), height, short_fall);
+    stretch_fragment(
+        ctx.engine,
+        fragment,
+        Some(Axis::Y),
+        Some(relative_to),
+        height,
+        short_fall,
+    );
 }

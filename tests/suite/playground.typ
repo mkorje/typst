@@ -1,3 +1,9 @@
+--- playground-2 ---
+$
+  a & = b \
+    & = c
+$
+
 --- playground html ---
 #show: doc => [
   #import html: *

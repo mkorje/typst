@@ -72,7 +72,7 @@ pub fn layout_attach(
     if let Some(stretch) = stretch {
         let relative_to_width = measure!(t, width).max(measure!(b, width));
         stretch_fragment(
-            ctx,
+            ctx.engine,
             &mut base,
             Some(Axis::X),
             Some(relative_to_width),
@@ -90,7 +90,8 @@ pub fn layout_attach(
         layout!(br, sub_style_chain)?,
     ];
 
-    layout_attachments(ctx, styles, base, fragments)
+    ctx.push(layout_attachments(styles, &ctx.fonts_stack, base, fragments)?);
+    Ok(())
 }
 
 /// Lays out a [`PrimeElem`].
@@ -167,14 +168,14 @@ pub fn layout_limits(
 }
 
 /// Lay out the attachments.
-fn layout_attachments(
-    ctx: &mut MathContext,
+pub fn layout_attachments(
     styles: StyleChain,
+    fonts_stack: &Vec<Font>,
     base: MathFragment,
     [tl, t, tr, bl, b, br]: [Option<MathFragment>; 6],
-) -> SourceResult<()> {
+) -> SourceResult<MathFragment> {
     let class = base.class();
-    let (font, size) = base.font(ctx, styles);
+    let (font, size) = base.font2(fonts_stack, styles);
     let cramped = styles.get(EquationElem::cramped);
 
     // Calculate the distance from the base's baseline to the superscripts' and
@@ -275,9 +276,7 @@ fn layout_attachments(
     layout!(b, b_x, b_y); // lower-limit
 
     // Done! Note that we retain the class of the base.
-    ctx.push(FrameFragment::new(styles, frame).with_class(class));
-
-    Ok(())
+    Ok(FrameFragment::new(styles, frame).with_class(class).into())
 }
 
 /// Calculate the distance each post-script extends to the right of the base's

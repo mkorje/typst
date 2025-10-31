@@ -2,7 +2,9 @@ use std::iter::once;
 
 use typst_library::foundations::{Resolve, StyleChain};
 use typst_library::layout::{Abs, AlignElem, Em, Frame, InlineItem, Point, Size};
-use typst_library::math::{EquationElem, MEDIUM, MathSize, THICK, THIN};
+use typst_library::math::{
+    EquationElem, LeftRightAlternator, MEDIUM, MathSize, THICK, THIN,
+};
 use typst_library::model::ParElem;
 use unicode_math_class::MathClass;
 
@@ -12,7 +14,7 @@ const TIGHT_LEADING: Em = Em::new(0.25);
 
 /// A linear collection of [`MathFragment`]s.
 #[derive(Debug, Default, Clone)]
-pub struct MathRun(Vec<MathFragment>);
+pub struct MathRun(pub Vec<MathFragment>);
 
 impl MathRun {
     /// Takes the given [`MathFragment`]s and do some basic processing.
@@ -372,29 +374,6 @@ impl MathRun {
 impl<T: Into<MathFragment>> From<T> for MathRun {
     fn from(fragment: T) -> Self {
         Self(vec![fragment.into()])
-    }
-}
-
-/// An iterator that alternates between the `Left` and `Right` values, if the
-/// initial value is not `None`.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum LeftRightAlternator {
-    None,
-    Left,
-    Right,
-}
-
-impl Iterator for LeftRightAlternator {
-    type Item = LeftRightAlternator;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let r = Some(*self);
-        match self {
-            Self::None => {}
-            Self::Left => *self = Self::Right,
-            Self::Right => *self = Self::Left,
-        }
-        r
     }
 }
 

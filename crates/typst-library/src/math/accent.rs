@@ -4,14 +4,11 @@ use icu_properties::CanonicalCombiningClass;
 use icu_properties::maps::CodePointMapData;
 use icu_provider::AsDeserializingBufferProvider;
 use icu_provider_blob::BlobDataProvider;
-use unicode_math_class::MathClass;
 
-use crate::diag::{SourceResult, bail};
-use crate::foundations::{
-    Content, NativeElement, Packed, StyleChain, SymbolElem, cast, elem, func,
-};
+use crate::diag::bail;
+use crate::foundations::{Content, NativeElement, SymbolElem, cast, elem, func};
 use crate::layout::{Length, Rel};
-use crate::math::{AccentItem, MathContext, MathItem, Mathy, style_cramped, style_dtls};
+use crate::math::Mathy;
 
 /// Attaches an accent to a base.
 ///
@@ -78,44 +75,6 @@ pub struct AccentElem {
     /// ```
     #[default(true)]
     pub dotless: bool,
-}
-
-pub fn resolve_accent(
-    elem: &Packed<AccentElem>,
-    ctx: &mut MathContext,
-    styles: StyleChain,
-) -> SourceResult<()> {
-    let accent = elem.accent;
-    let top_accent = !accent.is_bottom();
-
-    // Try to replace the base glyph with its dotless variant.
-    let dtls = style_dtls();
-    let base_styles =
-        if top_accent && elem.dotless.get(styles) { styles.chain(&dtls) } else { styles };
-
-    let cramped = style_cramped();
-    let base_styles = base_styles.chain(&cramped);
-    let base = ctx.resolve_into_run(&elem.base, base_styles)?;
-
-    let mut accent =
-        ctx.resolve_into_run(&SymbolElem::packed(accent.0).spanned(elem.span()), styles)?;
-
-    let width = elem.size.resolve(styles);
-    let mut iter = accent.iter_mut();
-    if let Some(item) = iter.next()
-        && iter.next().is_none()
-        && let MathItem::Glyph(glyph) = item
-    {
-        glyph.props.set_class(MathClass::Diacritic);
-        glyph.stretch = Some((width, true));
-    }
-
-    // let base_text_like = base.is_text_like();
-    // let base_class = base.class();
-
-    ctx.push(AccentItem::new(base, accent, !top_accent, styles));
-
-    Ok(())
 }
 
 /// An accent character.

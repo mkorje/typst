@@ -310,7 +310,12 @@ fn layout_body(
     Ok(frame)
 }
 
-fn line_item(length: Abs, vertical: bool, stroke: FixedStroke, span: Span) -> FrameItem {
+pub fn line_item(
+    length: Abs,
+    vertical: bool,
+    stroke: FixedStroke,
+    span: Span,
+) -> FrameItem {
     let line_geom = if vertical {
         Geometry::Line(Point::with_y(length))
     } else {
@@ -346,7 +351,7 @@ fn layout_delimiters(
     if let Some(left_c) = left {
         let mut left =
             ctx.layout_into_fragment(&SymbolElem::packed(left_c).spanned(span), styles)?;
-        left.stretch_vertical(ctx, target, short_fall);
+        left.stretch_vertical(ctx.engine, target, short_fall);
         left.center_on_axis();
         ctx.push(left);
     }
@@ -356,7 +361,7 @@ fn layout_delimiters(
     if let Some(right_c) = right {
         let mut right =
             ctx.layout_into_fragment(&SymbolElem::packed(right_c).spanned(span), styles)?;
-        right.stretch_vertical(ctx, target, short_fall);
+        right.stretch_vertical(ctx.engine, target, short_fall);
         right.center_on_axis();
         ctx.push(right);
     }

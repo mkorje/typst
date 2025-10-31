@@ -1,7 +1,6 @@
-use crate::diag::SourceResult;
-use crate::foundations::{Content, Func, Packed, Smart, StyleChain, cast, elem};
+use crate::foundations::{Content, Func, Smart, cast, elem};
 use crate::layout::{Angle, Em, Length, Ratio, Rel};
-use crate::math::{MathContext, Mathy};
+use crate::math::Mathy;
 use crate::visualize::Stroke;
 
 /// Displays a diagonal line over a part of an equation.
@@ -96,14 +95,6 @@ pub struct CancelElem {
         ..Default::default()
     })]
     pub stroke: Stroke,
-}
-
-pub fn resolve_cancel(
-    _elem: &Packed<CancelElem>,
-    _ctx: &mut MathContext,
-    _styles: StyleChain,
-) -> SourceResult<()> {
-    Ok(())
 }
 
 /// Defines the cancel line.
