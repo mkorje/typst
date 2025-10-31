@@ -1,17 +1,15 @@
 use smallvec::{SmallVec, smallvec};
-use typst_syntax::{Span, Spanned};
+use typst_syntax::Spanned;
 use typst_utils::{Numeric, default_math_class};
 use unicode_math_class::MathClass;
 
-use crate::diag::{At, HintedStrResult, SourceResult, StrResult, bail};
+use crate::diag::{At, HintedStrResult, StrResult, bail};
 use crate::foundations::{
-    Array, Content, Dict, Fold, NoneValue, Packed, Resolve, Smart, StyleChain, Symbol,
-    SymbolElem, Value, array, cast, dict, elem,
+    Array, Content, Dict, Fold, NoneValue, Resolve, Smart, StyleChain, Symbol, Value,
+    array, cast, dict, elem,
 };
 use crate::layout::{Abs, Em, HAlignment, Length, Rel};
-use crate::math::{
-    GroupItem, MathContext, MathItem, MathRun, Mathy, TableItem, style_for_denominator,
-};
+use crate::math::Mathy;
 use crate::visualize::Stroke;
 
 const DEFAULT_ROW_GAP: Em = Em::new(0.2);
@@ -67,21 +65,6 @@ pub struct VecElem {
     /// The elements of the vector.
     #[variadic]
     pub children: Vec<Content>,
-}
-
-pub fn resolve_vec(
-    elem: &Packed<VecElem>,
-    ctx: &mut MathContext,
-    styles: StyleChain,
-) -> SourceResult<()> {
-    let span = elem.span();
-
-    let rows: Vec<Vec<&Content>> =
-        elem.children.iter().map(|child| vec![child]).collect();
-    let cells = resolve_cells(ctx, styles, rows, span, "elements")?;
-
-    let delim = elem.delim.get(styles);
-    resolve_delimiters(ctx, styles, cells, delim.open(), delim.close(), span)
 }
 
 /// A matrix.
@@ -231,22 +214,6 @@ pub struct MatElem {
     pub rows: Vec<Vec<Content>>,
 }
 
-pub fn resolve_mat(
-    elem: &Packed<MatElem>,
-    ctx: &mut MathContext,
-    styles: StyleChain,
-) -> SourceResult<()> {
-    let span = elem.span();
-
-    let rows: Vec<Vec<&Content>> =
-        elem.rows.iter().map(|row| row.iter().collect()).collect();
-
-    let cells = resolve_cells(ctx, styles, rows, span, "cells")?;
-
-    let delim = elem.delim.get(styles);
-    resolve_delimiters(ctx, styles, cells, delim.open(), delim.close(), span)
-}
-
 /// A case distinction.
 ///
 /// Content across different branches can be aligned with the `&` symbol.
@@ -296,81 +263,6 @@ pub struct CasesElem {
     /// The branches of the case distinction.
     #[variadic]
     pub children: Vec<Content>,
-}
-
-pub fn resolve_cases(
-    elem: &Packed<CasesElem>,
-    ctx: &mut MathContext,
-    styles: StyleChain,
-) -> SourceResult<()> {
-    let span = elem.span();
-
-    let rows: Vec<Vec<&Content>> =
-        elem.children.iter().map(|child| vec![child]).collect();
-    let cells = resolve_cells(ctx, styles, rows, span, "branches")?;
-
-    let delim = elem.delim.get(styles);
-    let (open, close) = if elem.reverse.get(styles) {
-        (None, delim.close())
-    } else {
-        (delim.open(), None)
-    };
-    resolve_delimiters(ctx, styles, cells, open, close, span)
-}
-
-/// Layout the inner contents of a matrix, vector, or cases.
-fn resolve_cells(
-    ctx: &mut MathContext,
-    styles: StyleChain,
-    rows: Vec<Vec<&Content>>,
-    _span: Span,
-    _children: &str,
-) -> SourceResult<Vec<Vec<MathRun>>> {
-    let denom_style = style_for_denominator(styles);
-    let styles = styles.chain(&denom_style);
-    rows.iter()
-        .map(|row| {
-            row.iter()
-                .map(|cell| ctx.resolve_into_run(cell, styles))
-                .collect::<SourceResult<_>>()
-        })
-        .collect::<SourceResult<_>>()
-}
-
-/// Resolve the outer wrapper around the body of a vector or matrix.
-fn resolve_delimiters(
-    ctx: &mut MathContext,
-    styles: StyleChain,
-    cells: Vec<Vec<MathRun>>,
-    left: Option<char>,
-    right: Option<char>,
-    span: Span,
-) -> SourceResult<()> {
-    let mut items = vec![];
-
-    if let Some(left_c) = left {
-        let mut left =
-            ctx.resolve_into_item(&SymbolElem::packed(left_c).spanned(span), styles)?;
-        if let MathItem::Glyph(ref mut glyph) = left {
-            glyph.stretch = Some((Rel::one(), true));
-        }
-        items.push(left);
-    }
-
-    items.push(TableItem::new(cells, styles).into());
-
-    if let Some(right_c) = right {
-        let mut right =
-            ctx.resolve_into_item(&SymbolElem::packed(right_c).spanned(span), styles)?;
-        if let MathItem::Glyph(ref mut glyph) = right {
-            glyph.stretch = Some((Rel::one(), true));
-        }
-        items.push(right);
-    }
-
-    ctx.push(GroupItem::new(items, styles));
-
-    Ok(())
 }
 
 /// A delimiter is a single character that is used to delimit a matrix, vector

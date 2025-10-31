@@ -18,20 +18,21 @@ use typst_library::World;
 use typst_library::diag::{At, SourceResult, warning};
 use typst_library::engine::Engine;
 use typst_library::foundations::{
-    Content, NativeElement, Packed, Resolve, Style, StyleChain, SymbolElem,
+    Content, NativeElement, Packed, Resolve, Style, StyleChain, Styles, SymbolElem,
 };
 use typst_library::introspection::{Counter, Locator, SplitLocator, TagElem};
 use typst_library::layout::{
-    Abs, AlignElem, Axes, BlockElem, BoxElem, Em, FixedAlignment, Fragment, Frame, HElem,
-    InlineItem, OuterHAlignment, PlaceElem, Point, Region, Regions, Size, Spacing,
-    SpecificAlignment, VAlignment,
+    Abs, AlignElem, Axes, BlockElem, BoxElem, Em, FixedAlignment, Fragment, Frame,
+    FrameItem, HElem, InlineItem, OuterHAlignment, PlaceElem, Point, Region, Regions,
+    Size, Spacing, SpecificAlignment, VAlignment,
 };
-use typst_library::math::*;
+use typst_library::math::{MathContext as MathCtx, MathRun as MathRn, *};
 use typst_library::model::ParElem;
 use typst_library::routines::{Arenas, RealizationKind};
 use typst_library::text::{
     Font, FontFlags, LinebreakElem, SpaceElem, TextEdgeBounds, TextElem, variant,
 };
+use typst_library::visualize::{FixedStroke, Geometry};
 use typst_syntax::Span;
 use typst_utils::{LazyHash, Numeric};
 
@@ -60,18 +61,41 @@ pub fn layout_equation_inline(
     warn_non_math_font(&font, engine, span);
 
     let mut locator = locator.split();
-    let mut ctx = MathContext::new(engine, &mut locator, region, font.clone());
-
+    let arenas = Arenas::default();
     let scale_style = style_for_script_scale(&font);
     let styles = styles.chain(&scale_style);
+    let mut ctx = MathCtx::new(engine, &mut locator, &arenas);
 
-    let run = ctx.layout_into_run(&elem.body, styles)?;
+    let run = ctx.resolve_into_run(&elem.body, styles)?;
 
-    let mut items = if run.row_count() == 1 {
-        run.into_par_items()
-    } else {
-        vec![InlineItem::Frame(run.into_fragment(styles).into_frame())]
+    let mut items = {
+        let mut fonts_stack = vec![font.clone()];
+        let fragments = convert_to_fragments(engine, &mut fonts_stack, &run, styles)?;
+        if run.row_count() == 1 {
+            fragments.into_par_items()
+        } else {
+            todo!()
+            // vec![InlineItem::Frame(fragments.into_fragment(styles).into_frame())]
+        }
     };
+
+    // let span = elem.span();
+    // let font = get_font(engine.world, styles, span)?;
+    // warn_non_math_font(&font, engine, span);
+
+    // let mut locator = locator.split();
+    // let mut ctx = MathContext::new(engine, &mut locator, region, font.clone());
+
+    // let scale_style = style_for_script_scale(&font);
+    // let styles = styles.chain(&scale_style);
+
+    // let run = ctx.layout_into_run(&elem.body, styles)?;
+
+    // let mut items = if run.row_count() == 1 {
+    //     run.into_par_items()
+    // } else {
+    //     vec![InlineItem::Frame(run.into_fragment(styles).into_frame())]
+    // };
 
     // An empty equation should have a height, so we still create a frame
     // (which is then resized in the loop).
@@ -100,6 +124,285 @@ pub fn layout_equation_inline(
     Ok(items)
 }
 
+fn convert_to_fragments(
+    engine: &mut Engine,
+    fonts_stack: &mut Vec<Font>,
+    run: &MathRn,
+    outer_styles: StyleChain,
+) -> SourceResult<MathRun> {
+    let mut fragments = vec![];
+    let outer_font = outer_styles.get_ref(TextElem::font);
+
+    let mut items = run.iter().enumerate().peekable();
+    while let Some((i, item)) = items.next() {
+        let styles = item.styles().unwrap_or(outer_styles);
+        let mut new_styles = Styles::new();
+
+        // Whilst this check isn't exact, it more or less suffices as a
+        // change in font variant probably won't have an effect on metrics.
+        let new_font =
+            styles != outer_styles && styles.get_ref(TextElem::font) != outer_font;
+        if new_font {
+            // TODO: use proper span.
+            fonts_stack.push(get_font(engine.world, styles, Span::detached())?);
+            new_styles.apply(style_for_script_scale(fonts_stack.last().unwrap()).into());
+        }
+
+        let styles = styles.chain(&new_styles);
+
+        match item {
+            MathItem::Tag(tag) => fragments.push(MathFragment::Tag(tag.clone())),
+            MathItem::Space => unreachable!(),
+            MathItem::Linebreak => fragments.push(MathFragment::Linebreak),
+            MathItem::Glyph(glyph) => {
+                if let Some(glyph) =
+                    GlyphFragment::new(engine.world, styles, &glyph.text, glyph.span)?
+                {
+                    let size = glyph.item.size;
+                    if let Some(lspace) = item.lspace() {
+                        let width = lspace.at(size);
+                        fragments.push(MathFragment::Spacing(width, false))
+                    }
+                    fragments.push(glyph.into());
+                    if let Some(rspace) = item.rspace() {
+                        let width = rspace.at(size);
+                        fragments.push(MathFragment::Spacing(width, false))
+                    }
+                }
+            }
+            MathItem::Group(group) => {}
+
+            MathItem::Radical(radical) => {
+                let span = radical.span;
+
+                // Layout radicand.
+                let radicand = {
+                    let cramped = style_cramped();
+                    let styles = styles.chain(&cramped);
+                    let run = ctx.layout_into_run(&elem.radicand, styles)?;
+                    let multiline = run.is_multiline();
+                    let radicand = run.into_fragment(styles);
+                    if multiline {
+                        // Align the frame center line with the math axis.
+                        let (font, size) = radicand.font(ctx, styles);
+                        let axis = font.math().axis_height.at(size);
+                        let mut radicand = radicand.into_frame();
+                        radicand.set_baseline(radicand.height() / 2.0 + axis);
+                        radicand
+                    } else {
+                        radicand.into_frame()
+                    }
+                };
+
+                // Layout root symbol.
+                let mut sqrt = ctx.layout_into_fragment(
+                    &SymbolElem::packed('√').spanned(span),
+                    styles,
+                )?;
+
+                let (font, size) = sqrt.font(ctx, styles);
+                let thickness = font.math().radical_rule_thickness.at(size);
+                let extra_ascender = font.math().radical_extra_ascender.at(size);
+                let kern_before = font.math().radical_kern_before_degree.at(size);
+                let kern_after = font.math().radical_kern_after_degree.at(size);
+                let raise_factor = font.math().radical_degree_bottom_raise_percent;
+                let gap = match styles.get(EquationElem::size) {
+                    MathSize::Display => font.math().radical_display_style_vertical_gap,
+                    _ => font.math().radical_vertical_gap,
+                }
+                .at(size);
+
+                let line = FrameItem::Shape(
+                    Geometry::Line(Point::with_x(radicand.width())).stroked(
+                        FixedStroke::from_pair(
+                            sqrt.fill().unwrap_or_else(|| {
+                                styles.get_ref(TextElem::fill).as_decoration()
+                            }),
+                            thickness,
+                        ),
+                    ),
+                    span,
+                );
+
+                let target = radicand.height() + thickness + gap;
+                sqrt.stretch_vertical(ctx, target, Abs::zero());
+                let sqrt = sqrt.into_frame();
+
+                // Layout the index.
+                let index = radical
+                    .index
+                    .map(|elem| convert_to_fragments(engine, fonts_stack, &elem, styles))
+                    .transpose()?
+                    .map(|idx| idx.into_fragment(styles).into_frame());
+
+                // TeXbook, page 443, item 11
+                // Keep original gap, and then distribute any remaining free space
+                // equally above and below.
+                let gap =
+                    gap.max((sqrt.height() - thickness - radicand.height() + gap) / 2.0);
+
+                let sqrt_ascent = radicand.ascent() + gap + thickness;
+                let descent = sqrt.height() - sqrt_ascent;
+                let inner_ascent = sqrt_ascent + extra_ascender;
+
+                let mut sqrt_offset = Abs::zero();
+                let mut shift_up = Abs::zero();
+                let mut ascent = inner_ascent;
+
+                if let Some(index) = &index {
+                    sqrt_offset = kern_before + index.width() + kern_after;
+                    // The formula below for how much raise the index by comes from
+                    // the TeXbook, page 360, in the definition of `\root`.
+                    // However, the `+ index.descent()` part is different from TeX.
+                    // Without it, descenders can collide with the surd, a rarity
+                    // in practice, but possible.  MS Word also adjusts index positions
+                    // for descenders.
+                    shift_up = raise_factor * (inner_ascent - descent) + index.descent();
+                    ascent.set_max(shift_up + index.ascent());
+                }
+
+                let sqrt_x = sqrt_offset.max(Abs::zero());
+                let radicand_x = sqrt_x + sqrt.width();
+                let radicand_y = ascent - radicand.ascent();
+                let width = radicand_x + radicand.width();
+                let size = Size::new(width, ascent + descent);
+
+                // The extra "- thickness" comes from the fact that the sqrt is placed
+                // in `push_frame` with respect to its top, not its baseline.
+                let sqrt_pos = Point::new(sqrt_x, radicand_y - gap - thickness);
+                let line_pos =
+                    Point::new(radicand_x, radicand_y - gap - (thickness / 2.0));
+                let radicand_pos = Point::new(radicand_x, radicand_y);
+
+                let mut frame = Frame::soft(size);
+                frame.set_baseline(ascent);
+
+                if let Some(index) = index {
+                    let index_x = -sqrt_offset.min(Abs::zero()) + kern_before;
+                    let index_pos =
+                        Point::new(index_x, ascent - index.ascent() - shift_up);
+                    frame.push_frame(index_pos, index);
+                }
+
+                frame.push_frame(sqrt_pos, sqrt);
+                frame.push(line_pos, line);
+                frame.push_frame(radicand_pos, radicand);
+                fragments.push(FrameFragment::new(styles, frame).into());
+            }
+
+            MathItem::Fraction(fraction) => {
+                let num = convert_to_fragments(
+                    engine,
+                    fonts_stack,
+                    &fraction.numerator,
+                    styles,
+                )?
+                .into_fragment(styles)
+                .into_frame();
+                let denom = convert_to_fragments(
+                    engine,
+                    fonts_stack,
+                    &fraction.denominator,
+                    styles,
+                )?
+                .into_fragment(styles)
+                .into_frame();
+
+                let constants = fonts_stack.last().unwrap().math();
+                let axis = constants.axis_height.resolve(styles);
+                let thickness = constants.fraction_rule_thickness.resolve(styles);
+                let size = styles.get(EquationElem::size);
+                let shift_up = match size {
+                    MathSize::Display => {
+                        constants.fraction_numerator_display_style_shift_up
+                    }
+                    _ => constants.fraction_numerator_shift_up,
+                }
+                .resolve(styles);
+                let shift_down = match size {
+                    MathSize::Display => {
+                        constants.fraction_denominator_display_style_shift_down
+                    }
+                    _ => constants.fraction_denominator_shift_down,
+                }
+                .resolve(styles);
+                let num_min = match size {
+                    MathSize::Display => constants.fraction_num_display_style_gap_min,
+                    _ => constants.fraction_numerator_gap_min,
+                }
+                .resolve(styles);
+                let denom_min = match size {
+                    MathSize::Display => constants.fraction_denom_display_style_gap_min,
+                    _ => constants.fraction_denominator_gap_min,
+                }
+                .resolve(styles);
+
+                const FRAC_AROUND: Em = Em::new(0.1);
+                let around = FRAC_AROUND.resolve(styles);
+                let num_gap =
+                    (shift_up - (axis + thickness / 2.0) - num.descent()).max(num_min);
+                let denom_gap = (shift_down + (axis - thickness / 2.0) - denom.ascent())
+                    .max(denom_min);
+
+                let line_width = num.width().max(denom.width());
+                let width = line_width + 2.0 * around;
+                let height =
+                    num.height() + num_gap + thickness + denom_gap + denom.height();
+                let size = Size::new(width, height);
+                let num_pos = Point::with_x((width - num.width()) / 2.0);
+                let line_pos = Point::new(
+                    (width - line_width) / 2.0,
+                    num.height() + num_gap + thickness / 2.0,
+                );
+                let denom_pos =
+                    Point::new((width - denom.width()) / 2.0, height - denom.height());
+                let baseline = line_pos.y + axis;
+
+                let mut frame = Frame::soft(size);
+                frame.set_baseline(baseline);
+                frame.push_frame(num_pos, num);
+                frame.push_frame(denom_pos, denom);
+
+                if fraction.line {
+                    frame.push(
+                        line_pos,
+                        FrameItem::Shape(
+                            Geometry::Line(Point::with_x(line_width)).stroked(
+                                FixedStroke::from_pair(
+                                    styles.get_ref(TextElem::fill).as_decoration(),
+                                    thickness,
+                                ),
+                            ),
+                            fraction.span,
+                        ),
+                    );
+                }
+                fragments.push(FrameFragment::new(styles, frame).into());
+            }
+
+            MathItem::Text(text) => {}
+
+            MathItem::Accent(accent) => {}
+
+            MathItem::Table(table) => {}
+
+            MathItem::Scripts(scripts) => {}
+
+            MathItem::Spacing(amount, _) => {}
+
+            // Ignored
+            // TODO: align should be unreachable
+            MathItem::SkewedFraction(_) | MathItem::Align => {}
+        }
+
+        if new_font {
+            fonts_stack.pop();
+        }
+    }
+
+    Ok(MathRun(fragments))
+}
+
 /// Layout a block-level equation (in a flow).
 #[typst_macros::time(span = elem.span())]
 pub fn layout_equation_block(
@@ -116,15 +419,33 @@ pub fn layout_equation_block(
     warn_non_math_font(&font, engine, span);
 
     let mut locator = locator.split();
-    let mut ctx = MathContext::new(engine, &mut locator, regions.base(), font.clone());
-
+    let arenas = Arenas::default();
     let scale_style = style_for_script_scale(&font);
     let styles = styles.chain(&scale_style);
+    let mut ctx = MathCtx::new(engine, &mut locator, &arenas);
 
-    let full_equation_builder = ctx
-        .layout_into_run(&elem.body, styles)?
-        .multiline_frame_builder(styles);
+    let run = ctx.resolve_into_run(&elem.body, styles)?;
+
+    let mut fonts_stack = vec![font.clone()];
+    let full_equation_builder =
+        convert_to_fragments(engine, &mut fonts_stack, &run, styles)?
+            .multiline_frame_builder(styles);
     let width = full_equation_builder.size.x;
+
+    // let span = elem.span();
+    // let font = get_font(engine.world, styles, span)?;
+    // warn_non_math_font(&font, engine, span);
+
+    // let mut locator = locator.split();
+    // let mut ctx = MathContext::new(engine, &mut locator, regions.base(), font.clone());
+
+    // let scale_style = style_for_script_scale(&font);
+    // let styles = styles.chain(&scale_style);
+
+    // let full_equation_builder = ctx
+    //     .layout_into_run(&elem.body, styles)?
+    //     .multiline_frame_builder(styles);
+    // let width = full_equation_builder.size.x;
 
     let equation_builders = if styles.get(BlockElem::breakable) {
         let mut rows = full_equation_builder.frames.into_iter().peekable();

@@ -12,7 +12,7 @@ const TIGHT_LEADING: Em = Em::new(0.25);
 
 /// A linear collection of [`MathFragment`]s.
 #[derive(Debug, Default, Clone)]
-pub struct MathRun(Vec<MathFragment>);
+pub struct MathRun(pub Vec<MathFragment>);
 
 impl MathRun {
     /// Takes the given [`MathFragment`]s and do some basic processing.

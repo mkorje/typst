@@ -1,3 +1,6 @@
+--- playground-2 render ---
+$x + b + c/d$
+
 --- playground html ---
 #show: doc => [
   #import html: *

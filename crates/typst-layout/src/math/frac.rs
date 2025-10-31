@@ -4,7 +4,7 @@ use typst_library::foundations::{
 };
 use typst_library::layout::{Abs, Em, Frame, FrameItem, Point, Size};
 use typst_library::math::{
-    BinomElem, EquationElem, FracElem, FracStyle, LrElem, MathSize,
+    BinomElem, EquationElem, FracElem, FracStyle, FractionItem, LrElem, MathSize,
 };
 use typst_library::text::TextElem;
 use typst_library::visualize::{FixedStroke, Geometry};
