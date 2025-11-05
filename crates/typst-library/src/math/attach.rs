@@ -2,7 +2,7 @@ use typst_utils::default_math_class;
 use unicode_math_class::MathClass;
 
 use crate::foundations::{Content, Packed, StyleChain, elem};
-use crate::layout::{Abs, Length, Rel};
+use crate::layout::{Length, Rel};
 use crate::math::{EquationElem, MathSize, Mathy};
 
 /// A base with optional attachments.
@@ -81,18 +81,6 @@ impl Packed<AttachElem> {
         }
 
         None
-    }
-
-    /// Get the size to stretch the base to.
-    pub fn stretch_size(&self, styles: StyleChain) -> Option<Rel<Abs>> {
-        // Extract from an EquationElem.
-        let mut base = &self.base;
-        while let Some(equation) = base.to_packed::<EquationElem>() {
-            base = &equation.body;
-        }
-
-        base.to_packed::<StretchElem>()
-            .map(|stretch| stretch.size.resolve(styles))
     }
 }
 
@@ -185,7 +173,12 @@ pub enum Limits {
 impl Limits {
     /// The default limit configuration if the given character is the base.
     pub fn for_char(c: char) -> Self {
-        match default_math_class(c) {
+        Self::for_char_with_class(c, default_math_class(c))
+    }
+
+    /// The default limit configuration for a character with a known default class.
+    pub fn for_char_with_class(c: char, class: Option<MathClass>) -> Self {
+        match class {
             Some(MathClass::Large) => {
                 if is_integral_char(c) {
                     Limits::Never
