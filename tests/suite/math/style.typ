@@ -23,16 +23,46 @@ serif(sans(A)) != serif(A)$
 
 --- math-style-dotless paged ---
 // Test styling dotless i and j.
+#set page(width: auto)
+#show math.equation: set text(font: "STIX Two Math")
 $ dotless.i dotless.j,
-  upright(dotless.i) upright(dotless.j),
-  sans(dotless.i) sans(dotless.j),
   bold(dotless.i) bold(dotless.j),
-  bb(dotless.i) bb(dotless.j),
-  cal(dotless.i) cal(dotless.j),
+  upright(dotless.i) upright(dotless.j),
+  upright(bold(dotless.i)) bold(upright(dotless.j)),
+  sans(dotless.i) sans(dotless.j),
+  bold(sans(dotless.i)) sans(bold(dotless.j)),
+  sans(upright(dotless.i)) upright(sans(dotless.j)),
+  sans(bold(upright(dotless.i))) bold(upright(sans(dotless.j))),
   frak(dotless.i) frak(dotless.j),
+  bold(frak(dotless.i)) frak(bold(dotless.j)),
+  cal(dotless.i) cal(dotless.j),
+  cal(bold(dotless.i)) bold(cal(dotless.j)),
+  scr(dotless.i) scr(dotless.j),
+  bold(scr(dotless.i)) scr(bold(dotless.j)),
   mono(dotless.i) mono(dotless.j),
-  bold(frak(dotless.i)) upright(sans(dotless.j)),
-  italic(bb(dotless.i)) frak(sans(dotless.j)) $
+  bb(dotless.i) bb(dotless.j),
+  bb(italic(dotless.i)) italic(bb(dotless.j)) $
+
+--- math-style-dotless-fallback paged ---
+// Test fallback when styling dotless i and j.
+#set page(width: auto)
+$ dotless.i dotless.j,
+  bold(dotless.i) bold(dotless.j),
+  upright(dotless.i) upright(dotless.j),
+  upright(bold(dotless.i)) bold(upright(dotless.j)),
+  sans(dotless.i) sans(dotless.j),
+  bold(sans(dotless.i)) sans(bold(dotless.j)),
+  sans(upright(dotless.i)) upright(sans(dotless.j)),
+  sans(bold(upright(dotless.i))) bold(upright(sans(dotless.j))),
+  frak(dotless.i) frak(dotless.j),
+  bold(frak(dotless.i)) frak(bold(dotless.j)),
+  cal(dotless.i) cal(dotless.j),
+  cal(bold(dotless.i)) bold(cal(dotless.j)),
+  scr(dotless.i) scr(dotless.j),
+  bold(scr(dotless.i)) scr(bold(dotless.j)),
+  mono(dotless.i) mono(dotless.j),
+  bb(dotless.i) bb(dotless.j),
+  bb(italic(dotless.i)) italic(bb(dotless.j)) $
 
 --- math-style-exceptions paged ---
 // Test a few style exceptions.

@@ -38,10 +38,15 @@ $tilde(U, size: #1.1em), x^tilde(U, size: #1.1em), sscript(tilde(U, size: #1.1em
 
 --- math-accent-dotless paged ---
 // Test dotless glyph variants.
-#let test(c) = $grave(#c), acute(sans(#c)), hat(frak(#c)), tilde(mono(#c)),
+#let test(c) = $grave(#c), acute(sans(#c)), hat(dotless: #false, frak(#c)), tilde(mono(#c)),
   macron(bb(#c)), dot(cal(#c)), diaer(upright(#c)), breve(bold(#c)),
   circle(bold(upright(#c))), caron(upright(sans(#c))), arrow(bold(frak(#c)))$
-$test(i) \ test(j)$
+$test(i) \ test(j)$ \
+$frak(hat(i)) scr(macron(j))$ \
+$frak(hat(dotless.i)) scr(macron(dotless.j))$ \
+#show math.equation: set text(font: "STIX Two Math")
+$test(i) \ test(j)$ \
+$frak(hat(i)) scr(macron(j))$
 
 --- math-accent-dotless-disabled paged ---
 // Test disabling the dotless glyph variants.

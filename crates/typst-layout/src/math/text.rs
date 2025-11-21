@@ -131,7 +131,6 @@ pub fn layout_symbol(
     let bold = styles.get(EquationElem::bold);
     let italic = styles.get(EquationElem::italic);
     let dtls = style_dtls();
-    let has_dtls_feat = has_dtls_feat(ctx.font());
     for cluster in elem.text.graphemes(true) {
         // Switch dotless char to normal when we have the dtls OpenType feature.
         // This should happen before the main styling pass.
@@ -139,7 +138,7 @@ pub fn layout_symbol(
         let text: EcoString = cluster
             .chars()
             .flat_map(|mut c| {
-                if has_dtls_feat && let Some(d) = try_dotless(c) {
+                if let Some(d) = try_dotless(c) {
                     enable_dtls = true;
                     c = d;
                 }

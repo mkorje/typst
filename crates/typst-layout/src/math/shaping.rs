@@ -3,12 +3,13 @@ use std::ops::{Deref, DerefMut};
 use az::SaturatingAs;
 use comemo::Tracked;
 use ecow::EcoString;
-use rustybuzz::{BufferFlags, UnicodeBuffer};
+use rustybuzz::{BufferFlags, GlyphBuffer, UnicodeBuffer};
 use typst_library::World;
 use typst_library::layout::{Abs, Em};
 use typst_library::text::{Font, FontFamily, FontVariant, Glyph, Lang, Region, TextItem};
 use typst_library::visualize::{FixedStroke, Paint};
 use typst_syntax::Span;
+use typst_utils::singleton;
 
 use crate::inline::{SharedShapingContext, create_shape_plan, get_font_and_covers};
 
@@ -155,9 +156,17 @@ pub fn shape(
         fallback,
         glyphs: vec![],
         font: None,
+        reshape: None,
     };
 
-    shape_impl(&mut ctx, text, families.into_iter());
+    shape_impl(&mut ctx, text, families.iter().cloned());
+
+    if let Some(text) = ctx.reshape.take() {
+        ctx.used.clear();
+        ctx.glyphs.clear();
+        ctx.font = None;
+        shape_impl(&mut ctx, &text, families.into_iter());
+    }
 
     Some((ctx.font?, ctx.glyphs))
 }
@@ -172,6 +181,7 @@ struct ShapingContext<'a> {
     fallback: bool,
     glyphs: Vec<ShapedGlyph>,
     font: Option<Font>,
+    reshape: Option<EcoString>,
 }
 
 impl<'a> SharedShapingContext<'a> for ShapingContext<'a> {
@@ -263,8 +273,71 @@ fn shape_impl<'a>(
                 y_offset: font.to_em(pos.y_offset),
             });
         }
-        if !buffer.is_empty() {
-            ctx.font = Some(font);
+        if buffer.is_empty() {
+            return;
         }
+        ctx.font = Some(font.clone());
+        reshape_dotless(ctx, text, buffer);
+    }
+}
+
+fn reshape_dotless(ctx: &mut ShapingContext, text: &str, buffer: GlyphBuffer) {
+    let dtls = singleton!(
+        rustybuzz::Feature,
+        rustybuzz::Feature::new(ttf_parser::Tag::from_bytes(b"dtls"), 1, ..,)
+    );
+
+    let Some(index) = ctx.features.iter().position(|&x| x == *dtls) else { return };
+    if text.chars().all(|c| from_dotless(c).is_none()) {
+        return;
+    }
+
+    ctx.features.swap_remove(index);
+
+    let mut buffer = buffer.clear();
+    buffer.push_str(text);
+    buffer.set_language(ctx.language.clone());
+    // TODO: Use `rustybuzz::script::MATH` once
+    // https://github.com/harfbuzz/rustybuzz/pull/165 is released.
+    buffer.set_script(
+        rustybuzz::Script::from_iso15924_tag(ttf_parser::Tag::from_bytes(b"math"))
+            .unwrap(),
+    );
+    buffer.set_direction(rustybuzz::Direction::LeftToRight);
+    buffer.set_flags(BufferFlags::REMOVE_DEFAULT_IGNORABLES);
+
+    let plan = create_shape_plan(
+        ctx.font.as_ref().unwrap(),
+        buffer.direction(),
+        buffer.script(),
+        buffer.language().as_ref(),
+        &ctx.features,
+    );
+
+    let buffer =
+        rustybuzz::shape_with_plan(ctx.font.as_ref().unwrap().rusty(), &plan, buffer);
+    if buffer.len() != ctx.glyphs.len()
+        || (0..buffer.len())
+            .into_iter()
+            .any(|i| ctx.glyphs[i].id != buffer.glyph_infos()[i].glyph_id as u16)
+    {
+        return;
+    }
+
+    let new: EcoString = text.chars().map(|c| from_dotless(c).unwrap_or(c)).collect();
+    ctx.reshape = Some(new);
+}
+
+fn from_dotless(c: char) -> Option<char> {
+    match c {
+        'i' | '𝐢' | '𝗂' | '𝗶' => Some('ı'),
+        '𝑖' | '𝒊' | '𝘪' | '𝙞' | '𝔦' | '𝖎' | '𝒾' | '𝓲' | '𝚒' | '𝕚' | 'ⅈ' => {
+            Some('𝚤')
+        }
+        'j' | '𝐣' | '𝗃' | '𝗷' => Some('ȷ'),
+        '𝑗' | '𝒋' | '𝘫' | '𝙟' | '𝔧' | '𝖏' | '𝒿' | '𝓳' | '𝚓' | '𝕛' | 'ⅉ' => {
+            Some('𝚥')
+        }
+        _ => None,
     }
 }
