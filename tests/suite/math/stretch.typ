@@ -17,7 +17,7 @@ $ H stretch(=)^"define" U + p V \
 // Test horizontal stretch interactions with attachments.
 #set page(width: auto)
 
-$stretch(stretch(=, size: #4em))_A$
+$stretch(stretch(=, size: #4em), size: #0em)_A$
 $stretch(arrow.hook, size: #5em)^"injective map"$
 $stretch(arrow.hook, size: #200%)^"injective map"$
 
@@ -63,11 +63,11 @@ $ stretch(stretch(\[, size: #4em))
 
 --- math-stretch-nested-horizontal-attach paged ---
 // Test nested horizontal stretch interactions with attachments.
-$ stretch(stretch(->, size: #4em)) >> stretch(stretch(->, size: #4em))_A \
+$ stretch(stretch(->, size: #4em)) = stretch(stretch(->, size: #4em))_A \
   stretch(stretch(->, size: #4em), size: #0em) = stretch(stretch(->, size: #4em), size: #0em)_A \
-  stretch(stretch(->, size: #500%)) >>> stretch(stretch(->, size: #500%))_A \
+  stretch(stretch(->, size: #500%)) >> stretch(stretch(->, size: #500%))_A \
   stretch(stretch(->, size: #500%), size: #50%) > stretch(stretch(->, size: #500%), size: #50%)_A \
-  stretch(stretch(->, size: #4em), size: #50%) > stretch(stretch(->, size: #4em), size: #50%)_"blah" $
+  stretch(stretch(->, size: #4em), size: #50%) = stretch(stretch(->, size: #4em), size: #50%)_"blah" $
 
 --- math-stretch-lr-nested-vertical paged ---
 // Test stretch and lr nested vertical interactions.
