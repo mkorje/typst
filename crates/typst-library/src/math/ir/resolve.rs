@@ -1,3 +1,9 @@
+//! Resolution of math content into the intermediate representation.
+//!
+//! This module contains the [`resolve_equation`] function and the
+//! [`MathResolver`] builder that converts a content tree into a flat
+//! sequence of [`MathItem`]s.
+
 use codex::styling::{MathStyle, to_style};
 use ecow::EcoString;
 use typst_syntax::{Span, is_newline};
@@ -23,8 +29,14 @@ const DELIM_SHORT_FALL: Em = Em::new(0.1);
 /// How much padding to add around each side of a fraction.
 const FRAC_AROUND: Em = Em::new(0.1);
 
-/// Resolve content into a MathRun.
-/// The returned MathRun lives as long as the MathResolver lives.
+/// Resolves an equation's content tree into a [`MathItem`].
+///
+/// This is the main entry point for the resolution phase of math layout.
+/// It takes an equation element and produces the intermediate representation
+/// that will be consumed by the layout phase.
+///
+/// The returned `MathItem` has the same lifetime as the provided arenas,
+/// which are used for bump allocation of the resolved items.
 #[typst_macros::time(name = "math ir creation")]
 pub fn resolve_equation<'a>(
     elem: &'a Packed<EquationElem>,
@@ -37,18 +49,24 @@ pub fn resolve_equation<'a>(
     context.resolve_into_item(&elem.body, styles)
 }
 
-/// The math IR builder.
+/// The math intermediate representation builder.
+///
+/// This struct is responsible for converting math content elements into
+/// [`MathItem`]s. It maintains a working buffer of items and provides
+/// methods for resolving content and managing lifetimes.
 struct MathResolver<'a, 'v, 'e> {
-    // External.
+    /// The engine for compilation.
     engine: &'v mut Engine<'e>,
+    /// The locator for introspection.
     locator: &'v mut SplitLocator<'a>,
+    /// Arenas for bump allocation.
     arenas: &'a Arenas,
-    // Mutable.
+    /// The working buffer of resolved items.
     items: Vec<MathItem<'a>>,
 }
 
 impl<'a, 'v, 'e> MathResolver<'a, 'v, 'e> {
-    /// Create a new math builder.
+    /// Creates a new math IR builder.
     fn new(
         engine: &'v mut Engine<'e>,
         locator: &'v mut SplitLocator<'a>,
@@ -57,28 +75,30 @@ impl<'a, 'v, 'e> MathResolver<'a, 'v, 'e> {
         Self { engine, locator, arenas, items: vec![] }
     }
 
-    /// Lifetime-extends some styles.
+    /// Allocates styles in the arena to extend their lifetime.
     fn store_styles(&self, styles: impl Into<Styles>) -> &'a Styles {
         self.arenas.styles.alloc(styles.into())
     }
 
-    /// Lifetime-extends a style chain and chains a style onto it.
+    /// Allocates a style chain in the arena and chains additional styles onto it.
     fn chain_styles(&self, base: StyleChain<'a>, new: &'a Styles) -> StyleChain<'a> {
         self.arenas.bump.alloc(base).chain(new)
     }
 
-    /// Lifetime-extends some content.
+    /// Allocates content in the arena to extend its lifetime.
     fn store(&self, content: Content) -> &'a Content {
         self.arenas.content.alloc(content)
     }
 
-    /// Push a item.
+    /// Pushes an item to the working buffer.
     fn push(&mut self, item: impl Into<MathItem<'a>>) {
         self.items.push(item.into());
     }
 
-    /// Resolve the given element and return the start index of the resulting
-    /// [`MathItem`]s.
+    /// Resolves content and returns the start index in the items buffer.
+    ///
+    /// The resolved items are appended to `self.items`. The returned index
+    /// can be used to extract just the newly added items.
     fn resolve_into_items(
         &mut self,
         elem: &'a Content,
@@ -89,7 +109,9 @@ impl<'a, 'v, 'e> MathResolver<'a, 'v, 'e> {
         Ok(start)
     }
 
-    /// Resolve the given element and return the result as a [`MathItem`].
+    /// Resolves content and returns it as a single [`MathItem`].
+    ///
+    /// If resolution produces multiple items, they are wrapped in a group.
     fn resolve_into_item(
         &mut self,
         elem: &'a Content,
@@ -104,7 +126,10 @@ impl<'a, 'v, 'e> MathResolver<'a, 'v, 'e> {
         })
     }
 
-    /// Resolve arbitrary content.
+    /// Resolves content by first realizing it, then processing each element.
+    ///
+    /// This is the core resolution method that handles the realization
+    /// of show rules and then dispatches to element-specific handlers.
     fn resolve_into_self(
         &mut self,
         content: &'a Content,
@@ -127,7 +152,11 @@ impl<'a, 'v, 'e> MathResolver<'a, 'v, 'e> {
     }
 }
 
-/// Resolves a leaf element resulting from realization.
+/// Resolves a realized leaf element into math items.
+///
+/// This is the main dispatcher that handles all possible math element types.
+/// It matches the element against known types and calls the appropriate
+/// resolution function for each.
 fn resolve_realized<'a, 'v, 'e>(
     elem: &'a Content,
     ctx: &mut MathResolver<'a, 'v, 'e>,
@@ -209,6 +238,7 @@ fn resolve_realized<'a, 'v, 'e>(
     Ok(())
 }
 
+/// Resolves horizontal spacing element.
 fn resolve_h(
     elem: &Packed<HElem>,
     ctx: &mut MathResolver,
@@ -222,6 +252,10 @@ fn resolve_h(
     Ok(())
 }
 
+/// Resolves text content into a styled text item.
+///
+/// This handles multi-character text and applies math styling (variant,
+/// bold, italic) to each character.
 fn resolve_text<'a, 'v, 'e>(
     elem: &'a Packed<TextElem>,
     ctx: &mut MathResolver<'a, 'v, 'e>,
@@ -251,6 +285,10 @@ fn resolve_text<'a, 'v, 'e>(
     Ok(())
 }
 
+/// Resolves a symbol element into glyph items.
+///
+/// Each grapheme cluster in the symbol becomes a separate glyph item.
+/// Math styling (variant, bold, italic) is applied to each character.
 fn resolve_symbol<'a, 'v, 'e>(
     elem: &'a Packed<SymbolElem>,
     ctx: &mut MathResolver<'a, 'v, 'e>,
@@ -299,6 +337,7 @@ fn try_dotless(c: char) -> Option<char> {
     }
 }
 
+/// Resolves a box element.
 fn resolve_box<'a, 'v, 'e>(
     elem: &'a Packed<BoxElem>,
     ctx: &mut MathResolver<'a, 'v, 'e>,
@@ -308,6 +347,10 @@ fn resolve_box<'a, 'v, 'e>(
     Ok(())
 }
 
+/// Resolves an accent element (e.g., hat, tilde, bar).
+///
+/// The base is resolved in cramped style, and if `dotless` is enabled,
+/// the dotless variant of i/j is used.
 fn resolve_accent<'a, 'v, 'e>(
     elem: &'a Packed<AccentElem>,
     ctx: &mut MathResolver<'a, 'v, 'e>,
@@ -345,6 +388,11 @@ fn resolve_accent<'a, 'v, 'e>(
     Ok(())
 }
 
+/// Resolves an attach element (subscripts/superscripts/limits).
+///
+/// This handles all six attachment positions: top, bottom, top-left,
+/// bottom-left, top-right, and bottom-right. It also handles the
+/// merging of nested attachments and the placement of primes.
 fn resolve_attach<'a, 'v, 'e>(
     elem: &'a Packed<AttachElem>,
     ctx: &mut MathResolver<'a, 'v, 'e>,
@@ -505,6 +553,10 @@ fn resolve_cancel<'a, 'v, 'e>(
     Ok(())
 }
 
+/// Resolves a fraction element.
+///
+/// Supports three styles: vertical (traditional), horizontal (inline),
+/// and skewed (diagonal slash).
 fn resolve_frac<'a, 'v, 'e>(
     elem: &'a Packed<FracElem>,
     ctx: &mut MathResolver<'a, 'v, 'e>,
@@ -688,6 +740,11 @@ fn resolve_skewed_frac<'a, 'v, 'e>(
     Ok(())
 }
 
+/// Resolves an lr (left-right) element with scaling delimiters.
+///
+/// This handles balanced delimiters that stretch to match their content.
+/// It extracts opening and closing delimiters, scales them appropriately,
+/// and handles mid delimiters.
 fn resolve_lr<'a, 'v, 'e>(
     elem: &'a Packed<LrElem>,
     ctx: &mut MathResolver<'a, 'v, 'e>,
@@ -1037,6 +1094,10 @@ fn resolve_op<'a, 'v, 'e>(
     Ok(())
 }
 
+/// Resolves a root (radical) element.
+///
+/// The radicand is resolved in cramped style. An optional index
+/// is resolved in scriptscript size for nth roots.
 fn resolve_root<'a, 'v, 'e>(
     elem: &'a Packed<RootElem>,
     ctx: &mut MathResolver<'a, 'v, 'e>,

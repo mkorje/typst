@@ -1,3 +1,9 @@
+//! Math text and glyph layout.
+//!
+//! This module handles layout for text content in math mode, including
+//! multi-character text items and individual glyphs. Handles OpenType
+//! features like `flac` (flattened accents) and `dtls` (dotless forms).
+
 use ecow::EcoString;
 use typst_library::diag::SourceResult;
 use typst_library::foundations::{Resolve, StyleChain};
@@ -108,7 +114,14 @@ fn layout_inline_text(
     }
 }
 
-/// Layout a single character in the math font.
+/// Lays out a [`GlyphItem`] (a single grapheme cluster in the math font).
+///
+/// This handles:
+/// - Applying the `flac` (flattened accents) OpenType feature when needed.
+/// - Applying the `dtls` (dotless forms) OpenType feature for characters under
+///   accents, or converting back to dotted forms if the font lacks support.
+/// - Stretching large operators to their display size.
+/// - Stretching delimiters to match their target height.
 #[typst_macros::time(name = "math glyph layout", span = props.span)]
 pub fn layout_glyph(
     item: &GlyphItem,
@@ -116,6 +129,8 @@ pub fn layout_glyph(
     styles: StyleChain,
     props: &MathProperties,
 ) -> SourceResult<()> {
+    // Apply flac (flattened accents) feature only when needed. We create the
+    // style lazily to avoid allocating a Vec for every glyph.
     let flac;
     let styles = if item.flac.get() {
         flac = style_flac();
@@ -124,13 +139,16 @@ pub fn layout_glyph(
         styles
     };
 
+    // Handle dotless forms (dtls). We only check for font support and create
+    // the style when the glyph actually needs it, avoiding unnecessary font
+    // table lookups and allocations for most glyphs.
     let dtls;
     let (styles, text): (_, EcoString) = if item.dtls {
         if has_dtls_feat(ctx.font()) {
             dtls = style_dtls();
             (styles.chain(&dtls), item.text.clone())
         } else {
-            // Font doesn't support dtls, so convert back to dotless char.
+            // Font doesn't support dtls, so convert back to dotted form.
             let text = item
                 .text
                 .graphemes(true)
@@ -146,6 +164,7 @@ pub fn layout_glyph(
         GlyphFragment::new(ctx.engine.world, styles, &text, props.span)
     {
         if glyph.class == MathClass::Large {
+            // Use pre-computed size from props to avoid redundant style lookup.
             if props.size == MathSize::Display {
                 let height = glyph
                     .item

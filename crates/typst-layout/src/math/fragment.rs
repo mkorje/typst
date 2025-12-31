@@ -1,3 +1,14 @@
+//! Math layout fragments.
+//!
+//! This module defines [`MathFragment`], the output type of math layout.
+//! Fragments represent the building blocks of a laid-out equation: glyphs,
+//! frames, spaces, linebreaks, and alignment points.
+//!
+//! The key types are:
+//! - [`MathFragment`]: An enum of all possible layout outputs
+//! - [`GlyphFragment`]: A single glyph with full typographic metrics
+//! - [`FrameFragment`]: A frame (e.g., from a fraction or matrix) with math metadata
+
 use std::fmt::{self, Debug, Formatter};
 
 use comemo::Tracked;
@@ -23,9 +34,13 @@ use super::MathContext;
 use crate::math::shaping::{Glyphs, ShapedGlyph, ShapedText, shape};
 use crate::modifiers::{FrameModifiers, FrameModify};
 
-/// Maximum number of times extenders can be repeated.
+/// Maximum number of times extenders can be repeated when assembling glyphs.
 const MAX_REPEATS: usize = 1024;
 
+/// A fragment produced by math layout.
+///
+/// This is the output type of the layout phase. Fragments are assembled
+/// into frames by the run layout code.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum MathFragment {
@@ -207,21 +222,34 @@ impl From<FrameFragment> for MathFragment {
     }
 }
 
+/// A single glyph fragment with full typographic metrics.
+///
+/// This represents a shaped glyph (or glyph assembly) along with all the
+/// metrics needed for math layout: baseline, italics correction, accent
+/// attachment points, and more.
 #[derive(Clone)]
 pub struct GlyphFragment {
-    // Text stuff.
+    /// The shaped text item containing the glyph(s).
     pub item: ShapedText,
-    // Math stuff.
+    /// The bounding size of the glyph.
     pub size: Size,
+    /// The baseline position (distance from top). `None` for assembled glyphs.
     pub baseline: Option<Abs>,
+    /// The italics correction for this glyph.
     pub italics_correction: Abs,
+    /// The top and bottom accent attachment points (horizontal position).
     pub accent_attach: (Abs, Abs),
+    /// The math size context (display, text, script, scriptscript).
     pub math_size: MathSize,
+    /// The math class of this glyph.
     pub class: MathClass,
+    /// Whether this is an extended shape (from the MATH table's ExtendedShapes).
     pub extended_shape: bool,
-    // External frame stuff.
+    /// Frame modifiers to apply when converting to a frame.
     pub modifiers: FrameModifiers,
+    /// Vertical shift from baseline (text baseline adjustment).
     pub shift: Abs,
+    /// Vertical alignment adjustment for axis centering.
     pub align: Abs,
 }
 
@@ -472,23 +500,38 @@ impl Debug for GlyphFragment {
     }
 }
 
+/// A frame fragment with math-specific metadata.
+///
+/// This wraps a [`Frame`] with additional information needed for math layout,
+/// such as the math class, size, and accent attachment points.
 #[derive(Debug, Clone)]
 pub struct FrameFragment {
+    /// The underlying frame.
     pub frame: Frame,
+    /// The font size used for this fragment.
     pub font_size: Abs,
+    /// The math class of this fragment.
     pub class: MathClass,
+    /// The math size context (display, text, script, scriptscript).
     pub math_size: MathSize,
+    /// The base ascent (before any modifications).
     pub base_ascent: Abs,
+    /// The base descent (before any modifications).
     pub base_descent: Abs,
+    /// The italics correction for this fragment.
     pub italics_correction: Abs,
+    /// The top and bottom accent attachment points (horizontal position).
     pub accent_attach: (Abs, Abs),
+    /// Whether this fragment contains text-like content (affects spacing).
     pub text_like: bool,
 }
 
 impl FrameFragment {
+    /// Creates a new frame fragment from a frame and properties.
     pub fn new(props: &MathProperties, styles: StyleChain, frame: Frame) -> Self {
         let base_ascent = frame.ascent();
         let base_descent = frame.descent();
+        // Default accent attachment is at the center.
         let accent_attach = frame.width() / 2.0;
         let modifiers = FrameModifiers::get_in(styles);
         Self {
@@ -504,33 +547,39 @@ impl FrameFragment {
         }
     }
 
+    /// Sets the base ascent (builder pattern).
     pub fn with_base_ascent(self, base_ascent: Abs) -> Self {
         Self { base_ascent, ..self }
     }
 
+    /// Sets the base descent (builder pattern).
     pub fn with_base_descent(self, base_descent: Abs) -> Self {
         Self { base_descent, ..self }
     }
 
+    /// Sets the italics correction (builder pattern).
     pub fn with_italics_correction(self, italics_correction: Abs) -> Self {
         Self { italics_correction, ..self }
     }
 
+    /// Sets the accent attachment points (builder pattern).
     pub fn with_accent_attach(self, accent_attach: (Abs, Abs)) -> Self {
         Self { accent_attach, ..self }
     }
 
+    /// Sets whether this fragment is text-like (builder pattern).
     pub fn with_text_like(self, text_like: bool) -> Self {
         Self { text_like, ..self }
     }
 }
 
+/// Looks up the ascent and descent for a glyph from its bounding box.
 fn ascent_descent(font: &Font, id: GlyphId) -> Option<(Em, Em)> {
     let bbox = font.ttf().glyph_bounding_box(id)?;
     Some((font.to_em(bbox.y_max), -font.to_em(bbox.y_min)))
 }
 
-/// Look up the italics correction for a glyph.
+/// Looks up the italics correction for a glyph from the MATH table.
 fn italics_correction(font: &Font, id: GlyphId) -> Option<Em> {
     font.ttf()
         .tables()
@@ -541,7 +590,7 @@ fn italics_correction(font: &Font, id: GlyphId) -> Option<Em> {
         .map(|value| font.to_em(value.value))
 }
 
-/// Loop up the top accent attachment position for a glyph.
+/// Looks up the top accent attachment position for a glyph from the MATH table.
 fn accent_attach(font: &Font, id: GlyphId) -> Option<Em> {
     font.ttf()
         .tables()
@@ -552,7 +601,10 @@ fn accent_attach(font: &Font, id: GlyphId) -> Option<Em> {
         .map(|value| font.to_em(value.value))
 }
 
-/// Look up whether a glyph is an extended shape.
+/// Checks whether a glyph is an extended shape (from the MATH table).
+///
+/// Extended shapes are glyphs like large delimiters that should not have
+/// italics correction applied to them.
 fn is_extended_shape(font: &Font, id: GlyphId) -> bool {
     font.ttf()
         .tables()
@@ -581,6 +633,7 @@ fn kern_at_height(font: &Font, id: GlyphId, corner: Corner, height: Em) -> Optio
     Some(font.to_em(kern.kern(i)?.value))
 }
 
+/// Returns which axes a glyph can be stretched along.
 fn stretch_axes(font: &Font, id: u16) -> Axes<bool> {
     let id = GlyphId(id);
     let horizontal = font
@@ -601,6 +654,7 @@ fn stretch_axes(font: &Font, id: u16) -> Axes<bool> {
     Axes::new(horizontal, vertical)
 }
 
+/// Looks up the minimum connector overlap from the MATH table.
 fn min_connector_overlap(font: &Font) -> Option<Em> {
     font.ttf()
         .tables()
@@ -609,6 +663,7 @@ fn min_connector_overlap(font: &Font) -> Option<Em> {
         .map(|variants| font.to_em(variants.min_connector_overlap))
 }
 
+/// Looks up the glyph construction table for a glyph on the given axis.
 fn glyph_construction(
     font: &Font,
     id: GlyphId,
@@ -625,7 +680,13 @@ fn glyph_construction(
         .get(id)
 }
 
-/// Assemble a glyph from parts.
+/// Assembles a glyph from parts to reach a target size.
+///
+/// This implements the OpenType MATH table glyph assembly algorithm:
+/// 1. First, try to find a pre-made variant large enough
+/// 2. If no variant suffices, assemble from parts (extenders can repeat)
+/// 3. Parts overlap at their connectors; the overlap amount is adjusted
+///    to reach the target size while respecting minimum overlap constraints
 fn assemble(
     engine: &mut Engine,
     base: &mut GlyphFragment,
@@ -640,6 +701,8 @@ fn assemble(
     let mut full;
     let mut ratio;
     let mut repeat = 0;
+
+    // Binary search would be faster, but this is simple and works.
     loop {
         full = Abs::zero();
         ratio = 0.0;
@@ -647,17 +710,18 @@ fn assemble(
         let mut parts = parts(assembly, repeat).peekable();
         let mut growable = Abs::zero();
 
+        // Calculate total size and growable space with current repeat count.
         while let Some(part) = parts.next() {
             let mut advance = base.item.font.to_em(part.full_advance).at(base.item.size);
             if let Some(next) = parts.peek() {
+                // Overlap is the minimum of end connector and start connector.
                 let max_overlap = base
                     .item
                     .font
                     .to_em(part.end_connector_length.min(next.start_connector_length))
                     .at(base.item.size);
                 if max_overlap < min_overlap {
-                    // This condition happening is indicative of a bug in the
-                    // font.
+                    // This condition is indicative of a bug in the font.
                     engine.sink.warn(warning!(
                        base.item.span,
                        "glyph has assembly parts with overlap less than minConnectorOverlap";
@@ -667,14 +731,14 @@ fn assemble(
                 }
 
                 advance -= max_overlap;
-                // In case we have that max_overlap < min_overlap, ensure we
-                // don't decrease the value of growable.
+                // Ensure we don't decrease growable if max_overlap < min_overlap.
                 growable += (max_overlap - min_overlap).max(Abs::zero());
             }
 
             full += advance;
         }
 
+        // Compute how much to reduce overlap to reach the target.
         if full < target {
             let delta = target - full;
             ratio = (delta / growable).min(1.0);

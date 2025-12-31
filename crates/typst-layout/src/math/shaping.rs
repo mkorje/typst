@@ -1,3 +1,9 @@
+//! Math text shaping.
+//!
+//! This module provides text shaping functionality for mathematical text,
+//! using rustybuzz for OpenType shaping with the MATH script tag. Handles
+//! font fallback and glyph substitution for math-specific typography.
+
 use std::ops::{Deref, DerefMut};
 
 use az::SaturatingAs;

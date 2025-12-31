@@ -1,3 +1,8 @@
+//! Math accent layout.
+//!
+//! This module handles the layout of accents (diacritical marks) placed
+//! above or below a base expression.
+
 use typst_library::diag::SourceResult;
 use typst_library::foundations::StyleChain;
 use typst_library::layout::{Abs, Axis, Frame, Point, Size};

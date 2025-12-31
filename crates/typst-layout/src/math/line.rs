@@ -1,3 +1,8 @@
+//! Math line layout.
+//!
+//! This module handles layout for underlines and overlines in math mode.
+//! These are horizontal lines drawn above or below mathematical expressions.
+
 use typst_library::diag::SourceResult;
 use typst_library::foundations::StyleChain;
 use typst_library::layout::{Abs, Frame, FrameItem, Point, Size};
@@ -7,8 +12,7 @@ use typst_library::visualize::{FixedStroke, Geometry};
 
 use super::{FrameFragment, MathContext};
 
-/// layout under- or overlined content.
-/// Lays out an [`LineItem`].
+/// Lays out a [`LineItem`].
 #[typst_macros::time(name = "math line layout", span = props.span)]
 pub fn layout_line(
     item: &LineItem,

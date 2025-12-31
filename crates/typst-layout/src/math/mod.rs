@@ -1,3 +1,16 @@
+//! Math layout implementation.
+//!
+//! This module contains the layout phase of math typesetting. It takes the
+//! intermediate representation ([`MathItem`]s) produced by the resolution
+//! phase and converts them into positioned frames.
+//!
+//! The main entry points are:
+//! - [`layout_equation_inline`]: Lays out an inline equation within a paragraph
+//! - [`layout_equation_block`]: Lays out a block-level equation
+//!
+//! The layout process uses [`MathContext`] to manage state and produces
+//! [`MathFragment`]s which are then assembled into final frames.
+
 #[macro_use]
 mod shared;
 mod accent;
@@ -102,6 +115,10 @@ pub fn layout_equation_inline(
 }
 
 /// Layout a block-level equation (in a flow).
+///
+/// Block equations are centered by default and can span multiple lines.
+/// They support equation numbering and can break across pages if the
+/// `breakable` property is set.
 #[typst_macros::time(span = elem.span())]
 pub fn layout_equation_block(
     elem: &Packed<EquationElem>,
@@ -116,26 +133,31 @@ pub fn layout_equation_block(
     let font = get_font(engine.world, styles, span)?;
     warn_non_math_font(&font, engine, span);
 
+    // Add script scale factors from the font to the style chain.
     let scale_style = style_for_script_scale(&font);
     let styles = styles.chain(&scale_style);
 
     let mut locator = locator.split();
 
+    // Phase 1: Resolve content into IR.
     let arenas = Arenas::default();
     let run = resolve_equation(elem, engine, &mut locator, &arenas, styles)?;
 
+    // Phase 2: Layout IR into fragments and build frame structure.
     let mut ctx = MathContext::new(engine, &mut locator, regions.base(), font.clone());
     let full_equation_builder = ctx
         .layout_into_fragments(&run, styles)?
         .multiline_frame_builder(styles);
     let width = full_equation_builder.size.x;
 
+    // Phase 3: Handle page breaking if enabled.
     let equation_builders = if styles.get(BlockElem::breakable) {
         let mut rows = full_equation_builder.frames.into_iter().peekable();
         let mut equation_builders = vec![];
         let mut last_first_pos = Point::zero();
         let mut regions = regions;
 
+        // Distribute rows across regions (pages).
         loop {
             // Keep track of the position of the first row in this region,
             // so that the offset can be reverted later.
@@ -356,18 +378,26 @@ fn resize_equation(
 }
 
 /// The context for math layout.
+///
+/// This struct manages the state needed during the layout phase, including
+/// the engine for compilation, the current font stack, and the working buffer
+/// of fragments being built.
 struct MathContext<'a, 'v, 'e> {
-    // External.
+    /// The compilation engine.
     engine: &'v mut Engine<'e>,
+    /// The locator for introspection.
     locator: &'v mut SplitLocator<'a>,
+    /// The available region for layout.
     region: Region,
-    // Mutable.
+    /// Stack of fonts for nested math contexts with different fonts.
+    /// The last element is always the current font.
     fonts_stack: Vec<Font>,
+    /// The working buffer of layout fragments.
     fragments: Vec<MathFragment>,
 }
 
 impl<'a, 'v, 'e> MathContext<'a, 'v, 'e> {
-    /// Create a new math context.
+    /// Creates a new math layout context.
     fn new(
         engine: &'v mut Engine<'e>,
         locator: &'v mut SplitLocator<'a>,
@@ -383,24 +413,27 @@ impl<'a, 'v, 'e> MathContext<'a, 'v, 'e> {
         }
     }
 
-    /// Get the current base font.
+    /// Returns the current base font.
     #[inline]
     fn font(&self) -> &Font {
-        // Will always be at least one font in the stack.
+        // The stack is never empty (initialized with one font in new()).
         self.fonts_stack.last().unwrap()
     }
 
-    /// Push a fragment.
+    /// Pushes a fragment to the working buffer.
     fn push(&mut self, fragment: impl Into<MathFragment>) {
         self.fragments.push(fragment.into());
     }
 
-    /// Push multiple fragments.
+    /// Pushes multiple fragments to the working buffer.
     fn extend(&mut self, fragments: impl IntoIterator<Item = MathFragment>) {
         self.fragments.extend(fragments);
     }
 
-    /// Layout the given element and return the resulting [`MathFragment`]s.
+    /// Lays out a math item and returns the resulting fragments.
+    ///
+    /// The fragments are collected from the working buffer, which is drained
+    /// from the start index.
     fn layout_into_fragments(
         &mut self,
         run: &MathItem,
@@ -411,7 +444,9 @@ impl<'a, 'v, 'e> MathContext<'a, 'v, 'e> {
         Ok(self.fragments.drain(start..).collect())
     }
 
-    /// Layout the given element and return the resulting [`MathFragment`]s.
+    /// Lays out a math item and returns a single fragment.
+    ///
+    /// If layout produces multiple fragments, they are combined into a frame.
     fn layout_into_fragment(
         &mut self,
         run: &MathItem,
@@ -422,8 +457,8 @@ impl<'a, 'v, 'e> MathContext<'a, 'v, 'e> {
             return Ok(fragments.into_iter().next().unwrap());
         }
 
-        // Fragments without a math_size are ignored: the notion of size do not
-        // apply to them, so their text-likeness is meaningless.
+        // Fragments without a math_size are ignored: the notion of size does
+        // not apply to them, so their text-likeness is meaningless.
         let text_like = fragments
             .iter()
             .filter(|e| e.math_size().is_some())
@@ -437,6 +472,9 @@ impl<'a, 'v, 'e> MathContext<'a, 'v, 'e> {
             .into())
     }
 
+    /// Lays out a math item, appending fragments to the working buffer.
+    ///
+    /// This handles font changes by pushing/popping from the font stack.
     fn layout_into_self(
         &mut self,
         run: &MathItem,
@@ -448,9 +486,10 @@ impl<'a, 'v, 'e> MathContext<'a, 'v, 'e> {
         for item in run.as_slice() {
             let styles = item.styles().unwrap_or(outer_styles);
 
-            // Whilst this check isn't exact, it more or less suffices as a
-            // change in font variant probably won't have an effect on metrics.
+            // Check if we need to switch fonts. This check isn't exact, but
+            // a change in font variant probably won't affect metrics much.
             if styles != outer_styles && styles.get_ref(TextElem::font) != outer_font {
+                // Push new font onto the stack for this item.
                 self.fonts_stack
                     .push(get_font(self.engine.world, styles, item.span())?);
                 let scale_style = style_for_script_scale(self.font());
@@ -465,12 +504,16 @@ impl<'a, 'v, 'e> MathContext<'a, 'v, 'e> {
     }
 }
 
-/// Lays out a leaf element resulting from realization.
+/// Lays out a single math item.
+///
+/// This is the main dispatcher that handles all math item types, delegating
+/// to specialized layout functions for each kind.
 fn layout_realized(
     item: &MathItem,
     ctx: &mut MathContext,
     styles: StyleChain,
 ) -> SourceResult<()> {
+    // Handle non-component items (spacing, linebreaks, etc.) first.
     let MathItem::Component(comp) = item else {
         match item {
             MathItem::Spacing(amount, _) => ctx.push(MathFragment::Space(*amount)),
@@ -486,9 +529,11 @@ fn layout_realized(
 
     let props = &comp.props;
 
+    // Insert left spacing if specified by the item's properties.
     if let Some(lspace) = props.lspace {
         let width = lspace.at(styles.resolve(TextElem::size));
         let frag = MathFragment::Space(width);
+        // Insert before alignment point if one exists.
         // TODO: not ignoring tags
         if ctx.fragments.last().is_some_and(|x| matches!(x, MathFragment::Align)) {
             ctx.fragments.insert(ctx.fragments.len() - 1, frag);
@@ -497,6 +542,7 @@ fn layout_realized(
         }
     }
 
+    // Dispatch to the appropriate layout function based on item kind.
     match &comp.kind {
         MathKind::Box(item) => layout_box(item, ctx, styles, props)?,
         MathKind::External(item) => layout_external(item, ctx, styles, props)?,
@@ -515,6 +561,7 @@ fn layout_realized(
         MathKind::Text(item) => layout_text(item, ctx, styles, props)?,
         MathKind::Fenced(item) => layout_fenced(item, ctx, styles, props)?,
         MathKind::Group(_) => {
+            // Groups are laid out recursively and wrapped in a frame.
             let fragment = ctx.layout_into_fragment(item, styles)?;
             let italics = fragment.italics_correction();
             let accent_attach = fragment.accent_attach();
@@ -526,6 +573,7 @@ fn layout_realized(
         }
     }
 
+    // Insert right spacing if specified by the item's properties.
     if let Some(rspace) = props.rspace {
         let width = rspace.at(styles.resolve(TextElem::size));
         ctx.push(MathFragment::Space(width));

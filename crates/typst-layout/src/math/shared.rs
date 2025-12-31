@@ -1,3 +1,8 @@
+//! Shared math layout utilities.
+//!
+//! This module provides utilities shared across math layout modules,
+//! including alignment point calculation for multi-row equations.
+
 use typst_library::layout::Abs;
 
 use super::MathFragment;

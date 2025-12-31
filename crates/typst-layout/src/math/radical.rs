@@ -1,3 +1,9 @@
+//! Math radical layout.
+//!
+//! This module handles layout for radicals (square roots and nth roots).
+//! The radical symbol is stretched vertically to match the radicand height,
+//! and an optional index is positioned according to TeX/OpenType conventions.
+
 use typst_library::diag::SourceResult;
 use typst_library::foundations::StyleChain;
 use typst_library::layout::{Abs, Axis, Frame, FrameItem, Point, Size};

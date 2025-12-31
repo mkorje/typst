@@ -1,3 +1,12 @@
+//! Math run layout.
+//!
+//! This module provides extension traits and types for assembling math
+//! fragments into frames. The key functionality includes:
+//!
+//! - Splitting fragments into rows at linebreaks
+//! - Aligning rows using alignment points
+//! - Converting fragments to inline items for paragraph layout
+
 use std::iter::once;
 
 use typst_library::foundations::{Resolve, StyleChain};
@@ -8,16 +17,26 @@ use unicode_math_class::MathClass;
 
 use super::{MathFragment, alignments};
 
+/// Leading between rows in script/scriptscript size.
 const TIGHT_LEADING: Em = Em::new(0.25);
 
+/// Extension trait for converting math fragments into frames.
 pub trait MathFragmentsExt {
+    /// Splits fragments into rows at linebreaks.
     fn rows(&self) -> Vec<Vec<MathFragment>>;
+    /// Returns the maximum ascent of all fragments.
     fn ascent(&self) -> Abs;
+    /// Returns the maximum descent of all fragments.
     fn descent(&self) -> Abs;
+    /// Converts fragments into a single frame.
     fn into_frame(self, styles: StyleChain) -> Frame;
+    /// Returns a builder for creating a potentially multi-row frame.
     fn multiline_frame_builder(self, styles: StyleChain) -> MathRunFrameBuilder;
+    /// Converts fragments into a single-row frame with alignment points.
     fn into_line_frame(self, points: &[Abs], alternator: LeftRightAlternator) -> Frame;
+    /// Converts fragments into inline items for paragraph layout.
     fn into_par_items(self) -> Vec<InlineItem>;
+    /// Returns whether the fragments contain any linebreaks.
     fn is_multiline(&self) -> bool;
 }
 
@@ -151,21 +170,26 @@ impl MathFragmentsExt for Vec<MathFragment> {
     fn into_par_items(self) -> Vec<InlineItem> {
         let mut items = vec![];
 
+        // Track the current frame being built.
         let mut x = Abs::zero();
         let mut ascent = Abs::zero();
         let mut descent = Abs::zero();
         let mut frame = Frame::soft(Size::zero());
         let mut empty = true;
 
+        // Helper to finalize a frame's size and baseline.
         let finalize_frame = |frame: &mut Frame, x, ascent, descent| {
             frame.set_size(Size::new(x, ascent + descent));
             frame.set_baseline(Abs::zero());
             frame.translate(Point::with_y(ascent));
         };
 
+        // Tracks whether spaces should be emitted as visible items.
         let mut space_is_visible = false;
 
         let is_space = |f: &MathFragment| matches!(f, MathFragment::Space(_));
+
+        // Determines if this is a good place to allow line breaking.
         let is_line_break_opportunity = |class, next_fragment| match class {
             // Don't split when two relations are in a row or when preceding a
             // closing parenthesis.
@@ -178,6 +202,7 @@ impl MathFragmentsExt for Vec<MathFragment> {
 
         let mut iter = self.into_iter().peekable();
         while let Some(fragment) = iter.next() {
+            // Emit visible spaces as separate items for proper line breaking.
             if space_is_visible && is_space(&fragment) {
                 items.push(InlineItem::Space(fragment.width(), true));
                 continue;
@@ -204,10 +229,12 @@ impl MathFragmentsExt for Vec<MathFragment> {
                 items.push(InlineItem::Frame(frame_prev));
                 empty = true;
 
+                // Reset for next frame.
                 x = Abs::zero();
                 ascent = Abs::zero();
                 descent = Abs::zero();
 
+                // Insert zero-width breaking space if no actual space follows.
                 space_is_visible = true;
                 if let Some(f_next) = iter.peek()
                     && !is_space(f_next)
@@ -219,6 +246,7 @@ impl MathFragmentsExt for Vec<MathFragment> {
             }
         }
 
+        // Finalize the last frame if it contains content.
         // Don't use `frame.is_empty()` because even an empty frame can
         // contribute width (if it had hidden content).
         if !empty {
@@ -234,17 +262,19 @@ impl MathFragmentsExt for Vec<MathFragment> {
     }
 }
 
-/// How the rows from the [`MathRun`] should be aligned and merged into a [`Frame`].
+/// A builder for assembling math rows into a frame.
+///
+/// This is used to construct multi-row equation frames with proper
+/// alignment and spacing between rows.
 pub struct MathRunFrameBuilder {
-    /// The size of the resulting frame.
+    /// The total size of the resulting frame.
     pub size: Size,
-    /// Each row's frame, and the position where the frame should
-    /// be pushed into the resulting frame.
+    /// Each row's frame and its position in the final frame.
     pub frames: Vec<(Frame, Point)>,
 }
 
 impl MathRunFrameBuilder {
-    /// Consumes the builder and returns a [`Frame`].
+    /// Consumes the builder and produces the final frame.
     pub fn build(self) -> Frame {
         let mut frame = Frame::soft(self.size);
         for (sub, pos) in self.frames.into_iter() {
@@ -254,6 +284,9 @@ impl MathRunFrameBuilder {
     }
 }
 
+/// Returns whether a fragment should affect the row height calculation.
+///
+/// Alignment points, linebreaks, and tags don't contribute to row height.
 fn affects_row_height(fragment: &MathFragment) -> bool {
     !matches!(
         fragment,

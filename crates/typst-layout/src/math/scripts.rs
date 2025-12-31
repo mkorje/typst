@@ -1,3 +1,9 @@
+//! Math scripts and attachments layout.
+//!
+//! This module handles layout for subscripts, superscripts, pre-scripts,
+//! and limits (attachments above/below operators). Positioning follows
+//! OpenType MATH table kerning and shift constants for proper placement.
+
 // Can be re-enabled once `Option::map_or_default` is stable in our MSRV.
 #![allow(unstable_name_collisions)]
 

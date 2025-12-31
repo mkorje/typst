@@ -1,3 +1,9 @@
+//! Math fraction layout.
+//!
+//! This module handles layout for fractions, including standard horizontal
+//! fractions with a rule line and skewed (beveled) fractions with a
+//! diagonal slash. Positioning follows OpenType MATH table constants.
+
 use typst_library::diag::SourceResult;
 use typst_library::foundations::{Resolve, StyleChain};
 use typst_library::layout::{Abs, Axis, Frame, FrameItem, Point, Size};

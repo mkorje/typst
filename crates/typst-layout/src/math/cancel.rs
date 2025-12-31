@@ -1,3 +1,9 @@
+//! Math cancel layout.
+//!
+//! This module handles layout for the cancel element, which draws lines
+//! through mathematical expressions to indicate cancellation. Supports
+//! single and crossed lines with customizable angles and strokes.
+
 use comemo::Track;
 use typst_library::diag::{At, SourceResult};
 use typst_library::engine::Engine;

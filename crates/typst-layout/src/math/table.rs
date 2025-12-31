@@ -1,3 +1,9 @@
+//! Math table/matrix layout.
+//!
+//! This module handles layout for matrices and aligned equation arrays.
+//! Supports automatic cell alignment, configurable gaps, and optional
+//! augmentation lines for systems of equations.
+
 use typst_library::diag::SourceResult;
 use typst_library::foundations::{Resolve, StyleChain};
 use typst_library::layout::{Abs, Em, Frame, FrameItem, Point, Rel, Size};

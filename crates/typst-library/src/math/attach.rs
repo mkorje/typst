@@ -184,11 +184,24 @@ pub enum Limits {
 
 impl Limits {
     /// The default limit configuration if the given character is the base.
+    ///
+    /// This computes the character's default math class internally. If you
+    /// already have the class, use [`Self::for_char_with_class`] instead to
+    /// avoid computing it twice.
     pub fn for_char(c: char) -> Self {
         Self::for_char_with_class(c, default_math_class(c))
     }
 
-    /// The default limit configuration for a character with a known default class.
+    /// The default limit configuration for a character with a pre-computed
+    /// default class.
+    ///
+    /// This is more efficient than [`Self::for_char`] when both the limit
+    /// configuration and the math class are needed, as it avoids calling
+    /// [`default_math_class`] twice.
+    ///
+    /// Unlike [`Self::for_class`], this method handles the special case of
+    /// integral characters (∫, ∬, etc.), which use [`Limits::Never`] instead
+    /// of [`Limits::Display`] despite being large operators.
     pub fn for_char_with_class(c: char, class: Option<MathClass>) -> Self {
         match class {
             Some(MathClass::Large) => {

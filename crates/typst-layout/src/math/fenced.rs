@@ -1,3 +1,10 @@
+//! Math fenced layout.
+//!
+//! This module handles layout for fenced expressions, which are
+//! mathematical content enclosed by delimiters (parentheses, brackets,
+//! braces, etc.). Delimiters are automatically stretched to match the
+//! height of their contents.
+
 use typst_library::diag::SourceResult;
 use typst_library::foundations::StyleChain;
 use typst_library::layout::{Abs, Axis};
