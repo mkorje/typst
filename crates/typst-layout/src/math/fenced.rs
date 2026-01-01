@@ -1,7 +1,7 @@
 use typst_library::diag::SourceResult;
 use typst_library::foundations::StyleChain;
 use typst_library::layout::{Abs, Axis};
-use typst_library::math::{FencedItem, MathProperties};
+use typst_library::math::{FencePart, FencedItem, MathItem, MathProperties};
 
 use super::MathContext;
 
@@ -13,7 +13,9 @@ pub fn layout_fenced(
     styles: StyleChain,
     props: &MathProperties,
 ) -> SourceResult<()> {
-    // Layout the body to compute relative_to for delimiter sizing.
+    // Layout the FULL body to compute relative_to for delimiter sizing.
+    // This is important for split fences: we use the full body height
+    // even when only rendering a portion.
     let body = ctx.layout_into_fragments(&item.body, styles)?;
     let relative_to = if item.balanced {
         let mut max_extent = Abs::zero();
@@ -28,7 +30,19 @@ pub fn layout_fenced(
         body.iter().map(|f| f.height()).max().unwrap_or_default()
     };
 
-    // Set stretch info for stretched mid items.
+    // Determine which parts to render based on split status.
+    let (render_open, render_close, visible_items): (bool, bool, &[MathItem]) =
+        match &item.split {
+            Some(split) => (
+                split.part == FencePart::Start,
+                split.part == FencePart::End,
+                split.visible_items,
+            ),
+            None => (true, true, item.body.as_slice()),
+        };
+
+    // Set stretch info for stretched mid items in the FULL body.
+    // We need to do this even for split fences to ensure consistent sizing.
     let mut has_mid_stretched = false;
     for body_item in item.body.as_slice() {
         if body_item.mid_stretched().is_some_and(|x| x) {
@@ -37,24 +51,27 @@ pub fn layout_fenced(
         }
     }
 
-    // Layout the opening delimiter if present.
-    if let Some(open) = &item.open {
+    // Layout the opening delimiter if present and this is a Start part (or not split).
+    if render_open && let Some(open) = &item.open {
         open.set_stretch_relative_to(relative_to, Axis::Y);
         let open = ctx.layout_into_fragment(open, styles)?;
         ctx.push(open);
     }
 
-    // Check if the body needs re-layout, since stretch info was updated after
-    // initial layout.
-    if has_mid_stretched {
-        let body = ctx.layout_into_fragments(&item.body, styles)?;
-        ctx.extend(body);
+    // Layout the visible portion of the body.
+    // For non-split fences, this is the full body.
+    // For split fences, this is just the visible_items slice.
+    if item.split.is_some() || has_mid_stretched {
+        // Need to re-layout (either split fence or mid-stretched items updated)
+        let visible_body = ctx.layout_items_into_fragments(visible_items, styles)?;
+        ctx.extend(visible_body);
     } else {
+        // Non-split, no mid-stretched: use already-laid-out body
         ctx.extend(body);
     }
 
-    // Layout the closing delimiter if present.
-    if let Some(close) = &item.close {
+    // Layout the closing delimiter if present and this is an End part (or not split).
+    if render_close && let Some(close) = &item.close {
         close.set_stretch_relative_to(relative_to, Axis::Y);
         let close = ctx.layout_into_fragment(close, styles)?;
         ctx.push(close);

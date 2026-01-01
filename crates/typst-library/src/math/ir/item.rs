@@ -467,8 +467,13 @@ impl<'a> FencedItem<'a> {
         span: Span,
         bump: &'a Bump,
     ) -> MathItem<'a> {
-        let kind =
-            MathKind::Fenced(bump.alloc(Self { open, close, body, balanced, split: None }));
+        let kind = MathKind::Fenced(bump.alloc(Self {
+            open,
+            close,
+            body,
+            balanced,
+            split: None,
+        }));
         let props = MathProperties::default(styles).with_span(span);
         MathComponent { kind, props, styles }.into()
     }

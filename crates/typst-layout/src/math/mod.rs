@@ -23,7 +23,7 @@ use typst_library::layout::{
     Abs, AlignElem, Axes, BlockElem, Em, FixedAlignment, Fragment, Frame, InlineItem,
     OuterHAlignment, Point, Region, Regions, Size, SpecificAlignment, VAlignment,
 };
-use typst_library::math::*;
+use typst_library::math::{self, *};
 use typst_library::model::ParElem;
 use typst_library::routines::Arenas;
 use typst_library::text::{Font, FontFlags, TextEdgeBounds, TextElem, variant};
@@ -67,11 +67,19 @@ pub fn layout_equation_inline(
     let arenas = Arenas::default();
     let run = resolve_equation(elem, engine, &mut locator, &arenas, styles)?;
 
+    // Convert to grid to handle linebreaks and split fences.
+    let grid = run.into_grid(&arenas.bump);
+
     let mut ctx = MathContext::new(engine, &mut locator, region, font.clone());
-    let mut items = if !run.is_multiline() {
-        ctx.layout_into_fragments(&run, styles)?.into_par_items()
+    let mut items = if !grid.is_multiline() {
+        // Single row: can break across lines in paragraph.
+        let fragments = ctx.layout_grid_row_into_fragments(&grid.rows[0], styles)?;
+        fragments.into_par_items()
     } else {
-        vec![InlineItem::Frame(ctx.layout_into_fragment(&run, styles)?.into_frame())]
+        // Multiple rows: layout as a single frame.
+        let rows = ctx.layout_grid_into_fragment_rows(&grid, styles)?;
+        let frame = grid_rows_into_frame(rows, styles);
+        vec![InlineItem::Frame(frame)]
     };
 
     // An empty equation should have a height, so we still create a frame
@@ -124,10 +132,12 @@ pub fn layout_equation_block(
     let arenas = Arenas::default();
     let run = resolve_equation(elem, engine, &mut locator, &arenas, styles)?;
 
+    // Convert to grid to handle linebreaks and split fences.
+    let grid = run.into_grid(&arenas.bump);
+
     let mut ctx = MathContext::new(engine, &mut locator, regions.base(), font.clone());
-    let full_equation_builder = ctx
-        .layout_into_fragments(&run, styles)?
-        .multiline_frame_builder(styles);
+    let rows = ctx.layout_grid_into_fragment_rows(&grid, styles)?;
+    let full_equation_builder = grid_rows_into_builder(rows, styles);
     let width = full_equation_builder.size.x;
 
     let equation_builders = if styles.get(BlockElem::breakable) {
@@ -355,6 +365,54 @@ fn resize_equation(
     resizing_offset + Point::with_y(excess_above)
 }
 
+/// Build a MathRunFrameBuilder from pre-split rows of fragments.
+/// Uses the same alignment logic as multiline_frame_builder.
+fn grid_rows_into_builder(
+    rows: Vec<Vec<MathFragment>>,
+    styles: StyleChain,
+) -> MathRunFrameBuilder {
+    use crate::math::run::MathFragmentsExt;
+
+    let row_count = rows.len();
+    let alignments = alignments(&rows);
+
+    let leading = if styles.get(EquationElem::size) >= MathSize::Text {
+        styles.resolve(ParElem::leading)
+    } else {
+        Em::new(0.25).resolve(styles)
+    };
+
+    let align = styles.resolve(AlignElem::alignment).x;
+    let mut frames: Vec<(Frame, Point)> = vec![];
+    let mut size = Size::zero();
+
+    for (i, row) in rows.into_iter().enumerate() {
+        if i == row_count - 1 && row.is_empty() {
+            continue;
+        }
+
+        let sub = row.into_line_frame(&alignments.points, LeftRightAlternator::Right);
+        if i > 0 {
+            size.y += leading;
+        }
+
+        let mut pos = Point::with_y(size.y);
+        if alignments.points.is_empty() {
+            pos.x = align.position(alignments.width - sub.width());
+        }
+        size.x.set_max(sub.width());
+        size.y += sub.height();
+        frames.push((sub, pos));
+    }
+
+    MathRunFrameBuilder { size, frames }
+}
+
+/// Build a frame from pre-split rows of fragments.
+fn grid_rows_into_frame(rows: Vec<Vec<MathFragment>>, styles: StyleChain) -> Frame {
+    grid_rows_into_builder(rows, styles).build()
+}
+
 /// The context for math layout.
 struct MathContext<'a, 'v, 'e> {
     // External.
@@ -411,6 +469,17 @@ impl<'a, 'v, 'e> MathContext<'a, 'v, 'e> {
         Ok(self.fragments.drain(start..).collect())
     }
 
+    /// Layout a slice of items and return the resulting [`MathFragment`]s.
+    fn layout_items_into_fragments(
+        &mut self,
+        items: &[MathItem],
+        styles: StyleChain,
+    ) -> SourceResult<Vec<MathFragment>> {
+        let start = self.fragments.len();
+        self.layout_items_into_self(items, styles)?;
+        Ok(self.fragments.drain(start..).collect())
+    }
+
     /// Layout the given element and return the resulting [`MathFragment`]s.
     fn layout_into_fragment(
         &mut self,
@@ -443,25 +512,72 @@ impl<'a, 'v, 'e> MathContext<'a, 'v, 'e> {
         styles: StyleChain,
     ) -> SourceResult<()> {
         let outer_styles = run.styles().unwrap_or(styles);
-        let outer_font = outer_styles.get_ref(TextElem::font);
+        self.layout_items_into_self(run.as_slice(), outer_styles)
+    }
 
-        for item in run.as_slice() {
-            let styles = item.styles().unwrap_or(outer_styles);
+    /// Layout a slice of items into self.
+    fn layout_items_into_self(
+        &mut self,
+        items: &[MathItem],
+        styles: StyleChain,
+    ) -> SourceResult<()> {
+        let outer_font = styles.get_ref(TextElem::font);
+
+        for item in items {
+            let item_styles = item.styles().unwrap_or(styles);
 
             // Whilst this check isn't exact, it more or less suffices as a
             // change in font variant probably won't have an effect on metrics.
-            if styles != outer_styles && styles.get_ref(TextElem::font) != outer_font {
-                self.fonts_stack
-                    .push(get_font(self.engine.world, styles, item.span())?);
+            if item_styles != styles && item_styles.get_ref(TextElem::font) != outer_font
+            {
+                self.fonts_stack.push(get_font(
+                    self.engine.world,
+                    item_styles,
+                    item.span(),
+                )?);
                 let scale_style = style_for_script_scale(self.font());
-                layout_realized(item, self, styles.chain(&scale_style))?;
+                layout_realized(item, self, item_styles.chain(&scale_style))?;
                 self.fonts_stack.pop();
             } else {
-                layout_realized(item, self, styles)?;
+                layout_realized(item, self, item_styles)?;
             }
         }
 
         Ok(())
+    }
+
+    /// Layout a grid row (multiple columns) into fragments.
+    /// Inserts Align markers between columns.
+    fn layout_grid_row_into_fragments(
+        &mut self,
+        row: &math::MathRow,
+        styles: StyleChain,
+    ) -> SourceResult<Vec<MathFragment>> {
+        let start = self.fragments.len();
+
+        for (i, column) in row.columns.iter().enumerate() {
+            if i > 0 {
+                // Insert alignment marker between columns
+                self.push(MathFragment::Align);
+            }
+            self.layout_items_into_self(column, styles)?;
+        }
+
+        Ok(self.fragments.drain(start..).collect())
+    }
+
+    /// Layout a full MathGrid into a list of fragment rows.
+    /// Each row is a Vec<MathFragment> with Align markers between columns.
+    fn layout_grid_into_fragment_rows(
+        &mut self,
+        grid: &math::MathGrid,
+        styles: StyleChain,
+    ) -> SourceResult<Vec<Vec<MathFragment>>> {
+        let mut rows = Vec::with_capacity(grid.rows.len());
+        for row in &grid.rows {
+            rows.push(self.layout_grid_row_into_fragments(row, styles)?);
+        }
+        Ok(rows)
     }
 }
 

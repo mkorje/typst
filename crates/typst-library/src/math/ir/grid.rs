@@ -119,7 +119,9 @@ fn has_linebreaks(items: &[MathItem]) -> bool {
     for item in items {
         match item {
             MathItem::Linebreak => return true,
-            MathItem::Component(MathComponent { kind: MathKind::Fenced(fence), .. }) => {
+            MathItem::Component(MathComponent {
+                kind: MathKind::Fenced(fence), ..
+            }) => {
                 if fence_has_linebreaks(fence) {
                     return true;
                 }
@@ -136,7 +138,9 @@ fn fence_has_linebreaks(fence: &FencedItem) -> bool {
     for item in body_items {
         match item {
             MathItem::Linebreak => return true,
-            MathItem::Component(MathComponent { kind: MathKind::Fenced(inner), .. }) => {
+            MathItem::Component(MathComponent {
+                kind: MathKind::Fenced(inner), ..
+            }) => {
                 if fence_has_linebreaks(inner) {
                     return true;
                 }
@@ -223,7 +227,8 @@ fn split_body_segments<'a>(
                 if let MathKind::Fenced(fence) = &comp.kind {
                     if fence_has_linebreaks(fence) {
                         // Recursively split the nested fence
-                        let inner_segments = split_body_segments(fence.body.as_slice(), bump);
+                        let inner_segments =
+                            split_body_segments(fence.body.as_slice(), bump);
                         let inner_count = inner_segments.len();
 
                         for (i, inner_segment) in inner_segments.into_iter().enumerate() {
@@ -271,7 +276,9 @@ fn split_body_segments<'a>(
 
 /// Split items at top-level linebreaks only (no nested fence handling).
 /// Returns slices into the original array.
-fn split_at_top_level_linebreaks<'a>(items: &'a [MathItem<'a>]) -> Vec<&'a [MathItem<'a>]> {
+fn split_at_top_level_linebreaks<'a>(
+    items: &'a [MathItem<'a>],
+) -> Vec<&'a [MathItem<'a>]> {
     let mut segments = vec![];
     let mut start = 0;
 
@@ -291,7 +298,10 @@ fn split_at_top_level_linebreaks<'a>(items: &'a [MathItem<'a>]) -> Vec<&'a [Math
 }
 
 /// Split a row's items into columns by alignment points.
-fn split_columns<'a>(items: &'a [MathItem<'a>], _bump: &'a Bump) -> Vec<&'a [MathItem<'a>]> {
+fn split_columns<'a>(
+    items: &'a [MathItem<'a>],
+    _bump: &'a Bump,
+) -> Vec<&'a [MathItem<'a>]> {
     // Check if there are any alignment points
     let has_align = items.iter().any(|item| matches!(item, MathItem::Align));
 
