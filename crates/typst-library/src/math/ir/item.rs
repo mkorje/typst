@@ -423,12 +423,38 @@ impl<'a> RadicalItem<'a> {
     }
 }
 
+/// Which part of a split fence is visible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FencePart {
+    /// Opening delimiter + body prefix (no closing delimiter).
+    Start,
+    /// Middle segment - no delimiters, just body content.
+    Middle,
+    /// Body suffix + closing delimiter (no opening delimiter).
+    End,
+}
+
+/// Information about how a fence was split at linebreaks.
+#[derive(Debug, Clone)]
+pub struct FenceSplit<'a> {
+    /// Which part of the fence this is.
+    pub part: FencePart,
+    /// The visible portion of the body.
+    /// This is either a subslice of `body.as_slice()` for simple cases,
+    /// or a newly allocated slice for nested splits.
+    pub visible_items: &'a [MathItem<'a>],
+}
+
 #[derive(Debug, Clone)]
 pub struct FencedItem<'a> {
     pub open: Option<MathItem<'a>>,
     pub close: Option<MathItem<'a>>,
     pub body: MathItem<'a>,
     pub balanced: bool,
+    /// If this fence was split at linebreaks, contains the split info.
+    /// When `Some`, `body` is still the full body (for height calculation),
+    /// but only `visible_items` should be rendered.
+    pub split: Option<FenceSplit<'a>>,
 }
 
 impl<'a> FencedItem<'a> {
@@ -441,7 +467,29 @@ impl<'a> FencedItem<'a> {
         span: Span,
         bump: &'a Bump,
     ) -> MathItem<'a> {
-        let kind = MathKind::Fenced(bump.alloc(Self { open, close, body, balanced }));
+        let kind =
+            MathKind::Fenced(bump.alloc(Self { open, close, body, balanced, split: None }));
+        let props = MathProperties::default(styles).with_span(span);
+        MathComponent { kind, props, styles }.into()
+    }
+
+    /// Creates a split version of this fence for the given part.
+    pub(crate) fn create_split(
+        &'a self,
+        part: FencePart,
+        visible_items: &'a [MathItem<'a>],
+        styles: StyleChain<'a>,
+        span: Span,
+        bump: &'a Bump,
+    ) -> MathItem<'a> {
+        let split = Some(FenceSplit { part, visible_items });
+        let kind = MathKind::Fenced(bump.alloc(Self {
+            open: self.open.clone(),
+            close: self.close.clone(),
+            body: self.body.clone(),
+            balanced: self.balanced,
+            split,
+        }));
         let props = MathProperties::default(styles).with_span(span);
         MathComponent { kind, props, styles }.into()
     }
