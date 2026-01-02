@@ -1046,3 +1046,24 @@ impl<'a> DerefMut for MathBuffer<'a> {
         &mut self.0
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct MathMultiline<'a> {
+    pub rows: &'a [&'a [&'a [MathItem<'a>]]],
+}
+
+impl<'a> MathMultiline<'a> {
+    pub fn new(item: &'a MathItem<'a>, arenas: &'a Arenas) -> Self {
+        let rows: SmallVec<[&[&[MathItem]]; 4]> = item
+            .as_slice()
+            .split(|x| matches!(x, MathItem::Linebreak))
+            .map(|row| {
+                let cols: SmallVec<[&[MathItem]; 8]> =
+                    row.split(|x| matches!(x, MathItem::Align)).collect();
+                arenas.bump.alloc_slice_fill_iter(cols) as &[&[MathItem]]
+            })
+            .collect();
+
+        Self { rows: arenas.bump.alloc_slice_fill_iter(rows) }
+    }
+}
