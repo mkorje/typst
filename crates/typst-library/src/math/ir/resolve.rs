@@ -349,32 +349,76 @@ fn resolve_attach<'a, 'v, 'e>(
     ctx: &mut MathResolver<'a, 'v, 'e>,
     styles: StyleChain<'a>,
 ) -> SourceResult<()> {
-    let merged = elem.merge_base();
-    let elem = merged.map_or(elem, |x| ctx.arenas.bump.alloc(x));
-    let bumped_styles = ctx.arenas.bump.alloc(styles);
+    let outer_attachments = &mut [const { None }; 6];
+    let item = resolve_inner_attach(elem, outer_attachments, false, ctx, styles)?;
+    ctx.push(item);
+    Ok(())
+}
 
-    let base = ctx.resolve_into_item(&elem.base, styles)?;
+/// Recursively resolve the base of an `AttachElem`, merging outer attachments
+/// inwards.
+fn resolve_inner_attach<'a, 'v, 'e>(
+    elem: &'a Packed<AttachElem>,
+    outer_attachments: &mut [Option<Content>; 6],
+    outer_primed: bool,
+    ctx: &mut MathResolver<'a, 'v, 'e>,
+    styles: StyleChain<'a>,
+) -> SourceResult<MathItem<'a>> {
+    // Lifetime-extend the super/subscript styles.
+    let bumped_styles = ctx.arenas.bump.alloc(styles);
     let sup_style = ctx.store_styles(style_for_superscript(styles));
     let sup_style_chain = bumped_styles.chain(sup_style);
-    let tl = elem.tl.get_cloned(sup_style_chain);
-    let tr = elem.tr.get_cloned(sup_style_chain);
-    let primed = tr.as_ref().is_some_and(|content| content.is::<PrimesElem>());
-    let t = elem.t.get_cloned(sup_style_chain);
-
     let sub_style = ctx.store_styles(style_for_subscript(styles));
     let sub_style_chain = bumped_styles.chain(sub_style);
-    let bl = elem.bl.get_cloned(sub_style_chain);
-    let br = elem.br.get_cloned(sub_style_chain);
-    let b = elem.b.get_cloned(sub_style_chain);
 
+    // Get the merged attachments without resolving them to items yet.
+    let (primed, primed_from_merge);
+    let mut attachments = {
+        let [o_t, o_b, o_tl, o_tr, o_bl, o_br] = outer_attachments;
+
+        let t = elem.t.get_cloned(sup_style_chain).or_else(|| o_t.take());
+        let tl = elem.tl.get_cloned(sup_style_chain).or_else(|| o_tl.take());
+        let tr = elem.tr.get_cloned(sup_style_chain).or_else(|| o_tr.take());
+        primed = tr.as_ref().is_some_and(|content| content.is::<PrimesElem>());
+        primed_from_merge = primed && outer_primed && o_tr.is_none();
+
+        let b = elem.b.get_cloned(sub_style_chain).or_else(|| o_b.take());
+        let bl = elem.bl.get_cloned(sub_style_chain).or_else(|| o_bl.take());
+        let br = elem.br.get_cloned(sub_style_chain).or_else(|| o_br.take());
+
+        [t, b, tl, tr, bl, br]
+    };
+
+    // Resolve the base.
+    let mut base_elem = &elem.base;
+    // Extract from a nested EquationElem.
+    while let Some(equation) = base_elem.to_packed::<EquationElem>() {
+        base_elem = &equation.body;
+    }
+    let base = if let Some(base_elem) = base_elem.to_packed::<AttachElem>() {
+        // Recursively merge the outer attachments inwards.
+        resolve_inner_attach(base_elem, &mut attachments, primed, ctx, styles)?
+    } else {
+        ctx.resolve_into_item(base_elem, styles)?
+    };
+
+    // If we're not actually attaching anything, just return the base.
+    if attachments.iter().all(|a| a.is_none()) {
+        return Ok(base);
+    }
+
+    // Apply limits, being careful about top-right primes.
+    let [t, b, tl, tr, bl, br] = attachments;
     let limits = base.limits().active(styles);
     let (t, tr) = match (t, tr) {
-        (Some(t), Some(tr)) if primed && !limits => (None, Some(tr + t)),
+        (Some(t), Some(tr)) if !limits && primed_from_merge => (None, Some(t + tr)),
+        (Some(t), Some(tr)) if !limits && primed => (None, Some(tr + t)),
         (Some(t), None) if !limits => (None, Some(t)),
         (t, tr) => (t, tr),
     };
     let (b, br) = if limits || br.is_some() { (b, br) } else { (None, b) };
 
+    // Finally, resolve the attachments into items.
     macro_rules! layout {
         ($content:ident, $style_chain:ident) => {
             $content
@@ -390,7 +434,7 @@ fn resolve_attach<'a, 'v, 'e>(
     let top_right = layout!(tr, sup_style_chain)?;
     let bottom_right = layout!(br, sub_style_chain)?;
 
-    ctx.push(ScriptsItem::create(
+    Ok(ScriptsItem::create(
         base,
         top,
         bottom,
@@ -400,9 +444,7 @@ fn resolve_attach<'a, 'v, 'e>(
         bottom_right,
         styles,
         &ctx.arenas.bump,
-    ));
-
-    Ok(())
+    ))
 }
 
 fn resolve_primes<'a, 'v, 'e>(

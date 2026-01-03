@@ -49,6 +49,30 @@ $ <_' $
 $ limits(x)^' $
 $ attach(limits(x), t: ') $
 
+--- math-primes-merge-top paged ---
+// Test prime attachment merging with the top field.
+$
+        attach(attach(a, tr: '), t: b)
+  &quad attach(attach(a, t: b), tr: ')
+  &quad attach(attach(attach(a, tl: '), t: b), tr: ')
+  &quad attach(attach(attach(a, tr: '), t: b), tr: ')
+  \
+        attach(attach(product, tr: '), t: b)
+  &quad attach(attach(product, t: b), tr: ')
+  &quad attach(attach(attach(product, tl: '), t: b), tr: ')
+  &quad attach(attach(attach(product, tr: '), t: b), tr: ')
+$
+
+--- math-primes-merge-top-and-right paged ---
+// Don't join `t` and `tr` when there is an outer prime.
+$
+  attach(attach(a, t: b, tr: c), tr: ')
+  quad
+  attach(attach(a, t: b, tr: '), tr: ')
+  quad
+  attach(attach(a, tr: '), t: b, tr: c)
+$
+
 --- math-primes-after-code-expr paged ---
 // Test prime symbols after code mode.
 #let g = $f$
