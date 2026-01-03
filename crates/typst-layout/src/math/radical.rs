@@ -134,6 +134,6 @@ pub fn layout_radical(
     frame.push(line_pos, line);
     frame.push_frame(radicand_pos, radicand);
 
-    ctx.push(FrameFragment::new(props, styles, frame));
+    ctx.push(FrameFragment::new(props, styles, frame.mark_box()));
     Ok(())
 }

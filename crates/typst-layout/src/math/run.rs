@@ -48,7 +48,7 @@ impl MathFragmentsExt for Vec<MathFragment> {
 
     fn into_frame(self, styles: StyleChain) -> Frame {
         if !self.is_multiline() {
-            self.into_line_frame(&[], LeftRightAlternator::Right)
+            self.into_line_frame(&[], LeftRightAlternator::Left)
         } else {
             self.multiline_frame_builder(styles).build()
         }
@@ -100,6 +100,7 @@ impl MathFragmentsExt for Vec<MathFragment> {
         points: &[Abs],
         mut alternator: LeftRightAlternator,
     ) -> Frame {
+        dbg!(&self);
         let ascent = self.ascent();
         let mut frame = Frame::soft(Size::new(Abs::zero(), ascent + self.descent()));
         frame.set_baseline(ascent);
@@ -137,12 +138,13 @@ impl MathFragmentsExt for Vec<MathFragment> {
             }
 
             let y = ascent - fragment.ascent();
+            x -= fragment.width();
             let pos = Point::new(x, y);
-            x += fragment.width();
             frame.push_frame(pos, fragment.into_frame());
         }
 
-        frame.size_mut().x = x;
+        frame.size_mut().x = x.abs();
+        frame.translate(Point::with_x(x.abs()));
         frame
     }
 
@@ -158,8 +160,9 @@ impl MathFragmentsExt for Vec<MathFragment> {
         let mut frame = Frame::soft(Size::zero());
         let mut empty = true;
 
-        let finalize_frame = |frame: &mut Frame, x, ascent, descent| {
-            frame.set_size(Size::new(x, ascent + descent));
+        let finalize_frame = |frame: &mut Frame, x: Abs, ascent, descent| {
+            frame.set_size(Size::new(x.abs(), ascent + descent));
+            frame.translate(Point::with_x(x.abs()));
             frame.set_baseline(Abs::zero());
             frame.translate(Point::with_y(ascent));
         };
@@ -190,8 +193,8 @@ impl MathFragmentsExt for Vec<MathFragment> {
             ascent.set_max(y);
             descent.set_max(fragment.descent());
 
+            x -= fragment.width();
             let pos = Point::new(x, -y);
-            x += fragment.width();
             frame.push_frame(pos, fragment.into_frame());
             empty = false;
 

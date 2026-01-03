@@ -248,6 +248,7 @@ impl GlyphFragment {
             variant(styles),
             features(styles),
             language(styles),
+            styles.resolve(TextElem::dir),
             styles.get(TextElem::fallback),
             text,
             families(styles).collect(),

@@ -46,12 +46,12 @@ pub fn layout_scripts(
     let base = ctx.layout_into_fragment(&item.base, styles)?;
 
     let fragments = [
-        layout!(top_left),
-        t,
         layout!(top_right),
-        layout!(bottom_left),
-        b,
+        t,
+        layout!(top_left),
         layout!(bottom_right),
+        b,
+        layout!(bottom_left),
     ];
 
     layout_attachments(ctx, props, item.base.styles().unwrap_or(styles), base, fragments)
