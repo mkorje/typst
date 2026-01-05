@@ -79,6 +79,8 @@
               pkgs.pkg-config
               pkgs.openssl.dev
             ];
+
+            RUSTFLAGS = "-C link-arg=-Wl,-rpath,${lib.makeLibraryPath [ pkgs.openssl ]}";
           };
 
           # Derivation with just the dependencies, so we don't have to keep
@@ -153,12 +155,15 @@
 
             RUST_SRC_PATH = "${rust-toolchain.rust-src}/lib/rustlib/src/rust/library";
 
-            packages = [
+            packages = with pkgs; [
               # A script for quickly running tests.
               # See https://github.com/typst/typst/blob/main/tests/README.md#making-an-alias
-              (pkgs.writeShellScriptBin "testit" ''
+              (writeShellScriptBin "testit" ''
                 cargo test --workspace --test tests -- "$@"
               '')
+              firefox
+              chromium
+              epiphany
             ];
           };
         };
