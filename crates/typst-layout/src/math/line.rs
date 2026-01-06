@@ -1,7 +1,7 @@
 use typst_library::diag::SourceResult;
 use typst_library::foundations::StyleChain;
 use typst_library::layout::{Abs, Frame, FrameItem, Point, Size};
-use typst_library::math::ir::{LineItem, MathProperties};
+use typst_library::math::ir::{LineItem, MathProperties, Position};
 use typst_library::text::TextElem;
 use typst_library::visualize::{FixedStroke, Geometry};
 
@@ -17,32 +17,35 @@ pub fn layout_line(
     props: &MathProperties,
 ) -> SourceResult<()> {
     let (extra_height, content, line_pos, content_pos, baseline, bar_height, line_adjust);
-    if item.under {
-        content = ctx.layout_into_fragment(&item.base, styles)?;
+    match item.position {
+        Position::Below => {
+            content = ctx.layout_into_fragment(&item.base, styles)?;
 
-        let (font, size) = content.font(ctx, item.base.styles().unwrap_or(styles));
-        let sep = font.math().underbar_extra_descender.at(size);
-        bar_height = font.math().underbar_rule_thickness.at(size);
-        let gap = font.math().underbar_vertical_gap.at(size);
-        extra_height = sep + bar_height + gap;
+            let (font, size) = content.font(ctx, item.base.styles().unwrap_or(styles));
+            let sep = font.math().underbar_extra_descender.at(size);
+            bar_height = font.math().underbar_rule_thickness.at(size);
+            let gap = font.math().underbar_vertical_gap.at(size);
+            extra_height = sep + bar_height + gap;
 
-        line_pos = Point::with_y(content.height() + gap + bar_height / 2.0);
-        content_pos = Point::zero();
-        baseline = content.ascent();
-        line_adjust = -content.italics_correction();
-    } else {
-        content = ctx.layout_into_fragment(&item.base, styles)?;
+            line_pos = Point::with_y(content.height() + gap + bar_height / 2.0);
+            content_pos = Point::zero();
+            baseline = content.ascent();
+            line_adjust = -content.italics_correction();
+        }
+        Position::Above => {
+            content = ctx.layout_into_fragment(&item.base, styles)?;
 
-        let (font, size) = content.font(ctx, item.base.styles().unwrap_or(styles));
-        let sep = font.math().overbar_extra_ascender.at(size);
-        bar_height = font.math().overbar_rule_thickness.at(size);
-        let gap = font.math().overbar_vertical_gap.at(size);
-        extra_height = sep + bar_height + gap;
+            let (font, size) = content.font(ctx, item.base.styles().unwrap_or(styles));
+            let sep = font.math().overbar_extra_ascender.at(size);
+            bar_height = font.math().overbar_rule_thickness.at(size);
+            let gap = font.math().overbar_vertical_gap.at(size);
+            extra_height = sep + bar_height + gap;
 
-        line_pos = Point::with_y(sep + bar_height / 2.0);
-        content_pos = Point::with_y(extra_height);
-        baseline = content.ascent() + extra_height;
-        line_adjust = Abs::zero();
+            line_pos = Point::with_y(sep + bar_height / 2.0);
+            content_pos = Point::with_y(extra_height);
+            baseline = content.ascent() + extra_height;
+            line_adjust = Abs::zero();
+        }
     }
 
     let width = content.width();

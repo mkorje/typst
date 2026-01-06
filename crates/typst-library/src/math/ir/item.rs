@@ -701,8 +701,8 @@ pub struct AccentItem<'a> {
     pub base: MathItem<'a>,
     /// The accent mark item.
     pub accent: MathItem<'a>,
-    /// Whether this is a bottom accent as opposed to a top accent.
-    pub is_bottom: bool,
+    /// Whether this is a top or bottom accent.
+    pub position: Position,
     /// Whether the item's width should include the accent's width.
     ///
     /// Only used in paged export.
@@ -716,14 +716,14 @@ impl<'a> AccentItem<'a> {
     pub(crate) fn create(
         base: MathItem<'a>,
         accent: MathItem<'a>,
-        is_bottom: bool,
+        position: Position,
         exact_frame_width: bool,
         styles: StyleChain<'a>,
         bump: &'a Bump,
     ) -> MathItem<'a> {
         let props = MathProperties::with_explicit_class(styles, base.class());
         let kind = MathKind::Accent(BumpBox::new_in(
-            Self { base, accent, is_bottom, exact_frame_width },
+            Self { base, accent, position, exact_frame_width },
             bump,
         ));
         MathComponent { kind, props, styles }.into()
@@ -784,8 +784,8 @@ impl<'a> CancelItem<'a> {
 pub struct LineItem<'a> {
     /// The base item.
     pub base: MathItem<'a>,
-    /// Whether the line is drawn below the base rather than above.
-    pub under: bool,
+    /// Whether the line is drawn above or below the base.
+    pub position: Position,
 }
 
 impl<'a> LineItem<'a> {
@@ -794,14 +794,14 @@ impl<'a> LineItem<'a> {
     /// The resulting item inherits its math class from the base.
     pub(crate) fn create(
         base: MathItem<'a>,
-        under: bool,
+        position: Position,
         styles: StyleChain<'a>,
         span: Span,
         bump: &'a Bump,
     ) -> MathItem<'a> {
         let props =
             MathProperties::with_explicit_class(styles, base.class()).with_span(span);
-        let kind = MathKind::Line(BumpBox::new_in(Self { base, under }, bump));
+        let kind = MathKind::Line(BumpBox::new_in(Self { base, position }, bump));
         MathComponent { kind, props, styles }.into()
     }
 }
@@ -1063,4 +1063,13 @@ impl MulAssign for StretchInfo {
         );
         self.short_fall = rhs.short_fall;
     }
+}
+
+/// A marker representing the positioning of something above or below a base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Position {
+    /// Placed above the base.
+    Above,
+    /// Placed below the base.
+    Below,
 }

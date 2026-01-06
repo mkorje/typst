@@ -301,12 +301,12 @@ fn resolve_accent<'a, 'v, 'e>(
     styles: StyleChain<'a>,
 ) -> SourceResult<()> {
     let accent = elem.accent;
-    let top_accent = !accent.is_bottom();
+    let position = if accent.is_bottom() { Position::Below } else { Position::Above };
 
     let mut new_styles = Styles::new();
     new_styles.apply(style_cramped().into());
     // Try to replace the base glyph with its dotless variant.
-    if top_accent && elem.dotless.get(styles) {
+    if position == Position::Above && elem.dotless.get(styles) {
         new_styles.apply(style_dtls().into());
     }
 
@@ -320,14 +320,7 @@ fn resolve_accent<'a, 'v, 'e>(
     let width = elem.size.resolve(styles);
     accent.set_stretch(Stretch::new().with_x(StretchInfo::new(width, ACCENT_SHORT_FALL)));
 
-    ctx.push(AccentItem::create(
-        base,
-        accent,
-        !top_accent,
-        false,
-        styles,
-        &ctx.arenas.bump,
-    ));
+    ctx.push(AccentItem::create(base, accent, position, false, styles, &ctx.arenas.bump));
     Ok(())
 }
 
@@ -1089,7 +1082,13 @@ fn resolve_underline<'a, 'v, 'e>(
     styles: StyleChain<'a>,
 ) -> SourceResult<()> {
     let base = ctx.resolve_into_item(&elem.body, styles)?;
-    ctx.push(LineItem::create(base, true, styles, elem.span(), &ctx.arenas.bump));
+    ctx.push(LineItem::create(
+        base,
+        Position::Below,
+        styles,
+        elem.span(),
+        &ctx.arenas.bump,
+    ));
     Ok(())
 }
 
@@ -1103,7 +1102,13 @@ fn resolve_overline<'a, 'v, 'e>(
 ) -> SourceResult<()> {
     let cramped_styles = ctx.chain_styles(styles, style_cramped());
     let base = ctx.resolve_into_item(&elem.body, cramped_styles)?;
-    ctx.push(LineItem::create(base, false, styles, elem.span(), &ctx.arenas.bump));
+    ctx.push(LineItem::create(
+        base,
+        Position::Above,
+        styles,
+        elem.span(),
+        &ctx.arenas.bump,
+    ));
     Ok(())
 }
 
@@ -1119,7 +1124,7 @@ fn resolve_underbrace<'a, 'v, 'e>(
         &elem.body,
         elem.annotation.get_ref(styles),
         '⏟',
-        Position::Under,
+        Position::Below,
         elem.span(),
     )
 }
@@ -1136,7 +1141,7 @@ fn resolve_overbrace<'a, 'v, 'e>(
         &elem.body,
         elem.annotation.get_ref(styles),
         '⏞',
-        Position::Over,
+        Position::Above,
         elem.span(),
     )
 }
@@ -1153,7 +1158,7 @@ fn resolve_underbracket<'a, 'v, 'e>(
         &elem.body,
         elem.annotation.get_ref(styles),
         '⎵',
-        Position::Under,
+        Position::Below,
         elem.span(),
     )
 }
@@ -1170,7 +1175,7 @@ fn resolve_overbracket<'a, 'v, 'e>(
         &elem.body,
         elem.annotation.get_ref(styles),
         '⎴',
-        Position::Over,
+        Position::Above,
         elem.span(),
     )
 }
@@ -1187,7 +1192,7 @@ fn resolve_underparen<'a, 'v, 'e>(
         &elem.body,
         elem.annotation.get_ref(styles),
         '⏝',
-        Position::Under,
+        Position::Below,
         elem.span(),
     )
 }
@@ -1204,7 +1209,7 @@ fn resolve_overparen<'a, 'v, 'e>(
         &elem.body,
         elem.annotation.get_ref(styles),
         '⏜',
-        Position::Over,
+        Position::Above,
         elem.span(),
     )
 }
@@ -1221,7 +1226,7 @@ fn resolve_undershell<'a, 'v, 'e>(
         &elem.body,
         elem.annotation.get_ref(styles),
         '⏡',
-        Position::Under,
+        Position::Below,
         elem.span(),
     )
 }
@@ -1238,7 +1243,7 @@ fn resolve_overshell<'a, 'v, 'e>(
         &elem.body,
         elem.annotation.get_ref(styles),
         '⏠',
-        Position::Over,
+        Position::Above,
         elem.span(),
     )
 }
@@ -1263,14 +1268,7 @@ fn resolve_underoverspreader<'a, 'v, 'e>(
     accent.set_class(MathClass::Diacritic);
     accent.set_stretch(Stretch::new().with_x(StretchInfo::new(Rel::one(), Em::zero())));
 
-    let base = AccentItem::create(
-        base,
-        accent,
-        matches!(position, Position::Under),
-        true,
-        styles,
-        &ctx.arenas.bump,
-    );
+    let base = AccentItem::create(base, accent, position, true, styles, &ctx.arenas.bump);
 
     let Some(annotation) = annotation else {
         ctx.push(base);
@@ -1278,7 +1276,7 @@ fn resolve_underoverspreader<'a, 'v, 'e>(
     };
 
     let base = match position {
-        Position::Under => {
+        Position::Below => {
             let under_styles = ctx.chain_styles(styles, style_for_subscript(styles));
             let annotation = ctx.resolve_into_item(annotation, under_styles)?;
             ScriptsItem::create(
@@ -1293,7 +1291,7 @@ fn resolve_underoverspreader<'a, 'v, 'e>(
                 &ctx.arenas.bump,
             )
         }
-        Position::Over => {
+        Position::Above => {
             let over_styles = ctx.chain_styles(styles, style_for_superscript(styles));
             let annotation = ctx.resolve_into_item(annotation, over_styles)?;
             ScriptsItem::create(

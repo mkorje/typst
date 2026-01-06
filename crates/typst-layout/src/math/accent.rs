@@ -1,7 +1,7 @@
 use typst_library::diag::SourceResult;
 use typst_library::foundations::StyleChain;
 use typst_library::layout::{Abs, Axis, Frame, Point, Size};
-use typst_library::math::ir::{AccentItem, MathProperties};
+use typst_library::math::ir::{AccentItem, MathProperties, Position};
 
 use super::MathContext;
 use super::fragment::FrameFragment;
@@ -14,7 +14,7 @@ pub fn layout_accent(
     styles: StyleChain,
     props: &MathProperties,
 ) -> SourceResult<()> {
-    let top_accent = !item.is_bottom;
+    let top_accent = item.position == Position::Above;
 
     let base = ctx.layout_into_fragment(&item.base, styles)?;
     let (font, size) = base.font(ctx, item.base.styles().unwrap_or(styles));
