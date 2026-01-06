@@ -1,7 +1,8 @@
 use typst_library::diag::SourceResult;
 use typst_library::foundations::StyleChain;
 use typst_library::layout::{Abs, Axis, Frame, FrameItem, Point, Size};
-use typst_library::math::{FractionItem, MathProperties, MathSize, SkewedFractionItem};
+use typst_library::math::MathSize;
+use typst_library::math::ir::{FractionItem, MathProperties, SkewedFractionItem};
 use typst_library::text::TextElem;
 use typst_library::visualize::{FixedStroke, Geometry};
 
@@ -50,7 +51,7 @@ pub fn layout_fraction(
         (shift_down + (axis - thickness / 2.0) - denom.ascent()).max(denom_min);
 
     let line_width = num.width().max(denom.width());
-    let width = line_width + 2.0 * item.around.at(size);
+    let width = line_width + 2.0 * item.padding.at(size);
     let height = num.height() + num_gap + thickness + denom_gap + denom.height();
     let size = Size::new(width, height);
     let num_pos = Point::with_x((width - num.width()) / 2.0);

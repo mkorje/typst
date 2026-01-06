@@ -1,7 +1,7 @@
 use typst_library::diag::SourceResult;
 use typst_library::foundations::StyleChain;
 use typst_library::layout::{Abs, Axis};
-use typst_library::math::{FencedItem, MathProperties};
+use typst_library::math::ir::{FencedItem, MathProperties};
 
 use super::MathContext;
 

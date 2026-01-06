@@ -1,7 +1,7 @@
 use typst_library::diag::SourceResult;
 use typst_library::foundations::StyleChain;
 use typst_library::layout::{Abs, Frame, FrameItem, Point, Size};
-use typst_library::math::{LineItem, MathProperties};
+use typst_library::math::ir::{LineItem, MathProperties};
 use typst_library::text::TextElem;
 use typst_library::visualize::{FixedStroke, Geometry};
 

@@ -21,10 +21,10 @@ use typst_library::layout::{
     Abs, AlignElem, Axes, BlockElem, Em, FixedAlignment, Fragment, Frame, InlineItem,
     OuterHAlignment, Point, Region, Regions, Size, SpecificAlignment, VAlignment,
 };
-use typst_library::math::{
-    BoxItem, EquationElem, ExternalItem, MathItem, MathKind, MathProperties, families,
-    resolve_equation,
+use typst_library::math::ir::{
+    BoxItem, ExternalItem, MathItem, MathKind, MathProperties, resolve_equation,
 };
+use typst_library::math::{EquationElem, families};
 use typst_library::model::ParElem;
 use typst_library::routines::Arenas;
 use typst_library::text::{Font, FontFlags, TextEdgeBounds, TextElem, variant};

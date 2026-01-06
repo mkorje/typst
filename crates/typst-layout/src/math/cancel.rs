@@ -3,7 +3,8 @@ use typst_library::diag::{At, SourceResult};
 use typst_library::engine::Engine;
 use typst_library::foundations::{Context, Smart, StyleChain};
 use typst_library::layout::{Abs, Angle, Frame, FrameItem, Point, Rel, Size, Transform};
-use typst_library::math::{CancelAngle, CancelItem, MathProperties};
+use typst_library::math::CancelAngle;
+use typst_library::math::ir::{CancelItem, MathProperties};
 use typst_library::visualize::{FixedStroke, Geometry};
 use typst_syntax::Span;
 

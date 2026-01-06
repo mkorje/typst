@@ -11,7 +11,8 @@ use typst_library::introspection::Tag;
 use typst_library::layout::{
     Abs, Axes, Axis, Corner, Em, Frame, FrameItem, Point, Size, VAlignment,
 };
-use typst_library::math::{EquationElem, MathProperties, MathSize, families};
+use typst_library::math::ir::MathProperties;
+use typst_library::math::{EquationElem, MathSize, families};
 use typst_library::text::{Font, Glyph, TextElem, TextItem, features, language, variant};
 use typst_library::visualize::Paint;
 use typst_syntax::Span;

@@ -2,9 +2,8 @@ use ecow::EcoString;
 use typst_library::diag::SourceResult;
 use typst_library::foundations::{Resolve, StyleChain};
 use typst_library::layout::{Abs, Axis, Size};
-use typst_library::math::{
-    GlyphItem, MathProperties, MathSize, TextItem, style_dtls, style_flac,
-};
+use typst_library::math::ir::{GlyphItem, MathProperties, TextItem};
+use typst_library::math::{MathSize, style_dtls, style_flac};
 use typst_library::text::{
     BottomEdge, BottomEdgeMetric, Font, TextElem, TopEdge, TopEdgeMetric,
 };

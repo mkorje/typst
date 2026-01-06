@@ -1,7 +1,7 @@
 use typst_library::diag::SourceResult;
 use typst_library::foundations::StyleChain;
 use typst_library::layout::{Abs, Axis, Frame, Point, Size};
-use typst_library::math::{AccentItem, MathProperties};
+use typst_library::math::ir::{AccentItem, MathProperties};
 
 use super::MathContext;
 use super::fragment::FrameFragment;

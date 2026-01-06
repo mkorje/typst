@@ -1,7 +1,8 @@
 use typst_library::diag::SourceResult;
 use typst_library::foundations::StyleChain;
 use typst_library::layout::{Abs, Axis, Frame, FrameItem, Point, Size};
-use typst_library::math::{EquationElem, MathProperties, MathSize, RadicalItem};
+use typst_library::math::ir::{MathProperties, RadicalItem};
+use typst_library::math::{EquationElem, MathSize};
 use typst_library::text::TextElem;
 use typst_library::visualize::{FixedStroke, Geometry};
 

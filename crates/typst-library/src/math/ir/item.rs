@@ -1,35 +1,37 @@
 #![allow(clippy::too_many_arguments)]
 use std::cell::Cell;
-use std::ops::{Deref, DerefMut, MulAssign};
+use std::ops::MulAssign;
 
 use bumpalo::{Bump, boxed::Box as BumpBox, collections::Vec as BumpVec};
 use ecow::EcoString;
-use smallvec::SmallVec;
 use typst_syntax::Span;
 use typst_utils::{Get, default_math_class};
 use unicode_math_class::MathClass;
 use unicode_segmentation::UnicodeSegmentation;
 
+use super::preprocess::preprocess;
 use crate::foundations::{Content, Packed, Smart, StyleChain};
 use crate::introspection::Tag;
 use crate::layout::{Abs, Axes, Axis, BoxElem, Em, FixedAlignment, PlaceElem, Rel};
 use crate::math::{
-    Augment, CancelAngle, EquationElem, LeftRightAlternator, Limits, MEDIUM, MathSize,
-    THICK, THIN,
+    Augment, CancelAngle, EquationElem, LeftRightAlternator, Limits, MathSize,
 };
-use crate::routines::Arenas;
 use crate::visualize::FixedStroke;
 
 /// The top-level item in the math IR.
 #[derive(Debug)]
 pub enum MathItem<'a> {
-    // A layoutable component with properties.
+    /// A layoutable component with associated properties and styles.
     Component(MathComponent<'a>),
-    // Special, non-component items.
+    /// Explicit spacing. The boolean indicates whether the spacing is weak.
     Spacing(Abs, bool),
+    /// A regular space.
     Space,
+    /// A line break.
     Linebreak,
+    /// An alignment point.
     Align,
+    /// An introspection tag.
     Tag(Tag),
 }
 
@@ -40,6 +42,7 @@ impl<'a> From<MathComponent<'a>> for MathItem<'a> {
 }
 
 impl<'a> MathItem<'a> {
+    /// Returns the limit placement configuration for this item.
     pub(crate) fn limits(&self) -> Limits {
         match self {
             Self::Component(comp) => comp.props.limits,
@@ -47,6 +50,7 @@ impl<'a> MathItem<'a> {
         }
     }
 
+    /// Returns the math class of this item.
     pub(crate) fn class(&self) -> MathClass {
         match self {
             Self::Component(comp) => comp.props.class,
@@ -55,6 +59,10 @@ impl<'a> MathItem<'a> {
         }
     }
 
+    /// Returns the effective math class on the right side of this item.
+    ///
+    /// For fenced items with a closing delimiter, this returns the closing
+    /// class instead of the item's overall class.
     pub(crate) fn rclass(&self) -> MathClass {
         match self {
             Self::Component(MathComponent { kind: MathKind::Fenced(fence), .. })
@@ -66,6 +74,10 @@ impl<'a> MathItem<'a> {
         }
     }
 
+    /// Returns the effective math class on the left side of this item.
+    ///
+    /// For fenced items with an opening delimiter, this returns the opening
+    /// class instead of the item's overall class.
     pub(crate) fn lclass(&self) -> MathClass {
         match self {
             Self::Component(MathComponent { kind: MathKind::Fenced(fence), .. })
@@ -77,6 +89,7 @@ impl<'a> MathItem<'a> {
         }
     }
 
+    /// Returns the math size of this item, if it is a component.
     pub(crate) fn size(&self) -> Option<MathSize> {
         match self {
             Self::Component(comp) => Some(comp.props.size),
@@ -84,6 +97,7 @@ impl<'a> MathItem<'a> {
         }
     }
 
+    /// Whether this item should have explicit spaces around it.
     pub(crate) fn is_spaced(&self) -> bool {
         if self.class() == MathClass::Fence {
             return true;
@@ -99,6 +113,7 @@ impl<'a> MathItem<'a> {
         }
     }
 
+    /// Whether this item should be ignored for spacing calculations.
     pub(crate) fn is_ignorant(&self) -> bool {
         match self {
             Self::Component(comp) => comp.props.ignorant,
@@ -107,6 +122,7 @@ impl<'a> MathItem<'a> {
         }
     }
 
+    /// Returns the source span of this item.
     pub fn span(&self) -> Span {
         match self {
             Self::Component(comp) => comp.props.span,
@@ -114,6 +130,7 @@ impl<'a> MathItem<'a> {
         }
     }
 
+    /// Returns the style chain of this item, if it is a component.
     pub fn styles(&self) -> Option<StyleChain<'a>> {
         match self {
             Self::Component(comp) => Some(comp.styles),
@@ -121,6 +138,7 @@ impl<'a> MathItem<'a> {
         }
     }
 
+    /// Returns whether this glyph has been stretched as a middle delimiter.
     pub fn mid_stretched(&self) -> Option<bool> {
         if let Self::Component(comp) = self
             && let MathKind::Glyph(glyph) = &comp.kind
@@ -131,6 +149,7 @@ impl<'a> MathItem<'a> {
         }
     }
 
+    /// Whether this item contains multiple lines.
     pub fn is_multiline(&self) -> bool {
         let items = self.as_slice();
         let len = items.len();
@@ -166,6 +185,7 @@ impl<'a> MathItem<'a> {
         false
     }
 
+    /// Whether this item ends with a line break.
     fn ends_with_linebreak(&self) -> bool {
         match self.as_slice().last() {
             Some(MathItem::Linebreak) => true,
@@ -189,30 +209,35 @@ impl<'a> MathItem<'a> {
         }
     }
 
+    /// Sets the limit placement configuration for this item.
     pub(crate) fn set_limits(&mut self, limits: Limits) {
         if let Self::Component(comp) = self {
             comp.props.limits = limits;
         }
     }
 
+    /// Sets the math class of this item.
     pub(crate) fn set_class(&mut self, class: MathClass) {
         if let Self::Component(comp) = self {
             comp.props.class = class;
         }
     }
 
+    /// Sets the left spacing for this item.
     pub(crate) fn set_lspace(&mut self, lspace: Option<Em>) {
         if let Self::Component(comp) = self {
             comp.props.lspace = lspace;
         }
     }
 
+    /// Sets the right spacing for this item.
     pub(crate) fn set_rspace(&mut self, rspace: Option<Em>) {
         if let Self::Component(comp) = self {
             comp.props.rspace = rspace;
         }
     }
 
+    /// Sets whether this glyph has been stretched as a middle delimiter.
     pub(crate) fn set_mid_stretched(&self, mid_stretched: Option<bool>) {
         if let Self::Component(comp) = self
             && let MathKind::Glyph(glyph) = &comp.kind
@@ -221,6 +246,7 @@ impl<'a> MathItem<'a> {
         }
     }
 
+    /// Sets the stretch configuration for this glyph.
     pub(crate) fn set_stretch(&self, stretch: Stretch) {
         if let Self::Component(comp) = self
             && let MathKind::Glyph(glyph) = &comp.kind
@@ -229,6 +255,7 @@ impl<'a> MathItem<'a> {
         }
     }
 
+    /// Updates the vertical stretch info for this glyph.
     pub(crate) fn set_y_stretch(&self, info: StretchInfo) {
         if let Self::Component(comp) = self
             && let MathKind::Glyph(glyph) = &comp.kind
@@ -237,6 +264,7 @@ impl<'a> MathItem<'a> {
         }
     }
 
+    /// Updates the stretch info for both axes of this glyph.
     pub(crate) fn update_stretch(&self, info: StretchInfo) {
         if let Self::Component(comp) = self
             && let MathKind::Glyph(glyph) = &comp.kind
@@ -245,6 +273,7 @@ impl<'a> MathItem<'a> {
         }
     }
 
+    /// Sets the reference size for relative stretching on the given axis.
     pub fn set_stretch_relative_to(&self, relative_to: Abs, axis: Axis) {
         if let Self::Component(comp) = self
             && let MathKind::Glyph(glyph) = &comp.kind
@@ -253,6 +282,7 @@ impl<'a> MathItem<'a> {
         }
     }
 
+    /// Sets the font size to use for short-fall calculations on the given axis.
     pub fn set_stretch_font_size(&self, font_size: Abs, axis: Axis) {
         if let Self::Component(comp) = self
             && let MathKind::Glyph(glyph) = &comp.kind
@@ -261,6 +291,7 @@ impl<'a> MathItem<'a> {
         }
     }
 
+    /// Enables the flac OpenType feature for this glyph.
     pub fn set_flac(&self) {
         if let Self::Component(comp) = self
             && let MathKind::Glyph(glyph) = &comp.kind
@@ -270,10 +301,11 @@ impl<'a> MathItem<'a> {
     }
 }
 
-/// A generic component that bundles a specific item with common properties.
+/// A generic component that bundles a specific math item kind with common
+/// properties and styles.
 #[derive(Debug)]
 pub struct MathComponent<'a> {
-    /// The specific item.
+    /// The specific kind of math item.
     pub kind: MathKind<'a>,
     /// The properties attached to this component.
     pub props: MathProperties,
@@ -281,42 +313,68 @@ pub struct MathComponent<'a> {
     pub styles: StyleChain<'a>,
 }
 
-/// A layoutable math item.
+/// The specific kind of a layoutable math item.
 ///
-/// Recursive or large variants are boxed (allocated in bump arena).
+/// Recursive or large variants are boxed (allocated in a bump arena).
 #[derive(Debug)]
 pub enum MathKind<'a> {
+    /// A group of math items laid out horizontally.
     Group(GroupItem<'a>),
-    Text(TextItem<'a>),
-    External(ExternalItem<'a>),
-    Box(BoxItem<'a>),
-    Glyph(BumpBox<'a, GlyphItem>),
-    Line(BumpBox<'a, LineItem<'a>>),
-    Primes(BumpBox<'a, PrimesItem<'a>>),
+    /// A radical (square root or nth root).
     Radical(BumpBox<'a, RadicalItem<'a>>),
+    /// An item enclosed in delimiters.
     Fenced(BumpBox<'a, FencedItem<'a>>),
+    /// A vertical fraction.
     Fraction(BumpBox<'a, FractionItem<'a>>),
+    /// An inline skewed fraction.
     SkewedFraction(BumpBox<'a, SkewedFractionItem<'a>>),
+    /// A 2D collection of math items laid out as a table/matrix.
     Table(BumpBox<'a, TableItem<'a>>),
+    /// A base with scripts (subscripts/superscripts) and/or limits attached.
     Scripts(BumpBox<'a, ScriptsItem<'a>>),
+    /// A base with an accent mark above or below.
     Accent(BumpBox<'a, AccentItem<'a>>),
+    /// A base with a line overlaid.
     Cancel(BumpBox<'a, CancelItem<'a>>),
+    /// A base with a line drawn above or below.
+    Line(BumpBox<'a, LineItem<'a>>),
+    /// Grouped prime symbols.
+    Primes(BumpBox<'a, PrimesItem<'a>>),
+    /// A text string.
+    Text(TextItem<'a>),
+    /// A single glyph (grapheme cluster).
+    Glyph(BumpBox<'a, GlyphItem>),
+    /// Inline content.
+    Box(BoxItem<'a>),
+    /// External content that needs to be laid out separately.
+    External(ExternalItem<'a>),
 }
 
-/// Shared properties for layoutable components.
+/// Shared properties for all layoutable math components.
 #[derive(Debug, Copy, Clone)]
 pub struct MathProperties {
+    /// How attachments should be positioned.
     pub(crate) limits: Limits,
+    /// The math class.
     pub class: MathClass,
+    /// The current math size.
     pub size: MathSize,
+    /// Whether this item should be ignored for spacing calculations.
     pub(crate) ignorant: bool,
+    /// Whether this item should have explicit spaces around it.
     pub(crate) spaced: bool,
+    /// The amount of spacing to the left of this item.
     pub lspace: Option<Em>,
+    /// The amount of spacing to the right of this item.
     pub rspace: Option<Em>,
+    /// The source span.
     pub span: Span,
 }
 
 impl MathProperties {
+    /// Creates default properties from the given styles.
+    ///
+    /// This gets both the math class and size from the styles.
     pub fn default(styles: StyleChain) -> MathProperties {
         Self {
             limits: Limits::Never,
@@ -330,7 +388,7 @@ impl MathProperties {
         }
     }
 
-    /// Creates properties with an explicit class, avoiding the style lookup for class.
+    /// Creates properties with an explicit class, avoiding the style lookup.
     fn with_explicit_class(styles: StyleChain, class: MathClass) -> MathProperties {
         Self {
             limits: Limits::Never,
@@ -362,33 +420,43 @@ impl MathProperties {
         }
     }
 
+    /// Sets whether this item should be ignored for spacing calculations.
     fn with_ignorant(mut self, ignorant: bool) -> Self {
         self.ignorant = ignorant;
         self
     }
 
+    /// Sets whether this item should have explicit spaces around it.
     fn with_spaced(mut self, spaced: bool) -> Self {
         self.spaced = spaced;
         self
     }
 
+    /// Sets the source span for this item.
     fn with_span(mut self, span: Span) -> Self {
         self.span = span;
         self
     }
 }
 
+/// A group of math items laid out horizontally.
 #[derive(Debug)]
 pub struct GroupItem<'a> {
+    /// The items in the group.
     pub items: BumpBox<'a, [MathItem<'a>]>,
 }
 
 impl<'a> GroupItem<'a> {
+    /// Creates a new group item from the given items.
+    ///
+    /// The items are preprocessed to calculate spacing between them. The
+    /// `closing_exists` parameter indicates whether a closing delimiter
+    /// will follow the group of items.
     pub(crate) fn create<I>(
         items: I,
         closing_exists: bool,
         styles: StyleChain<'a>,
-        arenas: &'a Arenas,
+        bump: &'a Bump,
     ) -> MathItem<'a>
     where
         I: IntoIterator<Item = MathItem<'a>>,
@@ -396,19 +464,26 @@ impl<'a> GroupItem<'a> {
     {
         let props = MathProperties::default(styles);
         let kind =
-            MathKind::Group(Self { items: preprocess(items, arenas, closing_exists) });
+            MathKind::Group(Self { items: preprocess(items, bump, closing_exists) });
         MathComponent { kind, props, styles }.into()
     }
 }
 
+/// A radical (square root or nth root).
 #[derive(Debug)]
 pub struct RadicalItem<'a> {
+    /// The item under the radical symbol.
     pub radicand: MathItem<'a>,
+    /// The index for nth roots. `None` for square roots.
     pub index: Option<MathItem<'a>>,
+    /// The radical symbol.
+    ///
+    /// Only used in paged export.
     pub sqrt: MathItem<'a>,
 }
 
 impl<'a> RadicalItem<'a> {
+    /// Creates a new radical item.
     pub(crate) fn create(
         radicand: MathItem<'a>,
         index: Option<MathItem<'a>>,
@@ -424,15 +499,27 @@ impl<'a> RadicalItem<'a> {
     }
 }
 
+/// An item enclosed in delimiters.
 #[derive(Debug)]
 pub struct FencedItem<'a> {
+    /// The optional opening delimiter.
     pub open: Option<MathItem<'a>>,
+    /// The optional closing delimiter.
     pub close: Option<MathItem<'a>>,
+    /// The item between the delimiters.
     pub body: MathItem<'a>,
+    /// How the target height for the delimiters should be calculated.
+    ///
+    /// If true, the height for each body item is two times the maximum of its
+    /// ascent and descent. If false, the height for each body item is simply
+    /// its height.
+    ///
+    /// Only used in paged export.
     pub balanced: bool,
 }
 
 impl<'a> FencedItem<'a> {
+    /// Creates a new fenced item.
     pub(crate) fn create(
         open: Option<MathItem<'a>>,
         close: Option<MathItem<'a>>,
@@ -449,26 +536,32 @@ impl<'a> FencedItem<'a> {
     }
 }
 
+/// A vertical fraction.
 #[derive(Debug)]
 pub struct FractionItem<'a> {
+    /// The item in the top part of the fraction.
     pub numerator: MathItem<'a>,
+    /// The item in the bottom part of the fraction.
     pub denominator: MathItem<'a>,
+    /// Whether to draw a fraction line between the numerator and denominator.
     pub line: bool,
-    pub around: Em,
+    /// The amount of padding added before and after the fraction.
+    pub padding: Em,
 }
 
 impl<'a> FractionItem<'a> {
+    /// Creates a new fraction item.
     pub(crate) fn create(
         numerator: MathItem<'a>,
         denominator: MathItem<'a>,
         line: bool,
-        around: Em,
+        padding: Em,
         styles: StyleChain<'a>,
         span: Span,
         bump: &'a Bump,
     ) -> MathItem<'a> {
         let kind = MathKind::Fraction(BumpBox::new_in(
-            Self { numerator, denominator, line, around },
+            Self { numerator, denominator, line, padding },
             bump,
         ));
         let props = MathProperties::default(styles).with_span(span);
@@ -476,14 +569,21 @@ impl<'a> FractionItem<'a> {
     }
 }
 
+/// An inline skewed fraction.
 #[derive(Debug)]
 pub struct SkewedFractionItem<'a> {
+    /// The item in the top-left part of the fraction.
     pub numerator: MathItem<'a>,
+    /// The item in the bottom-right part of the fraction.
     pub denominator: MathItem<'a>,
+    /// The fraction slash symbol.
+    ///
+    /// Only used in paged export.
     pub slash: MathItem<'a>,
 }
 
 impl<'a> SkewedFractionItem<'a> {
+    /// Creates a new skewed fraction item.
     pub(crate) fn create(
         numerator: MathItem<'a>,
         denominator: MathItem<'a>,
@@ -500,17 +600,23 @@ impl<'a> SkewedFractionItem<'a> {
     }
 }
 
+/// A 2D collection of math items laid out as a table/matrix.
 #[derive(Debug)]
 pub struct TableItem<'a> {
-    /// By row.
+    /// The cells of the table, organized by row.
     pub cells: BumpBox<'a, [BumpBox<'a, [MathItem<'a>]>]>,
+    /// The gap between rows and columns.
     pub gap: Axes<Rel<Abs>>,
+    /// Optional augmentation lines to draw.
     pub augment: Option<Augment<Abs>>,
+    /// The alignment for cells.
     pub align: FixedAlignment,
+    /// How to perform left/right alternation for alignment.
     pub alternator: LeftRightAlternator,
 }
 
 impl<'a> TableItem<'a> {
+    /// Creates a new table item.
     pub(crate) fn create(
         cells: Vec<Vec<MathItem<'a>>>,
         gap: Axes<Rel<Abs>>,
@@ -537,18 +643,29 @@ impl<'a> TableItem<'a> {
     }
 }
 
+/// A base with scripts (subscripts/superscripts) and/or limits attached.
 #[derive(Debug)]
 pub struct ScriptsItem<'a> {
+    /// The base item.
     pub base: MathItem<'a>,
+    /// The top attachment (limit above).
     pub top: Option<MathItem<'a>>,
+    /// The bottom attachment (limit below).
     pub bottom: Option<MathItem<'a>>,
+    /// The top-left attachment (pre-superscript).
     pub top_left: Option<MathItem<'a>>,
+    /// The bottom-left attachment (pre-subscript).
     pub bottom_left: Option<MathItem<'a>>,
+    /// The top-right attachment (post-superscript).
     pub top_right: Option<MathItem<'a>>,
+    /// The bottom-right attachment (post-subscript).
     pub bottom_right: Option<MathItem<'a>>,
 }
 
 impl<'a> ScriptsItem<'a> {
+    /// Creates a new scripts item.
+    ///
+    /// The resulting item inherits its math class from the base.
     pub(crate) fn create(
         base: MathItem<'a>,
         top: Option<MathItem<'a>>,
@@ -577,15 +694,25 @@ impl<'a> ScriptsItem<'a> {
     }
 }
 
+/// A base with an accent mark above or below.
 #[derive(Debug)]
 pub struct AccentItem<'a> {
+    /// The base item.
     pub base: MathItem<'a>,
+    /// The accent mark item.
     pub accent: MathItem<'a>,
+    /// Whether this is a bottom accent as opposed to a top accent.
     pub is_bottom: bool,
+    /// Whether the item's width should include the accent's width.
+    ///
+    /// Only used in paged export.
     pub exact_frame_width: bool,
 }
 
 impl<'a> AccentItem<'a> {
+    /// Creates a new accent item.
+    ///
+    /// The resulting item inherits its math class from the base.
     pub(crate) fn create(
         base: MathItem<'a>,
         accent: MathItem<'a>,
@@ -603,17 +730,27 @@ impl<'a> AccentItem<'a> {
     }
 }
 
+/// A base with a line overlaid.
 #[derive(Debug)]
 pub struct CancelItem<'a> {
+    /// The base item.
     pub base: MathItem<'a>,
+    /// The length of the line.
     pub length: Rel<Abs>,
+    /// The stroke for the line.
     pub stroke: FixedStroke,
+    /// Whether a cross (two lines) is drawn instead of a single line.
     pub cross: bool,
+    /// Whether to invert the angle of the first line.
     pub invert_first_line: bool,
+    /// The angle of the line.
     pub angle: Smart<CancelAngle>,
 }
 
 impl<'a> CancelItem<'a> {
+    /// Creates a new cancel item.
+    ///
+    /// The resulting item inherits its math class from the base.
     pub(crate) fn create(
         base: MathItem<'a>,
         length: Rel<Abs>,
@@ -642,13 +779,19 @@ impl<'a> CancelItem<'a> {
     }
 }
 
+/// A base with a line drawn above or below.
 #[derive(Debug)]
 pub struct LineItem<'a> {
+    /// The base item.
     pub base: MathItem<'a>,
+    /// Whether the line is drawn below the base rather than above.
     pub under: bool,
 }
 
 impl<'a> LineItem<'a> {
+    /// Creates a new line item.
+    ///
+    /// The resulting item inherits its math class from the base.
     pub(crate) fn create(
         base: MathItem<'a>,
         under: bool,
@@ -663,13 +806,20 @@ impl<'a> LineItem<'a> {
     }
 }
 
+/// Grouped prime symbols.
+///
+/// This is for more than four prime symbols, since there are only dedicated
+/// Unicode codepoints up to four.
 #[derive(Debug)]
 pub struct PrimesItem<'a> {
+    /// The prime symbol item.
     pub prime: MathItem<'a>,
+    /// The number of primes to display. Always at least five.
     pub count: usize,
 }
 
 impl<'a> PrimesItem<'a> {
+    /// Creates a new primes item.
     pub(crate) fn create(
         prime: MathItem<'a>,
         count: usize,
@@ -682,12 +832,19 @@ impl<'a> PrimesItem<'a> {
     }
 }
 
+/// A text string.
 #[derive(Debug)]
 pub struct TextItem<'a> {
+    /// The text content.
     pub text: &'a str,
 }
 
 impl<'a> TextItem<'a> {
+    /// Creates a new text item.
+    ///
+    /// The `line` parameter indicates that the text does not contain a newline
+    /// and is not a number. If true, then the resulting item is spaced and has
+    /// alphabetic math class.
     pub(crate) fn create(
         text: EcoString,
         line: bool,
@@ -698,7 +855,6 @@ impl<'a> TextItem<'a> {
         let text = bump.alloc_str(&text);
         let kind = MathKind::Text(Self { text });
         let props = if line {
-            // Avoid class lookup when we're going to override it anyway.
             MathProperties::with_explicit_class(styles, MathClass::Alphabetic)
                 .with_spaced(true)
         } else {
@@ -709,99 +865,26 @@ impl<'a> TextItem<'a> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct Stretch(Axes<Option<StretchInfo>>);
-
-impl Stretch {
-    pub(crate) fn new() -> Self {
-        Self(Axes::splat(None))
-    }
-
-    pub(crate) fn with_x(mut self, info: StretchInfo) -> Self {
-        self.0.x = Some(info);
-        self
-    }
-
-    pub(crate) fn with_y(mut self, info: StretchInfo) -> Self {
-        self.0.y = Some(info);
-        self
-    }
-
-    pub(crate) fn update(mut self, info: StretchInfo) -> Self {
-        match &mut self.0.x {
-            Some(val) => *val *= info,
-            None => self.0.x = Some(info),
-        }
-        match &mut self.0.y {
-            Some(val) => *val *= info,
-            None => self.0.y = Some(info),
-        }
-        self
-    }
-
-    pub(crate) fn relative_to(mut self, relative_to: Abs, axis: Axis) -> Self {
-        if let Some(info) = self.0.get_mut(axis)
-            && info.relative_to.is_none()
-        {
-            info.relative_to = Some(relative_to);
-        }
-        self
-    }
-
-    pub(crate) fn font_size(mut self, font_size: Abs, axis: Axis) -> Self {
-        if let Some(info) = self.0.get_mut(axis)
-            && info.font_size.is_none()
-        {
-            info.font_size = Some(font_size);
-        }
-        self
-    }
-
-    pub fn resolve(self, axis: Axis) -> Option<StretchInfo> {
-        self.0.get(axis)
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct StretchInfo {
-    pub target: Rel<Abs>,
-    pub short_fall: Em,
-    // resolved later
-    pub relative_to: Option<Abs>,
-    pub font_size: Option<Abs>,
-}
-
-impl StretchInfo {
-    pub(crate) fn new(target: Rel<Abs>, short_fall: Em) -> Self {
-        Self {
-            target,
-            short_fall,
-            relative_to: None,
-            font_size: None,
-        }
-    }
-}
-
-impl MulAssign for StretchInfo {
-    fn mul_assign(&mut self, rhs: Self) {
-        self.target = Rel::new(
-            self.target.rel * rhs.target.rel,
-            rhs.target.rel.of(self.target.abs) + rhs.target.abs,
-        );
-        self.short_fall = rhs.short_fall;
-    }
-}
-
+/// A single glyph (grapheme cluster).
 #[derive(Debug)]
 pub struct GlyphItem {
+    /// The text content.
     pub text: EcoString,
+    /// How the glyph should be stretched.
     pub stretch: Cell<Stretch>,
+    /// Whether this glyph has been stretched as a middle delimiter.
     pub mid_stretched: Cell<Option<bool>>,
+    /// Whether to apply the flac OpenType feature.
     pub flac: Cell<bool>,
+    /// Whether to try apply the dtls OpenType feature.
     pub dtls: bool,
 }
 
 impl GlyphItem {
+    /// Creates a new glyph item.
+    ///
+    /// The `dtls` parameter indicates that a dotless character was converted
+    /// to its non-dotless version.
     pub(crate) fn create<'a>(
         text: EcoString,
         dtls: bool,
@@ -836,12 +919,17 @@ impl GlyphItem {
     }
 }
 
+/// Inline content.
 #[derive(Debug)]
 pub struct BoxItem<'a> {
+    /// The [`BoxElem`] to layout.
     pub elem: &'a Packed<BoxElem>,
 }
 
 impl<'a> BoxItem<'a> {
+    /// Creates a new box item.
+    ///
+    /// The resulting item is spaced.
     pub(crate) fn create(
         elem: &'a Packed<BoxElem>,
         styles: StyleChain<'a>,
@@ -852,12 +940,18 @@ impl<'a> BoxItem<'a> {
     }
 }
 
+/// External content that needs to be laid out separately.
 #[derive(Debug)]
 pub struct ExternalItem<'a> {
+    /// The content to layout externally.
     pub content: &'a Content,
 }
 
 impl<'a> ExternalItem<'a> {
+    /// Creates a new external item.
+    ///
+    /// The resulting item is spaced and, if the content is a [`PlaceElem`], is
+    /// ignorant.
     pub(crate) fn create(content: &'a Content, styles: StyleChain<'a>) -> MathItem<'a> {
         let kind = MathKind::External(Self { content });
         let props = MathProperties::default(styles)
@@ -867,199 +961,106 @@ impl<'a> ExternalItem<'a> {
     }
 }
 
-/// Takes the given [`MathItem`]s and do some basic processing.
-///
-/// The behavior of spacing around alignment points is subtle and differs from
-/// the `align` environment in amsmath. The current policy is:
-/// > always put the correct spacing between fragments separated by an
-/// > alignment point, and always put the space on the left of the alignment
-/// > point
-fn preprocess<'a, I>(
-    items: I,
-    arenas: &'a Arenas,
-    closing: bool,
-) -> BumpBox<'a, [MathItem<'a>]>
-where
-    I: IntoIterator<Item = MathItem<'a>>,
-    I::IntoIter: ExactSizeIterator,
-{
-    let iter = items.into_iter();
-    let mut resolved = MathBuffer::with_capacity(iter.len());
-    let iter = iter.peekable();
+/// Stretch configuration for a glyph on both axes.
+#[derive(Debug, Clone, Copy)]
+pub struct Stretch(Axes<Option<StretchInfo>>);
 
-    let mut last: Option<usize> = None;
-    let mut space: Option<MathItem> = None;
+impl Stretch {
+    /// Creates a new empty stretch configuration.
+    pub(crate) fn new() -> Self {
+        Self(Axes::splat(None))
+    }
 
-    for mut item in iter {
-        match item {
-            // Tags don't affect layout.
-            MathItem::Tag(_) => {
-                resolved.push(item);
-                continue;
-            }
+    /// Adds horizontal stretch information.
+    pub(crate) fn with_x(mut self, info: StretchInfo) -> Self {
+        self.0.x = Some(info);
+        self
+    }
 
-            // Keep space only if supported by spaced items.
-            MathItem::Space => {
-                if last.is_some() {
-                    space = Some(item);
-                }
-                continue;
-            }
+    /// Adds vertical stretch information.
+    pub(crate) fn with_y(mut self, info: StretchInfo) -> Self {
+        self.0.y = Some(info);
+        self
+    }
 
-            // Explicit spacing disables automatic spacing.
-            MathItem::Spacing(width, weak) => {
-                last = None;
-                space = None;
-
-                if weak {
-                    let Some(resolved_last) = resolved.last_mut() else { continue };
-                    if let MathItem::Spacing(prev, true) = resolved_last {
-                        *prev = (*prev).max(width);
-                        continue;
-                    }
-                }
-
-                resolved.push(item);
-                continue;
-            }
-
-            // Alignment points are resolved later.
-            MathItem::Align => {
-                resolved.push(item);
-                continue;
-            }
-
-            // New line, new things.
-            MathItem::Linebreak => {
-                resolved.push(item);
-                space = None;
-                last = None;
-                continue;
-            }
-
-            _ => {}
+    /// Updates stretch info for both axes, combining with existing info.
+    pub(crate) fn update(mut self, info: StretchInfo) -> Self {
+        match &mut self.0.x {
+            Some(val) => *val *= info,
+            None => self.0.x = Some(info),
         }
+        match &mut self.0.y {
+            Some(val) => *val *= info,
+            None => self.0.y = Some(info),
+        }
+        self
+    }
 
-        // Convert variable operators into binary operators if something
-        // precedes them and they are not preceded by a operator or comparator.
-        if item.class() == MathClass::Vary
-            && matches!(
-                last.map(|i| resolved[i].class()),
-                Some(
-                    MathClass::Normal
-                        | MathClass::Alphabetic
-                        | MathClass::Closing
-                        | MathClass::Fence
-                )
-            )
+    /// Sets the reference size for relative stretching on the given axis.
+    ///
+    /// Only sets the value if not already set.
+    pub(crate) fn relative_to(mut self, relative_to: Abs, axis: Axis) -> Self {
+        if let Some(info) = self.0.get_mut(axis)
+            && info.relative_to.is_none()
         {
-            item.set_class(MathClass::Binary);
+            info.relative_to = Some(relative_to);
         }
+        self
+    }
 
-        // Insert spacing between the last and this non-ignorant item.
-        if !item.is_ignorant() {
-            if let Some(i) = last
-                && let Some(s) = spacing(&mut resolved[i], space.take(), &mut item)
-            {
-                resolved.insert(i + 1, s);
-            }
-
-            last = Some(resolved.len());
+    /// Sets the font size for short-fall calculations on the given axis.
+    ///
+    /// Only sets the value if not already set.
+    pub(crate) fn font_size(mut self, font_size: Abs, axis: Axis) -> Self {
+        if let Some(info) = self.0.get_mut(axis)
+            && info.font_size.is_none()
+        {
+            info.font_size = Some(font_size);
         }
-
-        resolved.push(item);
+        self
     }
 
-    // Apply closing punctuation spacing if applicable.
-    if closing
-        && let Some(item) = resolved.last_mut()
-        && item.rclass() == MathClass::Punctuation
-        && item.size().is_none_or(|s| s > MathSize::Script)
-    {
-        item.set_rspace(Some(THIN))
-    } else if let Some(idx) = resolved.last_index()
-        && let MathItem::Spacing(_, true) = resolved.0[idx]
-    {
-        resolved.0.remove(idx);
-    }
-
-    BumpVec::from_iter_in(resolved.0, &arenas.bump).into_boxed_slice()
-}
-
-/// Create the spacing between two items in a given style.
-fn spacing<'a>(
-    l: &mut MathItem,
-    space: Option<MathItem<'a>>,
-    r: &mut MathItem,
-) -> Option<MathItem<'a>> {
-    use MathClass::*;
-
-    let script = |f: &MathItem| f.size().is_some_and(|s| s <= MathSize::Script);
-
-    match (l.rclass(), r.lclass()) {
-        // No spacing before punctuation; thin spacing after punctuation, unless
-        // in script size.
-        (_, Punctuation) => {}
-        (Punctuation, _) if !script(l) => l.set_rspace(Some(THIN)),
-
-        // No spacing after opening delimiters and before closing delimiters.
-        (Opening, _) | (_, Closing) => {}
-
-        // Thick spacing around relations, unless followed by a another relation
-        // or in script size.
-        (Relation, Relation) => {}
-        (Relation, _) if !script(l) => l.set_rspace(Some(THICK)),
-        (_, Relation) if !script(r) => r.set_lspace(Some(THICK)),
-
-        // Medium spacing around binary operators, unless in script size.
-        (Binary, _) if !script(l) => l.set_rspace(Some(MEDIUM)),
-        (_, Binary) if !script(r) => r.set_lspace(Some(MEDIUM)),
-
-        // Thin spacing around large operators, unless to the left of
-        // an opening delimiter. TeXBook, p170
-        (Large, Opening | Fence) => {}
-        (Large, _) => l.set_rspace(Some(THIN)),
-
-        (_, Large) => r.set_lspace(Some(THIN)),
-
-        // Spacing around spaced frames.
-        _ if (l.is_spaced() || r.is_spaced()) => return space,
-
-        _ => {}
-    };
-
-    None
-}
-
-/// A wrapper around `SmallVec<[MathItem; 8]>` that ignores [`MathItem::Tag`]s
-/// in some access methods.
-struct MathBuffer<'a>(SmallVec<[MathItem<'a>; 8]>);
-
-impl<'a> MathBuffer<'a> {
-    fn with_capacity(size: usize) -> Self {
-        Self(SmallVec::with_capacity(size))
-    }
-
-    /// Returns a mutable reference to the last non-Tag fragment.
-    fn last_mut(&mut self) -> Option<&mut MathItem<'a>> {
-        self.0.iter_mut().rev().find(|f| !matches!(f, MathItem::Tag(_)))
-    }
-
-    /// Returns the physical index of the last non-Tag fragment.
-    fn last_index(&self) -> Option<usize> {
-        self.0.iter().rposition(|f| !matches!(f, MathItem::Tag(_)))
+    /// Returns the stretch info for the given axis, if any.
+    pub fn resolve(self, axis: Axis) -> Option<StretchInfo> {
+        self.0.get(axis)
     }
 }
 
-impl<'a> Deref for MathBuffer<'a> {
-    type Target = SmallVec<[MathItem<'a>; 8]>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
+/// Information about how to stretch a glyph on one axis.
+#[derive(Debug, Clone, Copy)]
+pub struct StretchInfo {
+    /// The target size to stretch to.
+    pub target: Rel<Abs>,
+    /// The short-fall amount for glyph assembly.
+    pub short_fall: Em,
+    /// The reference size for relative targets.
+    ///
+    /// Only used in paged export.
+    pub relative_to: Option<Abs>,
+    /// The font size to use for short-fall.
+    ///
+    /// Only used in paged export.
+    pub font_size: Option<Abs>,
+}
+
+impl StretchInfo {
+    /// Creates new stretch info with the given target and short-fall.
+    pub(crate) fn new(target: Rel<Abs>, short_fall: Em) -> Self {
+        Self {
+            target,
+            short_fall,
+            relative_to: None,
+            font_size: None,
+        }
     }
 }
 
-impl<'a> DerefMut for MathBuffer<'a> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+impl MulAssign for StretchInfo {
+    fn mul_assign(&mut self, rhs: Self) {
+        self.target = Rel::new(
+            self.target.rel * rhs.target.rel,
+            rhs.target.rel.of(self.target.abs) + rhs.target.abs,
+        );
+        self.short_fall = rhs.short_fall;
     }
 }

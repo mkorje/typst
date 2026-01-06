@@ -8,7 +8,8 @@ use typst_utils::OptionExt;
 use typst_library::diag::SourceResult;
 use typst_library::foundations::StyleChain;
 use typst_library::layout::{Abs, Axis, Corner, Frame, Point, Size};
-use typst_library::math::{EquationElem, MathProperties, PrimesItem, ScriptsItem};
+use typst_library::math::EquationElem;
+use typst_library::math::ir::{MathProperties, PrimesItem, ScriptsItem};
 use typst_library::text::Font;
 
 use super::MathContext;
