@@ -13,9 +13,9 @@ use typst_utils::Get;
 use unicode_math_class::MathClass;
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::math::run::MathFragmentsExt;
-
-use super::{FrameFragment, GlyphFragment, MathContext, MathFragment};
+use super::MathContext;
+use super::fragment::{FrameFragment, GlyphFragment, MathFragment};
+use super::run::MathFragmentsExt;
 
 /// Lays out a [`TextItem`].
 #[typst_macros::time(name = "math text layout", span = props.span)]

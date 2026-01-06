@@ -3,7 +3,8 @@ use typst_library::foundations::StyleChain;
 use typst_library::layout::{Abs, Axis, Frame, Point, Size};
 use typst_library::math::{AccentItem, MathProperties};
 
-use super::{FrameFragment, MathContext, MathFragment};
+use super::MathContext;
+use super::fragment::FrameFragment;
 
 /// Lays out an [`AccentItem`].
 #[typst_macros::time(name = "math accent layout", span = props.span)]
@@ -74,14 +75,8 @@ pub fn layout_accent(
 
     let base_text_like = !item.exact_frame_width && base.is_text_like();
     let base_italics_correction = base.italics_correction();
-    let base_ascent = match &base {
-        MathFragment::Frame(frame) => frame.base_ascent,
-        _ => base.ascent(),
-    };
-    let base_descent = match &base {
-        MathFragment::Frame(frame) => frame.base_descent,
-        _ => base.descent(),
-    };
+    let base_ascent = base.base_ascent();
+    let base_descent = base.base_descent();
 
     let mut frame = Frame::soft(size);
     frame.set_baseline(baseline);

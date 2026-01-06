@@ -1,11 +1,12 @@
 use typst_library::diag::SourceResult;
-use typst_library::foundations::{Resolve, StyleChain};
+use typst_library::foundations::StyleChain;
 use typst_library::layout::{Abs, Axis, Frame, FrameItem, Point, Size};
 use typst_library::math::{FractionItem, MathProperties, MathSize, SkewedFractionItem};
 use typst_library::text::TextElem;
 use typst_library::visualize::{FixedStroke, Geometry};
 
-use super::{FrameFragment, MathContext};
+use super::MathContext;
+use super::fragment::FrameFragment;
 
 /// Lays out a [`FractionItem`].
 #[typst_macros::time(name = "math fraction layout", span = props.span)]
@@ -16,29 +17,30 @@ pub fn layout_fraction(
     props: &MathProperties,
 ) -> SourceResult<()> {
     let constants = ctx.font().math();
-    let axis = constants.axis_height.resolve(styles);
-    let thickness = constants.fraction_rule_thickness.resolve(styles);
-    let size = props.size;
-    let shift_up = match size {
+    let size = styles.resolve(TextElem::size);
+    let axis = constants.axis_height.at(size);
+    let thickness = constants.fraction_rule_thickness.at(size);
+    let math_size = props.size;
+    let shift_up = match math_size {
         MathSize::Display => constants.fraction_numerator_display_style_shift_up,
         _ => constants.fraction_numerator_shift_up,
     }
-    .resolve(styles);
-    let shift_down = match size {
+    .at(size);
+    let shift_down = match math_size {
         MathSize::Display => constants.fraction_denominator_display_style_shift_down,
         _ => constants.fraction_denominator_shift_down,
     }
-    .resolve(styles);
-    let num_min = match size {
+    .at(size);
+    let num_min = match math_size {
         MathSize::Display => constants.fraction_num_display_style_gap_min,
         _ => constants.fraction_numerator_gap_min,
     }
-    .resolve(styles);
-    let denom_min = match size {
+    .at(size);
+    let denom_min = match math_size {
         MathSize::Display => constants.fraction_denom_display_style_gap_min,
         _ => constants.fraction_denominator_gap_min,
     }
-    .resolve(styles);
+    .at(size);
 
     let num = ctx.layout_into_fragment(&item.numerator, styles)?.into_frame();
     let denom = ctx.layout_into_fragment(&item.denominator, styles)?.into_frame();
@@ -48,7 +50,7 @@ pub fn layout_fraction(
         (shift_down + (axis - thickness / 2.0) - denom.ascent()).max(denom_min);
 
     let line_width = num.width().max(denom.width());
-    let width = line_width + 2.0 * item.around.resolve(styles);
+    let width = line_width + 2.0 * item.around.at(size);
     let height = num.height() + num_gap + thickness + denom_gap + denom.height();
     let size = Size::new(width, height);
     let num_pos = Point::with_x((width - num.width()) / 2.0);
@@ -91,9 +93,10 @@ pub fn layout_skewed_fraction(
 ) -> SourceResult<()> {
     // Font-derived constants
     let constants = ctx.font().math();
-    let vgap = constants.skewed_fraction_vertical_gap.resolve(styles);
-    let hgap = constants.skewed_fraction_horizontal_gap.resolve(styles);
-    let axis = constants.axis_height.resolve(styles);
+    let size = styles.resolve(TextElem::size);
+    let vgap = constants.skewed_fraction_vertical_gap.at(size);
+    let hgap = constants.skewed_fraction_horizontal_gap.at(size);
+    let axis = constants.axis_height.at(size);
 
     let num_frame = ctx.layout_into_fragment(&item.numerator, styles)?.into_frame();
     let num_size = num_frame.size();

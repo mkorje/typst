@@ -7,7 +7,8 @@ use typst_library::math::{CancelAngle, CancelItem, MathProperties};
 use typst_library::visualize::{FixedStroke, Geometry};
 use typst_syntax::Span;
 
-use super::{FrameFragment, MathContext};
+use super::MathContext;
+use super::fragment::FrameFragment;
 
 /// Lays out a [`CancelItem`].
 #[typst_macros::time(name = "math cancel layout", span = props.span)]

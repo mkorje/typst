@@ -5,7 +5,8 @@ use typst_library::math::{LineItem, MathProperties};
 use typst_library::text::TextElem;
 use typst_library::visualize::{FixedStroke, Geometry};
 
-use super::{FrameFragment, MathContext};
+use super::MathContext;
+use super::fragment::FrameFragment;
 
 /// Lays out a [`LineItem`].
 #[typst_macros::time(name = "math line layout", span = props.span)]

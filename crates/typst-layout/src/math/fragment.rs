@@ -19,13 +19,12 @@ use typst_utils::{Get, default_math_class};
 use unicode_math_class::MathClass;
 
 use super::MathContext;
-use crate::math::shaping::shape;
+use super::shaping::shape;
 use crate::modifiers::{FrameModifiers, FrameModify};
 
 /// Maximum number of times extenders can be repeated.
 const MAX_REPEATS: usize = 1024;
 
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum MathFragment {
     Glyph(GlyphFragment),
@@ -79,6 +78,20 @@ impl MathFragment {
         }
     }
 
+    pub fn base_ascent(&self) -> Abs {
+        match self {
+            Self::Frame(fragment) => fragment.base_ascent,
+            _ => self.ascent(),
+        }
+    }
+
+    pub fn base_descent(&self) -> Abs {
+        match self {
+            Self::Frame(fragment) => fragment.base_descent,
+            _ => self.descent(),
+        }
+    }
+
     pub fn class(&self) -> MathClass {
         match self {
             Self::Glyph(glyph) => glyph.class,
@@ -109,7 +122,7 @@ impl MathFragment {
         )
     }
 
-    pub fn font_size(&self) -> Option<Abs> {
+    fn font_size(&self) -> Option<Abs> {
         match self {
             Self::Glyph(glyph) => Some(glyph.item.size),
             Self::Frame(fragment) => Some(fragment.font_size),
@@ -212,16 +225,16 @@ pub struct GlyphFragment {
     pub item: TextItem,
     // Math stuff.
     pub size: Size,
-    pub baseline: Option<Abs>,
-    pub italics_correction: Abs,
-    pub accent_attach: (Abs, Abs),
-    pub math_size: MathSize,
+    baseline: Option<Abs>,
+    italics_correction: Abs,
+    accent_attach: (Abs, Abs),
+    math_size: MathSize,
     pub class: MathClass,
-    pub extended_shape: bool,
+    extended_shape: bool,
     // External frame stuff.
-    pub modifiers: FrameModifiers,
-    pub shift: Abs,
-    pub align: Abs,
+    modifiers: FrameModifiers,
+    shift: Abs,
+    align: Abs,
 }
 
 impl GlyphFragment {
@@ -296,7 +309,7 @@ impl GlyphFragment {
 
     /// Sets element id and boxes in appropriate way without changing other
     /// styles. This is used to replace the glyph with a stretch variant.
-    pub fn update_glyph(&mut self) {
+    fn update_glyph(&mut self) {
         let id = GlyphId(self.item.glyphs[0].id);
 
         let extended_shape = is_extended_shape(&self.item.font, id);
@@ -329,7 +342,7 @@ impl GlyphFragment {
         self.extended_shape = extended_shape;
     }
 
-    pub fn baseline(&self) -> Abs {
+    fn baseline(&self) -> Abs {
         self.ascent()
     }
 
@@ -343,7 +356,7 @@ impl GlyphFragment {
         self.size.y - self.ascent()
     }
 
-    pub fn into_frame(self) -> Frame {
+    fn into_frame(self) -> Frame {
         let mut frame = Frame::soft(self.size);
         frame.set_baseline(self.baseline());
         frame.push(
@@ -446,7 +459,7 @@ impl GlyphFragment {
 
     /// Vertically adjust the fragment's frame so that it is aligned
     /// to the given alignment on the axis.
-    pub fn align_on_axis(&mut self, align: VAlignment) {
+    fn align_on_axis(&mut self, align: VAlignment) {
         let h = self.size.y;
         let axis = self.item.font.math().axis_height.at(self.item.size);
         self.align += self.baseline();
@@ -463,15 +476,15 @@ impl Debug for GlyphFragment {
 
 #[derive(Debug, Clone)]
 pub struct FrameFragment {
-    pub frame: Frame,
-    pub font_size: Abs,
-    pub class: MathClass,
-    pub math_size: MathSize,
-    pub base_ascent: Abs,
-    pub base_descent: Abs,
-    pub italics_correction: Abs,
-    pub accent_attach: (Abs, Abs),
-    pub text_like: bool,
+    frame: Frame,
+    font_size: Abs,
+    class: MathClass,
+    math_size: MathSize,
+    base_ascent: Abs,
+    base_descent: Abs,
+    italics_correction: Abs,
+    accent_attach: (Abs, Abs),
+    text_like: bool,
 }
 
 impl FrameFragment {

@@ -6,7 +6,7 @@ use typst_library::math::{EquationElem, LeftRightAlternator, MathSize};
 use typst_library::model::ParElem;
 use unicode_math_class::MathClass;
 
-use super::{MathFragment, alignments};
+use super::fragment::MathFragment;
 
 /// Leading between rows in script and scriptscript size.
 const TIGHT_LEADING: Em = Em::new(0.25);
@@ -253,6 +253,53 @@ impl MathRunFrameBuilder {
         }
         frame
     }
+}
+
+/// Determine the positions of the alignment points, according to the input rows combined.
+pub fn alignments(rows: &[Vec<MathFragment>]) -> AlignmentResult {
+    let mut widths = Vec::<Abs>::new();
+
+    let mut pending_width = Abs::zero();
+    for row in rows {
+        let mut width = Abs::zero();
+        let mut alignment_index = 0;
+
+        for fragment in row.iter() {
+            if matches!(fragment, MathFragment::Align) {
+                if alignment_index < widths.len() {
+                    widths[alignment_index].set_max(width);
+                } else {
+                    widths.push(width.max(pending_width));
+                }
+                width = Abs::zero();
+                alignment_index += 1;
+            } else {
+                width += fragment.width();
+            }
+        }
+        if widths.is_empty() {
+            pending_width.set_max(width);
+        } else if alignment_index < widths.len() {
+            widths[alignment_index].set_max(width);
+        } else {
+            widths.push(width.max(pending_width));
+        }
+    }
+
+    let mut points = widths;
+    for i in 1..points.len() {
+        let prev = points[i - 1];
+        points[i] += prev;
+    }
+    AlignmentResult {
+        width: points.last().copied().unwrap_or(pending_width),
+        points,
+    }
+}
+
+pub struct AlignmentResult {
+    pub points: Vec<Abs>,
+    pub width: Abs,
 }
 
 fn affects_row_height(fragment: &MathFragment) -> bool {

@@ -11,7 +11,8 @@ use typst_library::layout::{Abs, Axis, Corner, Frame, Point, Size};
 use typst_library::math::{EquationElem, MathProperties, PrimesItem, ScriptsItem};
 use typst_library::text::Font;
 
-use super::{FrameFragment, MathContext, MathFragment};
+use super::MathContext;
+use super::fragment::{FrameFragment, MathFragment};
 
 macro_rules! measure {
     ($e: ident, $attr: ident) => {
@@ -336,10 +337,7 @@ fn compute_script_shifts(
     let is_text_like = base.is_text_like();
 
     if tl.is_some() || tr.is_some() {
-        let ascent = match &base {
-            MathFragment::Frame(frame) => frame.base_ascent,
-            _ => base.ascent(),
-        };
+        let ascent = base.base_ascent();
         shift_up = shift_up
             .max(sup_shift_up)
             .max(if is_text_like { Abs::zero() } else { ascent - sup_drop_max })
@@ -348,10 +346,7 @@ fn compute_script_shifts(
     }
 
     if bl.is_some() || br.is_some() {
-        let descent = match &base {
-            MathFragment::Frame(frame) => frame.base_descent,
-            _ => base.descent(),
-        };
+        let descent = base.base_descent();
         shift_down = shift_down
             .max(sub_shift_down)
             .max(if is_text_like { Abs::zero() } else { descent + sub_drop_min })

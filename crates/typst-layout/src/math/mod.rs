@@ -1,5 +1,3 @@
-#[macro_use]
-mod shared;
 mod accent;
 mod cancel;
 mod fenced;
@@ -23,26 +21,27 @@ use typst_library::layout::{
     Abs, AlignElem, Axes, BlockElem, Em, FixedAlignment, Fragment, Frame, InlineItem,
     OuterHAlignment, Point, Region, Regions, Size, SpecificAlignment, VAlignment,
 };
-use typst_library::math::*;
+use typst_library::math::{
+    BoxItem, EquationElem, ExternalItem, MathItem, MathKind, MathProperties, families,
+    resolve_equation,
+};
 use typst_library::model::ParElem;
 use typst_library::routines::Arenas;
 use typst_library::text::{Font, FontFlags, TextEdgeBounds, TextElem, variant};
 use typst_syntax::Span;
 use typst_utils::{LazyHash, Numeric};
 
-use crate::math::accent::layout_accent;
-use crate::math::cancel::layout_cancel;
-use crate::math::fenced::layout_fenced;
-use crate::math::fraction::{layout_fraction, layout_skewed_fraction};
-use crate::math::line::layout_line;
-use crate::math::radical::layout_radical;
-use crate::math::run::{MathFragmentsExt, MathRunFrameBuilder};
-use crate::math::scripts::{layout_primes, layout_scripts};
-use crate::math::table::layout_table;
-use crate::math::text::{layout_glyph, layout_text};
-
-use self::fragment::{FrameFragment, GlyphFragment, MathFragment};
-use self::shared::*;
+use self::accent::layout_accent;
+use self::cancel::layout_cancel;
+use self::fenced::layout_fenced;
+use self::fraction::{layout_fraction, layout_skewed_fraction};
+use self::fragment::{FrameFragment, MathFragment};
+use self::line::layout_line;
+use self::radical::layout_radical;
+use self::run::{MathFragmentsExt, MathRunFrameBuilder};
+use self::scripts::{layout_primes, layout_scripts};
+use self::table::layout_table;
+use self::text::{layout_glyph, layout_text};
 
 /// Layout an inline equation (in a paragraph).
 #[typst_macros::time(span = elem.span())]

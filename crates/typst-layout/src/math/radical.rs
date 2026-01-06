@@ -5,7 +5,8 @@ use typst_library::math::{EquationElem, MathProperties, MathSize, RadicalItem};
 use typst_library::text::TextElem;
 use typst_library::visualize::{FixedStroke, Geometry};
 
-use super::{FrameFragment, MathContext};
+use super::MathContext;
+use super::fragment::FrameFragment;
 
 /// Lays out a [`RadicalItem`].
 ///

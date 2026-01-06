@@ -1,17 +1,16 @@
 use typst_library::diag::SourceResult;
 use typst_library::foundations::{Resolve, StyleChain};
 use typst_library::layout::{Abs, Em, Frame, FrameItem, Point, Rel, Size};
-use typst_library::math::{AugmentOffsets, MathProperties, TableItem};
+use typst_library::math::{
+    AugmentOffsets, MathProperties, TableItem, style_for_denominator,
+};
 use typst_library::text::TextElem;
 use typst_library::visualize::{FillRule, FixedStroke, Geometry, LineCap, Shape};
 use typst_syntax::Span;
 
-use crate::math::run::MathFragmentsExt;
-
-use super::{
-    AlignmentResult, FrameFragment, GlyphFragment, MathContext, alignments,
-    style_for_denominator,
-};
+use super::MathContext;
+use super::fragment::{FrameFragment, GlyphFragment};
+use super::run::{AlignmentResult, MathFragmentsExt, alignments};
 
 const DEFAULT_STROKE_THICKNESS: Em = Em::new(0.05);
 
