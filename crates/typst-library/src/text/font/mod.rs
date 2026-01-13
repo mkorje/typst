@@ -359,6 +359,14 @@ impl FontMetrics {
                         .to_em(constants.lower_limit_gap_min().value),
                     lower_limit_baseline_drop_min: font
                         .to_em(constants.lower_limit_baseline_drop_min().value),
+                    stretch_stack_top_shift_up: font
+                        .to_em(constants.stretch_stack_top_shift_up().value),
+                    stretch_stack_bottom_shift_down: font
+                        .to_em(constants.stretch_stack_bottom_shift_down().value),
+                    stretch_stack_gap_above_min: font
+                        .to_em(constants.stretch_stack_gap_above_min().value),
+                    stretch_stack_gap_below_min: font
+                        .to_em(constants.stretch_stack_gap_below_min().value),
                     fraction_numerator_shift_up: font
                         .to_em(constants.fraction_numerator_shift_up().value),
                     fraction_numerator_display_style_shift_up: font.to_em(
@@ -454,6 +462,10 @@ impl FontMetrics {
                     upper_limit_baseline_rise_min: Em::zero(),
                     lower_limit_gap_min: Em::zero(),
                     lower_limit_baseline_drop_min: Em::zero(),
+                    stretch_stack_top_shift_up: Em::zero(),
+                    stretch_stack_bottom_shift_down: Em::zero(),
+                    stretch_stack_gap_above_min: Em::zero(),
+                    stretch_stack_gap_below_min: Em::zero(),
                     fraction_numerator_shift_up: Em::zero(),
                     fraction_numerator_display_style_shift_up: Em::zero(),
                     fraction_denominator_shift_down: Em::zero(),
@@ -552,6 +564,10 @@ pub struct MathConstants {
     pub upper_limit_baseline_rise_min: Em,
     pub lower_limit_gap_min: Em,
     pub lower_limit_baseline_drop_min: Em,
+    pub stretch_stack_top_shift_up: Em,
+    pub stretch_stack_bottom_shift_down: Em,
+    pub stretch_stack_gap_above_min: Em,
+    pub stretch_stack_gap_below_min: Em,
     pub fraction_numerator_shift_up: Em,
     pub fraction_numerator_display_style_shift_up: Em,
     pub fraction_denominator_shift_down: Em,

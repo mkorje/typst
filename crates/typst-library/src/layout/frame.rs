@@ -389,7 +389,7 @@ impl Frame {
             Point::with_y(self.baseline()),
             FrameItem::Shape(
                 Geometry::Line(Point::with_x(self.size.x))
-                    .stroked(FixedStroke::from_pair(Color::RED, Abs::pt(1.0))),
+                    .stroked(FixedStroke::from_pair(Color::RED, Abs::pt(0.1))),
                 Span::detached(),
             ),
         );

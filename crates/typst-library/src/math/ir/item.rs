@@ -299,6 +299,17 @@ impl<'a> MathItem<'a> {
             glyph.flac.set(true);
         }
     }
+
+    ///
+    pub fn stretchy(&self, axis: Axis) -> bool {
+        if let Self::Component(comp) = self
+            && let MathKind::Glyph(glyph) = &comp.kind
+        {
+            glyph.stretch.get().0.get(axis).is_some()
+        } else {
+            false
+        }
+    }
 }
 
 /// A generic component that bundles a specific math item kind with common
