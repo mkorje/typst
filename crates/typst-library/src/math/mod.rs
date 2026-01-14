@@ -86,6 +86,11 @@ pub fn module() -> Module {
     math.define_func::<frak>();
     math.define_func::<mono>();
     math.define_func::<bb>();
+    math.define_func::<isolated>();
+    math.define_func::<initial>();
+    math.define_func::<tailed>();
+    math.define_func::<looped>();
+    math.define_func::<stretched>();
     math.define_func::<display>();
     math.define_func::<inline>();
     math.define_func::<script>();
