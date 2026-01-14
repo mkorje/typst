@@ -23,7 +23,7 @@
 )
 #let one = symbol(
   "1",
-  ("emoji", "1️")
+  ("emoji", "1️"),
 )
 
 #envelope
@@ -42,7 +42,7 @@
 --- symbol-constructor-invalid-modifier paged ---
 // Error: 2:3-2:24 invalid symbol modifier: " id!"
 #symbol(
-  ("invalid. id!", "x")
+  ("invalid. id!", "x"),
 )
 
 --- symbol-constructor-duplicate-modifier paged ---
@@ -95,7 +95,7 @@
 // Hint: 3:3-3:16 variant value must be exactly one grapheme cluster
 #symbol(
   "",
-  ("empty", "")
+  ("empty", ""),
 )
 
 --- symbol-constructor-multi-cluster-variant-value paged ---
@@ -105,7 +105,7 @@
 // Hint: 3:3-3:14 variant value must be exactly one grapheme cluster
 #symbol(
   "aa",
-  ("b", "bb")
+  ("b", "bb"),
 )
 
 --- symbol-unknown-modifier paged ---
@@ -175,17 +175,6 @@
   repr(envelope.fly),
   `symbol("🖅")`.text,
 )
-
---- symbol-sect-deprecated paged ---
-// Warning: 5-9 `sect` is deprecated, use `inter` instead
-$ A sect B = A inter B $
-
---- symbol-modifier-deprecated paged ---
-// Warning: 7-12 `ast.small` is deprecated (CJK compatibility character), use ﹡ or `\u{fe61}` instead
-$ ast.small $
-
-// Warning: 14-20 `bracket.double` is deprecated, use `bracket.stroked` instead
-#sym.bracket.double.r
 
 --- issue-5930-symbol-label paged ---
 #emoji.face<lab>
