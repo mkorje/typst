@@ -817,11 +817,13 @@ const CURVE_RULE: ShowFn<CurveElem> = |elem, _, _| {
 };
 
 const EQUATION_RULE: ShowFn<EquationElem> = |elem, _, styles| {
+    let dir = styles.resolve(TextElem::dir);
     if elem.block.get(styles) {
         Ok(BlockElem::multi_layouter(elem.clone(), crate::math::layout_equation_block)
             .pack())
     } else {
-        Ok(InlineElem::layouter(elem.clone(), crate::math::layout_equation_inline).pack())
+        Ok(InlineElem::layouter(elem.clone(), crate::math::layout_equation_inline, dir)
+            .pack())
     }
 };
 

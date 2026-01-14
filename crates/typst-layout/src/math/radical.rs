@@ -1,7 +1,7 @@
 use typst_library::diag::SourceResult;
 use typst_library::foundations::StyleChain;
 use typst_library::layout::{
-    Abs, Axis, Corners, Frame, FrameItem, Point, Rel, Sides, Size,
+    Abs, Axis, Corners, Dir, Frame, FrameItem, Point, Rel, Sides, Size,
 };
 use typst_library::math::ir::{MathProperties, RadicalItem};
 use typst_library::math::{EquationElem, MathSize};
@@ -111,10 +111,22 @@ pub fn layout_radical(
         ascent.set_max(shift_up + index.ascent());
     }
 
-    let sqrt_x = sqrt_offset.max(Abs::zero());
-    let radicand_x = sqrt_x + sqrt.width();
+    let dir = styles.resolve(TextElem::dir);
+    let (sqrt_x, radicand_x, width) = match dir {
+        Dir::LTR => (
+            sqrt_offset.max(Abs::zero()),
+            sqrt_offset.max(Abs::zero()) + sqrt.width(),
+            sqrt_offset.max(Abs::zero()) + sqrt.width() + line_width,
+        ),
+        Dir::RTL => (
+            radicand.width(),
+            Abs::zero(),
+            radicand.width() + sqrt.width() + sqrt_offset.max(Abs::zero()),
+        ),
+        _ => unreachable!(),
+    };
     let radicand_y = ascent - radicand.ascent();
-    let size = Size::new(radicand_x + line_width, ascent + descent);
+    let size = Size::new(width, ascent + descent);
 
     // The extra "- thickness" comes from the fact that the sqrt is placed
     // in `push_frame` with respect to its top, not its baseline.
@@ -126,7 +138,11 @@ pub fn layout_radical(
     frame.set_baseline(ascent);
 
     if let Some(index) = index {
-        let index_x = -sqrt_offset.min(Abs::zero()) + kern_before;
+        let index_x = match dir {
+            Dir::LTR => -sqrt_offset.min(Abs::zero()) + kern_before,
+            Dir::RTL => radicand.width() + sqrt.width() + kern_after,
+            _ => unreachable!(),
+        };
         let index_pos = Point::new(index_x, ascent - index.ascent() - shift_up);
         frame.push_frame(index_pos, index);
     }

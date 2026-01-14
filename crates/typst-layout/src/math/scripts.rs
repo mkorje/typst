@@ -7,10 +7,10 @@ use typst_utils::OptionExt;
 
 use typst_library::diag::SourceResult;
 use typst_library::foundations::StyleChain;
-use typst_library::layout::{Abs, Axis, Corner, Frame, Point, Size};
+use typst_library::layout::{Abs, Axis, Corner, Dir, Frame, Point, Size};
 use typst_library::math::EquationElem;
 use typst_library::math::ir::{MathProperties, PrimesItem, ScriptsItem};
-use typst_library::text::Font;
+use typst_library::text::{Font, TextElem};
 
 use super::MathContext;
 use super::fragment::{FrameFragment, MathFragment};
@@ -47,16 +47,35 @@ pub fn layout_scripts(
 
     let base = ctx.layout_into_fragment(&item.base, styles)?;
 
-    let fragments = [
-        layout!(top_left),
-        t,
-        layout!(top_right),
-        layout!(bottom_left),
-        b,
-        layout!(bottom_right),
-    ];
+    let dir = styles.resolve(TextElem::dir);
+    let fragments = match dir {
+        Dir::LTR => [
+            layout!(top_left),
+            t,
+            layout!(top_right),
+            layout!(bottom_left),
+            b,
+            layout!(bottom_right),
+        ],
+        Dir::RTL => [
+            layout!(top_right),
+            t,
+            layout!(top_left),
+            layout!(bottom_right),
+            b,
+            layout!(bottom_left),
+        ],
+        _ => unreachable!(),
+    };
 
-    layout_attachments(ctx, props, item.base.styles().unwrap_or(styles), base, fragments)
+    layout_attachments(
+        ctx,
+        props,
+        item.base.styles().unwrap_or(styles),
+        base,
+        fragments,
+        dir,
+    )
 }
 
 /// Lays out a [`PrimesItem`].
@@ -90,6 +109,7 @@ fn layout_attachments(
     styles: StyleChain,
     base: MathFragment,
     [tl, t, tr, bl, b, br]: [Option<MathFragment>; 6],
+    dir: Dir,
 ) -> SourceResult<()> {
     let (font, size) = base.font(ctx, styles);
     let cramped = styles.get(EquationElem::cramped);
@@ -144,6 +164,7 @@ fn layout_attachments(
         [tl.as_ref(), bl.as_ref()],
         (tx_shift, bx_shift),
         space_after_script,
+        dir,
     );
 
     // Calculate the distance each post-script extends to the right of the
@@ -154,6 +175,7 @@ fn layout_attachments(
         [tr.as_ref(), br.as_ref()],
         (tx_shift, bx_shift),
         space_after_script,
+        dir,
     );
 
     // Calculate the final frame width.
@@ -208,6 +230,7 @@ fn compute_post_script_widths(
     [tr, br]: [Option<&MathFragment>; 2],
     (tr_shift, br_shift): (Abs, Abs),
     space_after_post_script: Abs,
+    dir: Dir,
 ) -> ((Abs, Abs), (Abs, Abs)) {
     let tr_values = tr.map_or_default(|tr| {
         let kern = math_kern(base, tr, tr_shift, Corner::TopRight);
@@ -218,8 +241,10 @@ fn compute_post_script_widths(
     // need to shift the post-subscript left by the base's italic correction
     // (see the kerning algorithm as described in the OpenType MATH spec).
     let br_values = br.map_or_default(|br| {
-        let kern = math_kern(base, br, br_shift, Corner::BottomRight)
-            - base.italics_correction();
+        let mut kern = math_kern(base, br, br_shift, Corner::BottomRight);
+        if matches!(dir, Dir::LTR) {
+            kern -= base.italics_correction();
+        }
         (space_after_post_script + br.width() + kern, kern)
     });
 
@@ -237,6 +262,7 @@ fn compute_pre_script_widths(
     [tl, bl]: [Option<&MathFragment>; 2],
     (tl_shift, bl_shift): (Abs, Abs),
     space_before_pre_script: Abs,
+    dir: Dir,
 ) -> (Abs, Abs) {
     let tl_pre_width = tl.map_or_default(|tl| {
         let kern = math_kern(base, tl, tl_shift, Corner::TopLeft);
@@ -244,7 +270,10 @@ fn compute_pre_script_widths(
     });
 
     let bl_pre_width = bl.map_or_default(|bl| {
-        let kern = math_kern(base, bl, bl_shift, Corner::BottomLeft);
+        let mut kern = math_kern(base, bl, bl_shift, Corner::BottomLeft);
+        if matches!(dir, Dir::RTL) {
+            kern -= base.italics_correction();
+        }
         space_before_pre_script + bl.width() + kern
     });
 

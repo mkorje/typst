@@ -219,7 +219,7 @@ fn resolve_text<'a, 'v, 'e>(
     // Disable auto-italic.
     let italic = styles.get(EquationElem::italic).or(Some(false));
 
-    let num = elem.text.chars().all(|c| c.is_ascii_digit() || c == '.');
+    let num = elem.text.chars().all(|c| c.is_numeric() || c == '.');
     let multiline = elem.text.contains(is_newline);
 
     let styled_text: EcoString = elem

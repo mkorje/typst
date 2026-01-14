@@ -1,9 +1,10 @@
 use std::iter::once;
 
 use typst_library::foundations::{Resolve, StyleChain};
-use typst_library::layout::{Abs, AlignElem, Em, Frame, InlineItem, Point, Size};
+use typst_library::layout::{Abs, AlignElem, Dir, Em, Frame, InlineItem, Point, Size};
 use typst_library::math::{EquationElem, LeftRightAlternator, MathSize};
 use typst_library::model::ParElem;
+use typst_library::text::TextElem;
 use unicode_math_class::MathClass;
 
 use super::fragment::MathFragment;
@@ -17,8 +18,13 @@ pub trait MathFragmentsExt {
     fn descent(&self) -> Abs;
     fn into_frame(self, styles: StyleChain) -> Frame;
     fn multiline_frame_builder(self, styles: StyleChain) -> MathRunFrameBuilder;
-    fn into_line_frame(self, points: &[Abs], alternator: LeftRightAlternator) -> Frame;
-    fn into_par_items(self) -> Vec<InlineItem>;
+    fn into_line_frame(
+        self,
+        points: &[Abs],
+        alternator: LeftRightAlternator,
+        dir: Dir,
+    ) -> Frame;
+    fn into_par_items(self, dir: Dir) -> Vec<InlineItem>;
     fn is_multiline(&self) -> bool;
 }
 
@@ -48,7 +54,13 @@ impl MathFragmentsExt for Vec<MathFragment> {
 
     fn into_frame(self, styles: StyleChain) -> Frame {
         if !self.is_multiline() {
-            self.into_line_frame(&[], LeftRightAlternator::Right)
+            let dir = styles.resolve(TextElem::dir);
+            let alternator = match dir {
+                Dir::LTR => LeftRightAlternator::Right,
+                Dir::RTL => LeftRightAlternator::Left,
+                _ => unreachable!(),
+            };
+            self.into_line_frame(&[], alternator, dir)
         } else {
             self.multiline_frame_builder(styles).build()
         }
@@ -68,6 +80,13 @@ impl MathFragmentsExt for Vec<MathFragment> {
             TIGHT_LEADING.resolve(styles)
         };
 
+        let dir = styles.resolve(TextElem::dir);
+        let alternator = match dir {
+            Dir::LTR => LeftRightAlternator::Right,
+            Dir::RTL => LeftRightAlternator::Left,
+            _ => unreachable!(),
+        };
+
         let align = styles.resolve(AlignElem::alignment).x;
         let mut frames: Vec<(Frame, Point)> = vec![];
         let mut size = Size::zero();
@@ -76,7 +95,7 @@ impl MathFragmentsExt for Vec<MathFragment> {
                 continue;
             }
 
-            let sub = row.into_line_frame(&alignments.points, LeftRightAlternator::Right);
+            let sub = row.into_line_frame(&alignments.points, alternator, dir);
             if i > 0 {
                 size.y += leading;
             }
@@ -99,6 +118,7 @@ impl MathFragmentsExt for Vec<MathFragment> {
         self,
         points: &[Abs],
         mut alternator: LeftRightAlternator,
+        dir: Dir,
     ) -> Frame {
         let ascent = self.ascent();
         let mut frame = Frame::soft(Size::new(Abs::zero(), ascent + self.descent()));
@@ -137,19 +157,27 @@ impl MathFragmentsExt for Vec<MathFragment> {
             }
 
             let y = ascent - fragment.ascent();
+            if matches!(dir, Dir::RTL) {
+                x -= fragment.width();
+            }
             let pos = Point::new(x, y);
-            x += fragment.width();
+            if matches!(dir, Dir::LTR) {
+                x += fragment.width();
+            }
             frame.push_frame(pos, fragment.into_frame());
         }
 
-        frame.size_mut().x = x;
+        frame.size_mut().x = x.abs();
+        if matches!(dir, Dir::RTL) {
+            frame.translate(Point::with_x(x.abs()));
+        }
         frame
     }
 
     /// Convert this run of math fragments into a vector of inline items for
     /// paragraph layout. Creates multiple fragments when relation or binary
     /// operators are present to allow for line-breaking opportunities later.
-    fn into_par_items(self) -> Vec<InlineItem> {
+    fn into_par_items(self, dir: Dir) -> Vec<InlineItem> {
         let mut items = vec![];
 
         let mut x = Abs::zero();
@@ -158,8 +186,11 @@ impl MathFragmentsExt for Vec<MathFragment> {
         let mut frame = Frame::soft(Size::zero());
         let mut empty = true;
 
-        let finalize_frame = |frame: &mut Frame, x, ascent, descent| {
-            frame.set_size(Size::new(x, ascent + descent));
+        let finalize_frame = |frame: &mut Frame, x: Abs, ascent, descent| {
+            frame.set_size(Size::new(x.abs(), ascent + descent));
+            if matches!(dir, Dir::RTL) {
+                frame.translate(Point::with_x(x.abs()));
+            }
             frame.set_baseline(Abs::zero());
             frame.translate(Point::with_y(ascent));
         };
@@ -190,8 +221,13 @@ impl MathFragmentsExt for Vec<MathFragment> {
             ascent.set_max(y);
             descent.set_max(fragment.descent());
 
+            if matches!(dir, Dir::RTL) {
+                x -= fragment.width();
+            }
             let pos = Point::new(x, -y);
-            x += fragment.width();
+            if matches!(dir, Dir::LTR) {
+                x += fragment.width();
+            }
             frame.push_frame(pos, fragment.into_frame());
             empty = false;
 

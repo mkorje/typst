@@ -6,8 +6,8 @@ use crate::foundations::{
 };
 use crate::introspection::Locator;
 use crate::layout::{
-    Abs, Corners, Em, Fr, Fragment, Frame, Length, Region, Regions, Rel, Sides, Size,
-    Spacing,
+    Abs, Corners, Dir, Em, Fr, Fragment, Frame, Length, Region, Regions, Rel, Sides,
+    Size, Spacing,
 };
 use crate::visualize::{Paint, Stroke};
 
@@ -144,6 +144,11 @@ pub struct InlineElem {
     #[required]
     #[internal]
     body: callbacks::InlineCallback,
+
+    /// The direction of the inline items.
+    #[required]
+    #[internal]
+    pub dir: Dir,
 }
 
 impl Construct for InlineElem {
@@ -164,8 +169,9 @@ impl InlineElem {
             styles: StyleChain,
             region: Size,
         ) -> SourceResult<Vec<InlineItem>>,
+        dir: Dir,
     ) -> Self {
-        Self::new(callbacks::InlineCallback::new(captured, callback))
+        Self::new(callbacks::InlineCallback::new(captured, callback), dir)
     }
 }
 

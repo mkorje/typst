@@ -18,8 +18,9 @@ use typst_library::engine::Engine;
 use typst_library::foundations::{NativeElement, Packed, Resolve, Style, StyleChain};
 use typst_library::introspection::{Counter, Locator, SplitLocator};
 use typst_library::layout::{
-    Abs, AlignElem, Axes, BlockElem, Em, FixedAlignment, Fragment, Frame, InlineItem,
-    OuterHAlignment, Point, Region, Regions, Size, SpecificAlignment, VAlignment,
+    Abs, AlignElem, Axes, BlockElem, Dir, Em, FixedAlignment, Fragment, Frame,
+    InlineItem, OuterHAlignment, Point, Region, Regions, Size, SpecificAlignment,
+    VAlignment,
 };
 use typst_library::math::ir::{
     BoxItem, ExternalItem, MathItem, MathKind, MathProperties, resolve_equation,
@@ -66,9 +67,16 @@ pub fn layout_equation_inline(
     let arenas = Arenas::default();
     let item = resolve_equation(elem, engine, &mut locator, &arenas, styles)?;
 
-    let mut ctx = MathContext::new(engine, &mut locator, region, font.clone());
+    let mut ctx = MathContext::new(
+        engine,
+        &mut locator,
+        region,
+        font.clone(),
+        styles.resolve(TextElem::dir),
+    );
     let mut items = if !item.is_multiline() {
-        ctx.layout_into_fragments(&item, styles)?.into_par_items()
+        ctx.layout_into_fragments(&item, styles)?
+            .into_par_items(styles.resolve(TextElem::dir))
     } else {
         vec![InlineItem::Frame(ctx.layout_into_fragment(&item, styles)?.into_frame())]
     };
@@ -123,7 +131,13 @@ pub fn layout_equation_block(
     let arenas = Arenas::default();
     let item = resolve_equation(elem, engine, &mut locator, &arenas, styles)?;
 
-    let mut ctx = MathContext::new(engine, &mut locator, regions.base(), font.clone());
+    let mut ctx = MathContext::new(
+        engine,
+        &mut locator,
+        regions.base(),
+        font.clone(),
+        styles.resolve(TextElem::dir),
+    );
     let full_equation_builder = ctx
         .layout_into_fragments(&item, styles)?
         .multiline_frame_builder(styles);
@@ -360,6 +374,7 @@ struct MathContext<'a, 'v, 'e> {
     engine: &'v mut Engine<'e>,
     locator: &'v mut SplitLocator<'a>,
     region: Region,
+    dir: Dir,
     // Mutable.
     fonts_stack: Vec<Font>,
     fragments: Vec<MathFragment>,
@@ -372,11 +387,13 @@ impl<'a, 'v, 'e> MathContext<'a, 'v, 'e> {
         locator: &'v mut SplitLocator<'a>,
         base: Size,
         font: Font,
+        dir: Dir,
     ) -> Self {
         Self {
             engine,
             locator,
             region: Region::new(base, Axes::splat(false)),
+            dir,
             fonts_stack: vec![font],
             fragments: vec![],
         }

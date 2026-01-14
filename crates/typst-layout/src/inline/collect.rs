@@ -25,6 +25,7 @@ const LTR_EMBEDDING: &str = "\u{202A}";
 const RTL_EMBEDDING: &str = "\u{202B}";
 const POP_EMBEDDING: &str = "\u{202C}";
 const LTR_ISOLATE: &str = "\u{2066}";
+const RTL_ISOLATE: &str = "\u{2067}";
 const POP_ISOLATE: &str = "\u{2069}";
 
 /// A prepared item in a inline layout.
@@ -204,7 +205,11 @@ pub fn collect<'a>(
                 collector.push_text(SmartQuotes::fallback(double), styles);
             }
         } else if let Some(elem) = child.to_packed::<InlineElem>() {
-            collector.push_item(Item::Skip(LTR_ISOLATE));
+            collector.push_item(Item::Skip(match elem.dir {
+                Dir::LTR => LTR_ISOLATE,
+                Dir::RTL => RTL_ISOLATE,
+                _ => unreachable!(),
+            }));
 
             for item in elem.layout(engine, locator.next(&elem.span()), styles, region)? {
                 match item {

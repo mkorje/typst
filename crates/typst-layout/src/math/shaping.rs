@@ -2,7 +2,7 @@ use az::SaturatingAs;
 use comemo::Tracked;
 use rustybuzz::{BufferFlags, UnicodeBuffer};
 use typst_library::World;
-use typst_library::layout::Em;
+use typst_library::layout::{Dir, Em};
 use typst_library::text::{Font, FontFamily, FontVariant, Glyph};
 use typst_syntax::Span;
 
@@ -10,11 +10,13 @@ use crate::inline::{SharedShapingContext, create_shape_plan, get_font_and_covers
 
 /// Shape some text in math.
 #[comemo::memoize]
+#[allow(clippy::too_many_arguments)]
 pub fn shape(
     world: Tracked<dyn World + '_>,
     variant: FontVariant,
     features: Vec<rustybuzz::Feature>,
     language: rustybuzz::Language,
+    dir: Dir,
     fallback: bool,
     text: &str,
     families: Vec<&FontFamily>,
@@ -25,6 +27,7 @@ pub fn shape(
         variant,
         features,
         language,
+        dir,
         fallback,
         glyphs: vec![],
         font: None,
@@ -42,6 +45,7 @@ struct ShapingContext<'a> {
     variant: FontVariant,
     features: Vec<rustybuzz::Feature>,
     language: rustybuzz::Language,
+    dir: Dir,
     fallback: bool,
     glyphs: Vec<Glyph>,
     font: Option<Font>,
@@ -104,7 +108,11 @@ fn shape_impl<'a>(
         rustybuzz::Script::from_iso15924_tag(ttf_parser::Tag::from_bytes(b"math"))
             .unwrap(),
     );
-    buffer.set_direction(rustybuzz::Direction::LeftToRight);
+    buffer.set_direction(match ctx.dir {
+        Dir::LTR => rustybuzz::Direction::LeftToRight,
+        Dir::RTL => rustybuzz::Direction::RightToLeft,
+        _ => unimplemented!("vertical math layout"),
+    });
     buffer.set_flags(BufferFlags::REMOVE_DEFAULT_IGNORABLES);
 
     let plan = create_shape_plan(

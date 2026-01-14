@@ -77,6 +77,7 @@ fn layout_inline_text(
             let glyph = GlyphFragment::new_char(ctx, styles, c, span).unwrap();
             fragments.push(glyph.into());
         }
+        // TODO: should always be LTR.
         let frame = fragments.into_frame(styles);
         Ok(FrameFragment::new(props, styles, frame).with_text_like(true))
     } else {

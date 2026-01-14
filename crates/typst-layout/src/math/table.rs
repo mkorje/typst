@@ -127,13 +127,16 @@ pub fn layout_table(
         x += gap.x;
     }
 
+    let dir = styles.resolve(TextElem::dir);
+
     for (index, col) in cols.into_iter().enumerate() {
         let AlignmentResult { points, width: rcol } = alignments(&col);
 
         let mut y = if hline.0.contains(&0) { gap.y } else { Abs::zero() };
 
         for (cell, &(ascent, descent)) in col.into_iter().zip(&heights) {
-            let cell = cell.into_line_frame(&points, item.alternator);
+            // TODO: does this alternator need to depend on the Dir?
+            let cell = cell.into_line_frame(&points, item.alternator, dir);
             let pos = Point::new(
                 if points.is_empty() {
                     x + item.align.position(rcol - cell.width())

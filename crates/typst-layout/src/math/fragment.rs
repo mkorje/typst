@@ -9,7 +9,7 @@ use typst_library::engine::Engine;
 use typst_library::foundations::StyleChain;
 use typst_library::introspection::Tag;
 use typst_library::layout::{
-    Abs, Axes, Axis, Corner, Em, Frame, FrameItem, Point, Size, VAlignment,
+    Abs, Axes, Axis, Corner, Dir, Em, Frame, FrameItem, Point, Size, VAlignment,
 };
 use typst_library::math::ir::MathProperties;
 use typst_library::math::{EquationElem, MathSize, families};
@@ -239,6 +239,7 @@ impl From<FrameFragment> for MathFragment {
 pub struct GlyphFragment {
     // Text stuff.
     pub item: TextItem,
+    dir: Dir,
     // Math stuff.
     pub size: Size,
     baseline: Option<Abs>,
@@ -272,11 +273,13 @@ impl GlyphFragment {
         text: &str,
         span: Span,
     ) -> Option<GlyphFragment> {
+        let dir = styles.resolve(TextElem::dir);
         let (font, mut glyphs) = shape(
             world,
             variant(styles),
             features(styles),
             language(styles),
+            dir,
             styles.get(TextElem::fallback),
             text,
             families(styles).collect(),
@@ -305,6 +308,7 @@ impl GlyphFragment {
 
         let mut fragment = Self {
             item,
+            dir,
             // Math
             math_size: styles.get(EquationElem::size),
             class,
@@ -333,6 +337,9 @@ impl GlyphFragment {
         let width = self.item.width();
         if !extended_shape {
             self.item.glyphs[0].x_advance += italics;
+            if matches!(self.dir, Dir::RTL) {
+                self.item.glyphs[0].x_offset += italics;
+            }
         }
         let italics = italics.at(self.item.size);
 
