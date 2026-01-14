@@ -54,6 +54,7 @@ impl MathFragmentsExt for Vec<MathFragment> {
 
     fn into_frame(self, styles: StyleChain) -> Frame {
         if !self.is_multiline() {
+            // TODO: alternator is not needed here, so can remove this.
             let dir = styles.resolve(TextElem::dir);
             let alternator = match dir {
                 Dir::LTR => LeftRightAlternator::Right,
@@ -83,7 +84,7 @@ impl MathFragmentsExt for Vec<MathFragment> {
         let dir = styles.resolve(TextElem::dir);
         let alternator = match dir {
             Dir::LTR => LeftRightAlternator::Right,
-            Dir::RTL => LeftRightAlternator::Left,
+            Dir::RTL => LeftRightAlternator::Right,
             _ => unreachable!(),
         };
 
@@ -104,9 +105,12 @@ impl MathFragmentsExt for Vec<MathFragment> {
             if alignments.points.is_empty() {
                 pos.x = align.position(alignments.width - sub.width());
             }
+            if matches!(dir, Dir::RTL) {
+                pos.x += alignments.width - sub.width();
+            }
             size.x.set_max(sub.width());
             size.y += sub.height();
-            frames.push((sub, pos));
+            frames.push((sub.mark_box(), pos));
         }
 
         MathRunFrameBuilder { size, frames }
@@ -148,11 +152,11 @@ impl MathFragmentsExt for Vec<MathFragment> {
                     })
             }
         };
-        let mut x = next_x().unwrap_or_default();
+        let mut x = -next_x().unwrap_or_default();
 
         for fragment in self.into_iter() {
             if matches!(fragment, MathFragment::Align) {
-                x = next_x().unwrap_or(x);
+                x = -next_x().unwrap_or(x);
                 continue;
             }
 
