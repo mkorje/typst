@@ -24,7 +24,7 @@ use typst_library::layout::{
 use typst_library::math::ir::{
     BoxItem, ExternalItem, MathItem, MathKind, MathProperties, resolve_equation,
 };
-use typst_library::math::{EquationElem, families};
+use typst_library::math::{EquationElem, VarElem, families};
 use typst_library::model::ParElem;
 use typst_library::routines::Arenas;
 use typst_library::text::{Font, FontFlags, TextEdgeBounds, TextElem, variant};
@@ -55,15 +55,29 @@ pub fn layout_equation_inline(
     assert!(!elem.block.get(styles));
 
     let span = elem.span();
-    let font = get_font(engine.world, styles, span)?;
+
+    let mut locator = locator.split();
+
+    let arenas = Arenas::default();
+
+    // Truly awful hack.
+    let var = VarElem::packed(" ");
+    let pairs = (engine.routines.realize)(
+        typst_library::routines::RealizationKind::Math,
+        engine,
+        &mut locator,
+        &arenas,
+        &var,
+        styles,
+    )?;
+    let (_, font_styles) = pairs.first().unwrap();
+
+    let font = get_font(engine.world, *font_styles, span)?;
     warn_non_math_font(&font, engine, span);
 
     let scale_style = style_for_script_scale(&font);
     let styles = styles.chain(&scale_style);
 
-    let mut locator = locator.split();
-
-    let arenas = Arenas::default();
     let item = resolve_equation(elem, engine, &mut locator, &arenas, styles)?;
 
     let mut ctx = MathContext::new(engine, &mut locator, region, font.clone());
@@ -112,15 +126,29 @@ pub fn layout_equation_block(
     assert!(elem.block.get(styles));
 
     let span = elem.span();
-    let font = get_font(engine.world, styles, span)?;
+
+    let mut locator = locator.split();
+
+    let arenas = Arenas::default();
+
+    // Truly awful hack.
+    let var = VarElem::packed(" ");
+    let pairs = (engine.routines.realize)(
+        typst_library::routines::RealizationKind::Math,
+        engine,
+        &mut locator,
+        &arenas,
+        &var,
+        styles,
+    )?;
+    let (_, font_styles) = pairs.first().unwrap();
+
+    let font = get_font(engine.world, *font_styles, span)?;
     warn_non_math_font(&font, engine, span);
 
     let scale_style = style_for_script_scale(&font);
     let styles = styles.chain(&scale_style);
 
-    let mut locator = locator.split();
-
-    let arenas = Arenas::default();
     let item = resolve_equation(elem, engine, &mut locator, &arenas, styles)?;
 
     let mut ctx = MathContext::new(engine, &mut locator, regions.base(), font.clone());

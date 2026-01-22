@@ -118,7 +118,9 @@ fn resolve_realized<'a, 'v, 'e>(
     ctx: &mut MathResolver<'a, 'v, 'e>,
     styles: StyleChain<'a>,
 ) -> SourceResult<()> {
-    if let Some(elem) = elem.to_packed::<SymbolElem>() {
+    // if let Some(elem) = elem.to_packed::<VarElem>() {
+    //     resolve_var(elem, ctx, styles)?;
+    if let Some(elem) = elem.to_packed::<VarElem>() {
         resolve_symbol(elem, ctx, styles)?;
     } else if elem.is::<SpaceElem>() {
         ctx.push(MathItem::Space);
@@ -242,10 +244,36 @@ fn resolve_text<'a, 'v, 'e>(
 ///
 /// Each grapheme cluster in the symbol becomes a separate glyph item.
 fn resolve_symbol<'a, 'v, 'e>(
-    elem: &'a Packed<SymbolElem>,
+    elem: &'a Packed<VarElem>,
     ctx: &mut MathResolver<'a, 'v, 'e>,
     styles: StyleChain<'a>,
 ) -> SourceResult<()> {
+    let num = elem.text.chars().all(|c| c.is_ascii_digit() || c == '.');
+    if num {
+        let variant = styles.get(EquationElem::variant);
+        let bold = styles.get(EquationElem::bold);
+        // Disable auto-italic.
+        let italic = styles.get(EquationElem::italic).or(Some(false));
+
+        let num = elem.text.chars().all(|c| c.is_ascii_digit() || c == '.');
+        let multiline = elem.text.contains(is_newline);
+
+        let styled_text: EcoString = elem
+            .text
+            .chars()
+            .flat_map(|c| to_style(c, MathStyle::select(c, variant, bold, italic)))
+            .collect();
+
+        ctx.push(TextItem::create(
+            styled_text,
+            !multiline && !num,
+            styles,
+            elem.span(),
+            &ctx.arenas.bump,
+        ));
+        return Ok(());
+    }
+
     let variant = styles.get(EquationElem::variant);
     let bold = styles.get(EquationElem::bold);
     let italic = styles.get(EquationElem::italic);

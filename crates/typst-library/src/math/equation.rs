@@ -16,7 +16,7 @@ use crate::layout::{
 };
 use crate::math::MathSize;
 use crate::model::{Numbering, Outlinable, ParLine, Refable, Supplement};
-use crate::text::{FontFamily, FontList, FontWeight, LocalName, Locale, TextElem};
+use crate::text::{LocalName, Locale, TextElem};
 
 /// A mathematical equation.
 ///
@@ -201,11 +201,6 @@ impl ShowSet for Packed<EquationElem> {
         } else {
             out.set(EquationElem::size, MathSize::Text);
         }
-        out.set(TextElem::weight, FontWeight::from_number(450));
-        out.set(
-            TextElem::font,
-            FontList(vec![FontFamily::new("New Computer Modern Math")]),
-        );
         out
     }
 }

@@ -25,7 +25,7 @@ use typst_library::introspection::{
 use typst_library::layout::{
     AlignElem, BoxElem, HElem, InlineElem, PageElem, PagebreakElem, VElem,
 };
-use typst_library::math::{EquationElem, Mathy};
+use typst_library::math::{EquationElem, Mathy, VarElem};
 use typst_library::model::{
     CiteElem, CiteGroup, DocumentElem, EnumElem, ListElem, ListItemLike, ListLike,
     ParElem, ParbreakElem, TermsElem,
@@ -292,10 +292,21 @@ fn visit_kind_rules<'a>(
             return Ok(true);
         }
 
+        // Symbols in non-math content transparently convert to `TextElem` so we
+        // don't have to handle them in non-math layout.
+        if let Some(elem) = content.to_packed::<SymbolElem>() {
+            let mut var = VarElem::packed(elem.text.clone()).spanned(elem.span());
+            if let Some(label) = elem.label() {
+                var.set_label(label);
+            }
+            visit(s, s.store(var), styles)?;
+            return Ok(true);
+        }
+
         // In normal realization, we apply regex show rules to consecutive
         // textual elements via `TEXTUAL` grouping. However, in math, this is
         // not desirable, so we just do it on a per-element basis.
-        if let Some(elem) = content.to_packed::<SymbolElem>() {
+        if let Some(elem) = content.to_packed::<VarElem>() {
             if let Some(m) = find_regex_match_in_str(elem.text.as_str(), styles) {
                 visit_regex_match(s, &[(content, styles)], m)?;
                 return Ok(true);

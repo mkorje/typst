@@ -11,7 +11,7 @@ $text(#red, "time"^2) + sqrt("place")$
 --- math-text-single-grapheme-cluster paged ---
 // Test that single graph clusters are considered a single character in math.
 $ 𝒟 𝒟︀ 𝒟︁ $
-#show math.equation: set text(font: "Noto Sans Math")
+#show math.var: set text(font: "Noto Sans Math")
 $ 𝒟 𝒟︀ 𝒟︁ $
 
 --- math-text-grapheme-cluster-fallback paged ---
@@ -21,7 +21,7 @@ $ 𝒟 𝒟︀ 𝒟︁ $
 $bird "or" 🐦‍⬛$
 
 #set text(font: "Noto Color Emoji")
-#show math.equation: set text(font: "Noto Color Emoji")
+#show math.var: set text(font: "Noto Color Emoji")
 #bird or 🐦‍⬛
 // Warning: 1-16 current font is not designed for math
 // Hint: 1-16 rendering may be poor
@@ -53,7 +53,7 @@ $ product.co_(B in scr(B))^(B in scr(bold(B))) cal(B)(X) $
 $ cal(P)_i (X) * cal(C)_1 $
 
 --- math-font-warning paged ---
-#show math.equation: set text(font: "Libertinus Serif")
+#show math.var: set text(font: "Libertinus Serif")
 // Warning: 1-14 current font is not designed for math
 // Hint: 1-14 rendering may be poor
 $ x + y = z $

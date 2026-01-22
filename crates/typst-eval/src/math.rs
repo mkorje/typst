@@ -37,7 +37,7 @@ impl Eval for ast::MathText<'_> {
     fn eval(self, _: &mut Vm) -> SourceResult<Self::Output> {
         match self.get() {
             MathTextKind::Grapheme(text) => Ok(SymbolElem::packed(text.clone())),
-            MathTextKind::Number(text) => Ok(TextElem::packed(text.clone())),
+            MathTextKind::Number(text) => Ok(SymbolElem::packed(text.clone())),
         }
     }
 }
