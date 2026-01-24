@@ -123,6 +123,11 @@ impl Frame {
         self.baseline = Some(baseline);
     }
 
+    /// Clear the frame's baseline, reverting to the default (bottom of frame).
+    pub fn clear_baseline(&mut self) {
+        self.baseline = None;
+    }
+
     /// The distance from the baseline to the top of the frame.
     ///
     /// This is the same as `baseline()`, but more in line with the terminology

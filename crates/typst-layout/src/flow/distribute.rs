@@ -5,7 +5,7 @@ use typst_library::layout::{
 use typst_utils::Numeric;
 
 use super::{
-    Child, Composer, FlowResult, LineChild, MultiChild, MultiSpill, PlacedChild,
+    Child, Composer, FlowMode, FlowResult, LineChild, MultiChild, MultiSpill, PlacedChild,
     SingleChild, Stop, Work,
 };
 
@@ -561,6 +561,14 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         let mut offset = Abs::zero();
         let mut fr_frames = fr_frames.into_iter();
 
+        // For inline mode with exactly one frame, propagate the baseline to
+        // the output frame. This ensures that single-line inline content (like
+        // inline equations) maintains proper baseline alignment when wrapped
+        // in containers like boxes. Multi-line content keeps the default
+        // baseline at the bottom.
+        let propagate_baseline = self.composer.config.mode == FlowMode::Inline
+            && self.items.iter().filter(|i| matches!(i, Item::Frame(..))).count() == 1;
+
         // Position all items.
         for item in self.items {
             match item {
@@ -589,6 +597,11 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
                     let y = offset + ruler.position(free);
                     let pos = Point::new(x, y);
                     offset += frame.height();
+
+                    // For single-line inline content, propagate the baseline.
+                    if propagate_baseline {
+                        output.set_baseline(y + frame.baseline());
+                    }
 
                     output.push_frame(pos, frame);
                 }
