@@ -318,6 +318,8 @@ pub struct MathComponent<'a> {
 /// Recursive or large variants are boxed (allocated in a bump arena).
 #[derive(Debug)]
 pub enum MathKind<'a> {
+    /// A
+    Multiline(MultilineItem<'a>),
     /// A group of math items laid out horizontally.
     Group(GroupItem<'a>),
     /// A radical (square root or nth root).
@@ -439,6 +441,62 @@ impl MathProperties {
     }
 }
 
+///
+#[derive(Debug)]
+pub struct MultilineItem<'a> {
+    /// The cells of the table, organized by row.
+    pub rows: BumpBox<'a, [BumpBox<'a, [BumpBox<'a, [MathItem<'a>]>]>]>,
+}
+
+impl<'a> MultilineItem<'a> {
+    /// Creates a new group item from the given items.
+    pub(crate) fn create<I>(
+        items: I,
+        styles: StyleChain<'a>,
+        bump: &'a Bump,
+    ) -> MathItem<'a>
+    where
+        I: IntoIterator<Item = MathItem<'a>>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        let props = MathProperties::default(styles);
+        let items = preprocess(items, bump, false);
+
+        let mut rows = BumpVec::new_in(bump);
+        let mut current_row_cells = BumpVec::new_in(bump);
+        let mut current_cell_items = BumpVec::new_in(bump);
+
+        for item in items.into_iter() {
+            match item {
+                MathItem::Linebreak => {
+                    // Finish cell
+                    current_row_cells.push(current_cell_items.into_boxed_slice());
+                    current_cell_items = BumpVec::new_in(bump);
+
+                    // Finish row
+                    rows.push(current_row_cells.into_boxed_slice());
+                    current_row_cells = BumpVec::new_in(bump);
+                }
+                MathItem::Align => {
+                    // Finish cell
+                    current_row_cells.push(current_cell_items.into_boxed_slice());
+                    current_cell_items = BumpVec::new_in(bump);
+                }
+                _ => {
+                    current_cell_items.push(item);
+                }
+            }
+        }
+
+        // Handle trailing data
+        current_row_cells.push(current_cell_items.into_boxed_slice());
+        rows.push(current_row_cells.into_boxed_slice());
+
+        let kind = MathKind::Multiline(Self { rows: rows.into_boxed_slice() });
+        MathComponent { kind, props, styles }.into()
+    }
+}
+
 /// A group of math items laid out horizontally.
 #[derive(Debug)]
 pub struct GroupItem<'a> {
@@ -463,8 +521,9 @@ impl<'a> GroupItem<'a> {
         I::IntoIter: ExactSizeIterator,
     {
         let props = MathProperties::default(styles);
-        let kind =
-            MathKind::Group(Self { items: preprocess(items, bump, closing_exists) });
+        let kind = MathKind::Group(Self {
+            items: preprocess(items, bump, closing_exists).into_boxed_slice(),
+        });
         MathComponent { kind, props, styles }.into()
     }
 }

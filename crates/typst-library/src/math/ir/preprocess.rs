@@ -23,7 +23,7 @@ pub(crate) fn preprocess<'a, I>(
     items: I,
     bump: &'a Bump,
     closing: bool,
-) -> BumpBox<'a, [MathItem<'a>]>
+) -> BumpVec<'a, MathItem<'a>>
 where
     I: IntoIterator<Item = MathItem<'a>>,
     I::IntoIter: ExactSizeIterator,
@@ -128,7 +128,7 @@ where
         resolved.0.remove(idx);
     }
 
-    BumpVec::from_iter_in(resolved.0, bump).into_boxed_slice()
+    BumpVec::from_iter_in(resolved.0, bump)
 }
 
 /// Computes the spacing between two adjacent math items.

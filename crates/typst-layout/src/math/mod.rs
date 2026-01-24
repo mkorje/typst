@@ -122,11 +122,155 @@ pub fn layout_equation_block(
 
     let arenas = Arenas::default();
     let item = resolve_equation(elem, engine, &mut locator, &arenas, styles)?;
+    // dbg!(&item);
+    // dbg!();
 
     let mut ctx = MathContext::new(engine, &mut locator, regions.base(), font.clone());
-    let full_equation_builder = ctx
-        .layout_into_fragments(&item, styles)?
-        .multiline_frame_builder(styles);
+
+    // MathItem -> MathRunFrameBuilder:
+    // - MultilineItem -> MathRunFrameBuilder
+    // - Anything else
+    let full_equation_builder = if let MathItem::Component(comp) = &item
+        && let MathKind::Multiline(multi) = &comp.kind
+    {
+        let rows = multi
+            .rows
+            .iter() // Iterate over outer BumpBox slice
+            .map(|middle_layer| {
+                middle_layer
+                    .iter() // Iterate over middle BumpBox slice
+                    .map(|cell| {
+                        ctx.layout_items_into_fragments(cell, styles) // Apply function
+                    })
+                    .collect::<SourceResult<Vec<Vec<MathFragment>>>>() // Collect middle Vec
+            })
+            .collect::<SourceResult<Vec<Vec<Vec<MathFragment>>>>>()?; // Collect outer Vec
+        // dbg!(&rows);
+        // dbg!();
+
+        // 1. Determine the maximum number of columns
+        let max_cols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+
+        // 2. Compute Maximum Widths for each column
+        // We initialize a vector of 0.0s
+        let mut max_col_widths = vec![Abs::zero(); max_cols];
+
+        for row in &rows {
+            for (col_idx, cell) in row.iter().enumerate() {
+                let width = cell.iter().map(|f| f.width()).sum();
+                if width > max_col_widths[col_idx] {
+                    max_col_widths[col_idx] = width;
+                }
+            }
+        }
+
+        // 3. Compute Column Start Positions (Cumulative X)
+        // col_starts[i] is the x-position where column i begins
+        let mut col_starts = Vec::with_capacity(max_cols);
+        let mut current_x = Abs::zero();
+
+        for width in &max_col_widths {
+            col_starts.push(current_x);
+            current_x += *width; // + col_gap;
+        }
+
+        // 4. Calculate Final Cell Positions (Applying Alignment)
+        let pos: Vec<Vec<_>> = rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .enumerate()
+                    .map(|(col_idx, cell)| {
+                        let w = cell.iter().map(|f| f.width()).sum();
+                        let max_w = max_col_widths[col_idx];
+                        let start_x = col_starts[col_idx];
+
+                        // ALTERNATING ALIGNMENT LOGIC
+                        if col_idx % 2 == 0 {
+                            // Even Column (0, 2...): RIGHT ALIGN
+                            // Shift cell to the right edge of the column
+                            start_x + (max_w - w)
+                        } else {
+                            // Odd Column (1, 3...): LEFT ALIGN
+                            // Keep cell at the left edge
+                            start_x
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        // dbg!(&pos);
+        // dbg!();
+
+        let leading = //if styles.get(EquationElem::size) >= MathSize::Text {
+        styles.resolve(ParElem::leading);
+        // } else {
+        //     TIGHT_LEADING.resolve(styles)
+        // };
+
+        let mut frames: Vec<(Frame, Point)> = vec![];
+        let mut size = Size::zero();
+        for (i, row) in rows.into_iter().enumerate() {
+            let (ascent, descent) = row
+                .iter()
+                .map(|x| (x.ascent(), x.descent()))
+                .fold((Abs::zero(), Abs::zero()), |(acc_a, acc_d), (a, d)| {
+                    (acc_a.max(a), acc_d.max(d))
+                });
+            let mut sub = Frame::soft(Size::new(Abs::zero(), ascent + descent));
+            sub.set_baseline(ascent);
+
+            let mut x = Abs::zero();
+            for (j, cell) in row.into_iter().enumerate() {
+                x = pos[i][j];
+
+                for fragment in cell {
+                    let y = ascent - fragment.ascent();
+                    let pos = Point::new(x, y);
+                    x += fragment.width();
+                    sub.push_frame(pos, fragment.into_frame());
+                }
+            }
+
+            sub.size_mut().x = x;
+
+            if i > 0 {
+                size.y += leading;
+            }
+
+            let pos = Point::with_y(size.y);
+            size.x.set_max(sub.width());
+            size.y += sub.height();
+            frames.push((sub, pos));
+        }
+
+        MathRunFrameBuilder { size, frames }
+    } else {
+        let align = styles.resolve(AlignElem::alignment).x;
+        let fragments = ctx.layout_into_fragments(&item, styles)?;
+        let ascent = fragments.ascent();
+        let mut sub = Frame::soft(Size::new(Abs::zero(), ascent + fragments.descent()));
+        sub.set_baseline(ascent);
+
+        let mut x = Abs::zero();
+        for fragment in fragments {
+            let y = ascent - fragment.ascent();
+            let pos = Point::new(x, y);
+            x += fragment.width();
+            sub.push_frame(pos, fragment.into_frame());
+        }
+        sub.size_mut().x = x;
+
+        let mut pos = Point::zero();
+        pos.x = align.position(alignments.width - sub.width());
+
+        MathRunFrameBuilder { size: sub.size(), frames: vec![(sub, pos)] }
+    };
+
+    // let mut ctx = MathContext::new(engine, &mut locator, regions.base(), font.clone());
+    // let full_equation_builder = ctx
+    //     .layout_into_fragments(&item, styles)?
+    //     .multiline_frame_builder(styles);
     let width = full_equation_builder.size.x;
 
     let equation_builders = if styles.get(BlockElem::breakable) {
@@ -411,6 +555,34 @@ impl<'a, 'v, 'e> MathContext<'a, 'v, 'e> {
     }
 
     /// Layout the given math item and return the resulting [`MathFragment`]s.
+    fn layout_items_into_fragments(
+        &mut self,
+        items: &[MathItem],
+        styles: StyleChain,
+    ) -> SourceResult<Vec<MathFragment>> {
+        let start = self.fragments.len();
+        let outer_styles = styles;
+        let outer_font = outer_styles.get_ref(TextElem::font);
+
+        for item in items {
+            let styles = item.styles().unwrap_or(outer_styles);
+
+            // Whilst this check isn't exact, it more or less suffices as a
+            // change in font variant probably won't have an effect on metrics.
+            if styles != outer_styles && styles.get_ref(TextElem::font) != outer_font {
+                self.fonts_stack
+                    .push(get_font(self.engine.world, styles, item.span())?);
+                let scale_style = style_for_script_scale(self.font());
+                layout_realized(item, self, styles.chain(&scale_style))?;
+                self.fonts_stack.pop();
+            } else {
+                layout_realized(item, self, styles)?;
+            }
+        }
+        Ok(self.fragments.drain(start..).collect())
+    }
+
+    /// Layout the given math item and return the resulting [`MathFragment`]s.
     fn layout_into_fragment(
         &mut self,
         item: &MathItem,
@@ -529,6 +701,7 @@ fn layout_realized(
                     .with_accent_attach(accent_attach),
             );
         }
+        MathKind::Multiline(_) => todo!(),
     }
 
     // Insert right spacing.
