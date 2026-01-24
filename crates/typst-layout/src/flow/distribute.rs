@@ -5,8 +5,8 @@ use typst_library::layout::{
 use typst_utils::Numeric;
 
 use super::{
-    Child, Composer, FlowMode, FlowResult, LineChild, MultiChild, MultiSpill, PlacedChild,
-    SingleChild, Stop, Work,
+    Child, Composer, FlowMode, FlowResult, LineChild, MultiChild, MultiSpill,
+    PlacedChild, SingleChild, Stop, Work,
 };
 
 /// Distributes as many children as fit from `composer.work` into the first

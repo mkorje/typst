@@ -44,17 +44,6 @@ pub fn layout_box(
     // applying the inset, since the pod shrunk.
     frame.set_size(pod.expand.select(pod.size, frame.size()));
 
-    // Check if there's explicit height sizing or vertical inset. In these
-    // cases, clear the baseline so it defaults to the bottom. This preserves
-    // the old behavior for boxes with explicit sizing, while allowing boxes
-    // without explicit sizing to inherit the baseline from their content
-    // (important for inline equations wrapped in boxes).
-    let has_explicit_height = !height.is_auto();
-    let has_vertical_inset = !inset.top.is_zero() || !inset.bottom.is_zero();
-    if has_explicit_height || has_vertical_inset {
-        frame.clear_baseline();
-    }
-
     // Apply the inset.
     if !inset.is_zero() {
         crate::pad::grow(&mut frame, &inset);
