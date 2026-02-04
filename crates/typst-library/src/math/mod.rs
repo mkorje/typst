@@ -25,7 +25,6 @@ pub use self::root::*;
 pub use self::style::*;
 pub use self::underover::*;
 
-use ecow::EcoString;
 use typst_utils::singleton;
 use unicode_math_class::MathClass;
 
@@ -158,14 +157,7 @@ pub struct ClassElem {
 pub struct VarElem {
     /// The variable's text.
     #[required]
-    pub text: EcoString,
-}
-
-impl VarElem {
-    /// Create a new packed symbol element.
-    pub fn packed(text: impl Into<EcoString>) -> Content {
-        Self::new(text.into()).pack()
-    }
+    pub text: Content,
 }
 
 impl ShowSet for Packed<VarElem> {

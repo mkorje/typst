@@ -8,13 +8,14 @@ use unicode_math_class::MathClass;
 use crate::diag::SourceResult;
 use crate::engine::Engine;
 use crate::foundations::{
-    Content, NativeElement, Packed, ShowSet, Smart, StyleChain, Styles, Synthesize, elem,
+    Content, Func, NativeElement, Packed, Recipe, Selector, ShowSet, Smart, StyleChain,
+    Styles, SymbolElem, Synthesize, Transformation, elem,
 };
 use crate::introspection::{Count, Counter, CounterUpdate, Locatable, Tagged};
 use crate::layout::{
     AlignElem, Alignment, BlockElem, OuterHAlignment, SpecificAlignment, VAlignment,
 };
-use crate::math::MathSize;
+use crate::math::{MathSize, VarElem};
 use crate::model::{Numbering, Outlinable, ParLine, Refable, Supplement};
 use crate::text::{LocalName, Locale, TextElem};
 
@@ -201,6 +202,11 @@ impl ShowSet for Packed<EquationElem> {
         } else {
             out.set(EquationElem::size, MathSize::Text);
         }
+        out.push(Recipe::new(
+            Some(Selector::Elem(SymbolElem::ELEM, None)),
+            Transformation::Func(Func::from(VarElem::ELEM)),
+            self.span(),
+        ));
         out
     }
 }

@@ -31,7 +31,7 @@ $bird "or" 🐦‍⬛$
 $ nothing $
 $ "hi ∅ hey" $
 $ sum_(i in NN) 1 + i $
-#show math.equation: set text(features: ("cv01",), fallback: false)
+#show math.var: set text(features: ("cv01",), fallback: false)
 $ nothing $
 $ "hi ∅ hey" $
 $ sum_(i in NN) 1 + i $
@@ -42,7 +42,7 @@ $cal(P)_i != scr(P)_i$, $cal(bold(I))_l != bold(scr(I))_l$
 $ product.co_(B in scr(B))^(B in scr(bold(B))) cal(B)(X) $
 
 --- math-font-covers paged ---
-#show math.equation: set text(
+#show math.var: set text(
   font: (
     // Ignore that this regex actually misses some of the script glyphs...
     (name: "XITS Math", covers: regex("[\u{1D49C}-\u{1D503}]")),
@@ -59,14 +59,14 @@ $ cal(P)_i (X) * cal(C)_1 $
 $ x + y = z $
 
 --- math-font-error paged ---
-// Warning: 37-51 unknown font family: cambria math
-#show math.equation: set text(font: "Cambria Math", fallback: false)
+// Warning: 32-46 unknown font family: cambria math
+#show math.var: set text(font: "Cambria Math", fallback: false)
 // Error: 1-39 no font could be found
 $ brace.stroked.l -1 brace.stroked.r $
 
 --- math-font-fallback-class paged ---
 // Test that math class is preserved even when the result is a tofu.
-#show math.equation: set text(font: "Garamond-Math", fallback: false)
+#show math.var: set text(font: "Garamond-Math", fallback: false)
 $ brace.stroked.l -1 brace.stroked.r $
 $ lr(brace.stroked.l -1 brace.stroked.r) $
 
