@@ -22,7 +22,8 @@ use typst_library::layout::{
     OuterHAlignment, Point, Region, Regions, Size, SpecificAlignment, VAlignment,
 };
 use typst_library::math::ir::{
-    BoxItem, ExternalItem, MathItem, MathKind, MathProperties, resolve_equation,
+    BoxItem, ExternalItem, MathItem, MathKind, MathProperties, MultilineItem,
+    resolve_equation,
 };
 use typst_library::math::{EquationElem, families};
 use typst_library::model::ParElem;
@@ -124,9 +125,17 @@ pub fn layout_equation_block(
     let item = resolve_equation(elem, engine, &mut locator, &arenas, styles)?;
 
     let mut ctx = MathContext::new(engine, &mut locator, regions.base(), font.clone());
-    let full_equation_builder = ctx
-        .layout_into_fragments(&item, styles)?
-        .multiline_frame_builder(styles);
+
+    // Check if the top-level item is a MultilineItem and use layout_multiline
+    // directly in that case. Otherwise, use the standard fragment-based path.
+    let full_equation_builder = if let MathItem::Component(comp) = &item
+        && let MathKind::Multiline(multi) = &comp.kind
+    {
+        layout_multiline(multi, &mut ctx, styles)?
+    } else {
+        ctx.layout_into_fragments(&item, styles)?
+            .multiline_frame_builder(styles)
+    };
     let width = full_equation_builder.size.x;
 
     let equation_builders = if styles.get(BlockElem::breakable) {
@@ -519,6 +528,10 @@ fn layout_realized(
         }
         MathKind::Text(item) => layout_text(item, ctx, styles, props)?,
         MathKind::Fenced(item) => layout_fenced(item, ctx, styles, props)?,
+        MathKind::Multiline(item) => {
+            let builder = layout_multiline(item, ctx, styles)?;
+            ctx.push(FrameFragment::new(props, styles, builder.build()));
+        }
         MathKind::Group(_) => {
             let fragment = ctx.layout_into_fragment(item, styles)?;
             let italics = fragment.italics_correction();
@@ -538,6 +551,155 @@ fn layout_realized(
     }
 
     Ok(())
+}
+
+/// Leading between rows in script and scriptscript size.
+const TIGHT_LEADING: Em = Em::new(0.25);
+
+/// Lays out a [`MultilineItem`] into a [`MathRunFrameBuilder`].
+///
+/// Each cell is laid out into fragments. Column widths are computed as the
+/// maximum cell width per column, then converted to cumulative alignment
+/// points. Cells are positioned using left/right alternation at the
+/// alignment points: odd columns (0, 2, 4, ...) are right-aligned to their
+/// point, even columns (1, 3, 5, ...) are left-aligned from the previous
+/// point.
+fn layout_multiline(
+    item: &MultilineItem,
+    ctx: &mut MathContext,
+    styles: StyleChain,
+) -> SourceResult<MathRunFrameBuilder> {
+    use typst_library::math::{LeftRightAlternator, MathSize};
+
+    let nrows = item.rows.len();
+    let ncols = item.rows.first().map_or(0, |r| r.len());
+
+    // 1. Layout each cell into fragments, compute per-cell widths.
+    let mut cell_frags: Vec<Vec<Vec<MathFragment>>> = Vec::with_capacity(nrows);
+    let mut cell_widths: Vec<Vec<Abs>> = Vec::with_capacity(nrows);
+    for row in item.rows.iter() {
+        let mut row_frags = Vec::with_capacity(ncols);
+        let mut row_widths = Vec::with_capacity(ncols);
+        for cell in row.iter() {
+            let frags = ctx.layout_into_fragments(cell, styles)?;
+            let w: Abs = frags.iter().map(|f| f.width()).sum();
+            row_widths.push(w);
+            row_frags.push(frags);
+        }
+        cell_frags.push(row_frags);
+        cell_widths.push(row_widths);
+    }
+
+    // 2. Compute max column widths and cumulative alignment points.
+    let mut col_widths: Vec<Abs> = vec![Abs::zero(); ncols];
+    for row_w in &cell_widths {
+        for (c, &w) in row_w.iter().enumerate() {
+            col_widths[c].set_max(w);
+        }
+    }
+    // Only compute alignment points when there are multiple columns
+    // (i.e., alignment markers exist). With a single column, rows are
+    // positioned using the text alignment setting instead.
+    let has_alignment = ncols > 1;
+    let mut points: Vec<Abs> = Vec::with_capacity(if has_alignment { ncols } else { 0 });
+    if has_alignment {
+        let mut cumulative = Abs::zero();
+        for &w in &col_widths {
+            cumulative += w;
+            points.push(cumulative);
+        }
+    }
+    let total_width = if has_alignment {
+        points.last().copied().unwrap_or_default()
+    } else {
+        cell_widths.iter().map(|r| r.iter().sum::<Abs>()).max().unwrap_or_default()
+    };
+
+    // 3. Compute leading.
+    let leading = if styles.get(EquationElem::size) >= MathSize::Text {
+        styles.resolve(ParElem::leading)
+    } else {
+        TIGHT_LEADING.resolve(styles)
+    };
+
+    // 4. Build row frames.
+    let align = styles.resolve(AlignElem::alignment).x;
+    let mut frames: Vec<(Frame, Point)> = vec![];
+    let mut size = Size::zero();
+
+    for (i, (row_frags, row_widths)) in
+        cell_frags.into_iter().zip(cell_widths).enumerate()
+    {
+        // Skip trailing empty row.
+        if i == nrows - 1 && row_frags.iter().all(|c| c.is_empty()) {
+            continue;
+        }
+
+        // Compute row ascent/descent (ignoring tags).
+        let all_frags = row_frags.iter().flat_map(|c| c.iter());
+        let row_ascent = all_frags
+            .clone()
+            .filter(|f| !matches!(f, MathFragment::Tag(_)))
+            .map(|f| f.ascent())
+            .max()
+            .unwrap_or_default();
+        let row_descent = all_frags
+            .filter(|f| !matches!(f, MathFragment::Tag(_)))
+            .map(|f| f.descent())
+            .max()
+            .unwrap_or_default();
+
+        let mut frame =
+            Frame::soft(Size::new(Abs::zero(), row_ascent + row_descent));
+        frame.set_baseline(row_ascent);
+
+        // Position each cell using alignment points with left/right
+        // alternation.
+        let mut alternator = LeftRightAlternator::Right;
+        let mut prev_points =
+            std::iter::once(Abs::zero()).chain(points.iter().copied());
+        let mut point_widths =
+            points.iter().copied().zip(row_widths.iter().copied());
+        let mut x_end = Abs::zero();
+
+        for cell in row_frags {
+            let cell_x = if let Some((point, cell_w)) = point_widths.next()
+                && let Some(prev) = prev_points.next()
+                && let Some(alt) = alternator.next()
+            {
+                match alt {
+                    LeftRightAlternator::Right => point - cell_w,
+                    _ => prev,
+                }
+            } else {
+                prev_points.next().unwrap_or_default()
+            };
+
+            let mut x = cell_x;
+            for frag in cell {
+                let w = frag.width();
+                let y = row_ascent - frag.ascent();
+                frame.push_frame(Point::new(x, y), frag.into_frame());
+                x += w;
+            }
+            x_end = x;
+        }
+
+        frame.size_mut().x = x_end;
+
+        if i > 0 {
+            size.y += leading;
+        }
+        let mut pos = Point::with_y(size.y);
+        if !has_alignment {
+            pos.x = align.position(total_width - frame.width());
+        }
+        size.x.set_max(frame.width());
+        size.y += frame.height();
+        frames.push((frame, pos));
+    }
+
+    Ok(MathRunFrameBuilder { size, frames })
 }
 
 /// Lays out a [`BoxItem`].

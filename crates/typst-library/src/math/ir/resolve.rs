@@ -918,18 +918,43 @@ fn resolve_cells<'a, 'v, 'e>(
             row.iter()
                 .map(|cell| {
                     let cell_span = cell.span();
-                    let cell = ctx.resolve_into_item(cell, cell_styles)?;
+                    let start = ctx.resolve_into_items(cell, cell_styles)?;
 
-                    // We ignore linebreaks in the cells as we can't differentiate
-                    // alignment points for the whole body from ones for a specific
-                    // cell, and multiline cells don't quite make sense at the moment.
-                    if cell.is_multiline() {
+                    // Strip linebreaks from the resolved items before creating
+                    // the group. Linebreaks in cells don't make sense since we
+                    // can't differentiate alignment points for the whole body
+                    // from ones for a specific cell.
+                    let has_linebreaks = ctx.items[start..]
+                        .iter()
+                        .any(|item| matches!(item, MathItem::Linebreak));
+                    if has_linebreaks {
                         ctx.engine.sink.warn(warning!(
                            cell_span,
                            "linebreaks are ignored in {}", children;
                            hint: "use commas instead to separate each line";
                         ));
+                        let mut i = start;
+                        while i < ctx.items.len() {
+                            if matches!(ctx.items[i], MathItem::Linebreak) {
+                                ctx.items.remove(i);
+                            } else {
+                                i += 1;
+                            }
+                        }
                     }
+
+                    // Create the cell item from the remaining items.
+                    let len = ctx.items.len() - start;
+                    let cell = if len == 1 {
+                        ctx.items.pop().unwrap()
+                    } else {
+                        GroupItem::create(
+                            ctx.items.drain(start..),
+                            false,
+                            cell_styles,
+                            &ctx.arenas.bump,
+                        )
+                    };
                     Ok(cell)
                 })
                 .collect::<SourceResult<_>>()
