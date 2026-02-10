@@ -20,13 +20,14 @@ use crate::math::{
 use crate::visualize::FixedStroke;
 
 /// The top-level item in the math IR.
-#[derive(Debug)]
+#[derive(Default, Debug)]
 pub enum MathItem<'a> {
     /// A layoutable component with associated properties and styles.
     Component(MathComponent<'a>),
     /// Explicit spacing. The boolean indicates whether the spacing is weak.
     Spacing(Abs, bool),
     /// A regular space.
+    #[default]
     Space,
     /// A line break.
     Linebreak,
@@ -37,8 +38,8 @@ pub enum MathItem<'a> {
 }
 
 impl<'a> From<MathComponent<'a>> for MathItem<'a> {
-    fn from(comp: MathComponent<'a>) -> MathItem<'a> {
-        MathItem::Component(comp)
+    fn from(comp: MathComponent<'a>) -> Self {
+        Self::Component(comp)
     }
 }
 
@@ -152,15 +153,30 @@ impl<'a> MathItem<'a> {
 
     /// Whether this item contains multiple lines.
     pub fn is_multiline(&self) -> bool {
-        // A MultilineItem is always multiline by definition.
-        if let MathItem::Component(MathComponent {
-            kind: MathKind::Multiline(_), ..
-        }) = self
-        {
-            return true;
-        }
+        Self::has_linebreaks(self.as_slice())
+    }
 
-        has_linebreaks(self.as_slice())
+    /// Whether the items contain linebreaks (directly or in fenced bodies).
+    pub(crate) fn has_linebreaks(items: &[MathItem]) -> bool {
+        items.iter().enumerate().any(|(i, item)| {
+            let is_last = i == items.len() - 1;
+            match item {
+                MathItem::Linebreak if !is_last => true,
+                MathItem::Component(MathComponent {
+                    kind: MathKind::Multiline(_),
+                    ..
+                }) => true,
+                MathItem::Component(MathComponent {
+                    kind: MathKind::Fenced(fence),
+                    ..
+                }) => {
+                    fence.body.is_multiline()
+                        || (fence.body.ends_with_linebreak()
+                            && (fence.close.is_some() || !is_last))
+                }
+                _ => false,
+            }
+        })
     }
 
     /// Whether this item ends with a line break.
@@ -328,8 +344,6 @@ pub enum MathKind<'a> {
     External(ExternalItem<'a>),
     /// A multiline equation with items pre-split into rows and columns.
     Multiline(BumpBox<'a, MultilineItem<'a>>),
-    /// Multiple lines of text laid out as a self-contained block.
-    MultilineText(MultilineTextItem<'a>),
 }
 
 /// Shared properties for all layoutable math components.
@@ -444,66 +458,36 @@ impl<'a> GroupItem<'a> {
         I: IntoIterator<Item = MathItem<'a>>,
         I::IntoIter: ExactSizeIterator,
     {
-        let (preprocessed, might_be_multiline) = preprocess(items, bump, closing_exists);
+        let preprocessed = preprocess(items, bump, closing_exists);
 
         // Check if the preprocessed items contain linebreaks. If so, build
-        // a MultilineItem instead of a GroupItem. The `might_be_multiline`
-        // hint from preprocessing lets us skip the scan in the common case.
-        if might_be_multiline && has_linebreaks(&preprocessed) {
+        // a MultilineItem instead of a GroupItem.
+        if MathItem::has_linebreaks(&preprocessed) {
             return build_multiline(preprocessed, styles, bump);
         }
 
         // Strip alignment points — they only have an effect in multiline
         // contexts (handled above via `build_multiline` → `split_at_align`).
-        let preprocessed =
-            if preprocessed.iter().any(|i| matches!(i, MathItem::Align)) {
-                BumpVec::from_iter_in(
-                    BumpBox::leak(preprocessed).iter_mut().filter_map(|item| {
-                        if matches!(item, MathItem::Align) {
-                            None
-                        } else {
-                            Some(mem::replace(item, MathItem::Space))
-                        }
-                    }),
-                    bump,
-                )
-                .into_boxed_slice()
-            } else {
-                preprocessed
-            };
+        let preprocessed = if preprocessed.iter().any(|i| matches!(i, MathItem::Align)) {
+            BumpVec::from_iter_in(
+                BumpBox::leak(preprocessed).iter_mut().filter_map(|item| {
+                    if matches!(item, MathItem::Align) {
+                        None
+                    } else {
+                        Some(mem::replace(item, MathItem::Space))
+                    }
+                }),
+                bump,
+            )
+            .into_boxed_slice()
+        } else {
+            preprocessed
+        };
 
         let props = MathProperties::default(styles);
         let kind = MathKind::Group(Self { items: preprocessed });
         MathComponent { kind, props, styles }.into()
     }
-}
-
-/// Returns `true` if the items contain linebreaks (directly or in fenced
-/// bodies). Also used by [`MathItem::is_multiline`].
-fn has_linebreaks(items: &[MathItem]) -> bool {
-    let len = items.len();
-    for (i, item) in items.iter().enumerate() {
-        let is_last = i == len - 1;
-        match item {
-            MathItem::Linebreak if !is_last => return true,
-            MathItem::Component(MathComponent {
-                kind: MathKind::Multiline(_), ..
-            }) => return true,
-            MathItem::Component(MathComponent {
-                kind: MathKind::Fenced(fence), ..
-            }) => {
-                if fence.body.is_multiline() {
-                    return true;
-                }
-                if fence.body.ends_with_linebreak() && (fence.close.is_some() || !is_last)
-                {
-                    return true;
-                }
-            }
-            _ => {}
-        }
-    }
-    false
 }
 
 /// Builds a `MultilineItem` from preprocessed items that contain linebreaks.
@@ -543,15 +527,14 @@ fn build_multiline<'a>(
 
     // Step 3: Pad rows to have the same number of columns.
     let max_cols = cell_rows.iter().map(|r| r.len()).max().unwrap_or(0);
-    for row in cell_rows.iter_mut() {
-        while row.len() < max_cols {
-            row.push(BumpVec::new_in(bump));
-        }
-    }
 
     // Step 4: Wrap each column's items into a single MathItem.
     let bump_rows = BumpVec::from_iter_in(
-        cell_rows.into_iter().map(|row| {
+        cell_rows.into_iter().map(|mut row| {
+            while row.len() < max_cols {
+                row.push(BumpVec::new_in(bump));
+            }
+
             BumpVec::from_iter_in(
                 row.into_iter().map(|cell| wrap_cell(cell, styles)),
                 bump,
@@ -562,7 +545,7 @@ fn build_multiline<'a>(
     )
     .into_boxed_slice();
 
-    MultilineItem::create(bump_rows, styles, span, bump)
+    MultilineItem::create(bump_rows, false, styles, span, bump)
 }
 
 /// Splits preprocessed items at `Align` markers into columns, fixing up
@@ -586,8 +569,7 @@ pub(crate) fn split_at_align<'a>(
     cols.push(BumpVec::new_in(bump));
 
     let mut at_boundary = false;
-    for slot in items.iter_mut() {
-        let mut item = mem::replace(slot, MathItem::Space);
+    for mut item in items.iter_mut().map(mem::take) {
         if matches!(item, MathItem::Align) {
             // When crossing a logical column boundary (starting a new
             // even column), fix up rspace in the completed pair.
@@ -659,8 +641,7 @@ fn flatten_into_rows<'a>(
     styles: StyleChain<'a>,
     bump: &'a Bump,
 ) {
-    for slot in items.iter_mut() {
-        let item = mem::replace(slot, MathItem::Space);
+    for item in items.iter_mut().map(mem::take) {
         match item {
             MathItem::Linebreak => {
                 rows.push(BumpVec::new_in(bump));
@@ -714,21 +695,19 @@ fn split_multiline_fence<'a>(
         FencedBody::Ref(_) => unreachable!("original fence always has Owned body"),
     };
 
+    // Phase 1: Collect all body items and record the column count per row.
+    let mut all_bodies: BumpVec<'a, MathItem<'a>> = BumpVec::new_in(bump);
+    let mut row_col_counts: BumpVec<'a, usize> = BumpVec::new_in(bump);
+
     // Build body rows: split at linebreaks and preserve alignment points.
-    let mut body_rows: BumpVec<'a, BumpVec<'a, MathItem<'a>>> = BumpVec::new_in(bump);
     match body {
-        MathItem::Component(MathComponent { kind: MathKind::Multiline(multi), .. }) => {
-            let MultilineItem { rows: multi_rows } = BumpBox::into_inner(multi);
-            let multi_rows = BumpBox::leak(multi_rows);
-            for row in multi_rows.iter_mut() {
-                let mut out = BumpVec::new_in(bump);
-                for (col_idx, cell) in row.iter_mut().enumerate() {
-                    if col_idx > 0 {
-                        out.push(MathItem::Align);
-                    }
-                    out.push(mem::replace(cell, MathItem::Space));
-                }
-                body_rows.push(out);
+        MathItem::Component(MathComponent {
+            kind: MathKind::Multiline(multi), ..
+        }) => {
+            let MultilineItem { rows: multi_rows, .. } = BumpBox::into_inner(multi);
+            for row in BumpBox::leak(multi_rows).iter_mut() {
+                row_col_counts.push(row.len());
+                all_bodies.extend(row.iter_mut().map(mem::take));
             }
         }
         other => {
@@ -739,22 +718,19 @@ fn split_multiline_fence<'a>(
                 }) => BumpBox::leak(group.items),
                 item => core::slice::from_mut(bump.alloc(item)),
             };
+
+            let mut body_rows: BumpVec<'a, BumpVec<'a, MathItem<'a>>> =
+                BumpVec::new_in(bump);
             body_rows.push(BumpVec::new_in(bump));
             flatten_into_rows(body_slice, &mut body_rows, styles, bump);
-        }
-    }
 
-    let num_body_rows = body_rows.len();
-
-    // Phase 1: Collect all body items and record the column count per row.
-    let mut all_bodies: BumpVec<'a, MathItem<'a>> = BumpVec::new_in(bump);
-    let mut row_col_counts: BumpVec<'a, usize> = BumpVec::new_in(bump);
-
-    for mut body_row in body_rows {
-        let cols = split_at_align(body_row.as_mut_slice(), bump);
-        row_col_counts.push(cols.len());
-        for col in cols {
-            all_bodies.push(wrap_cell(col, styles));
+            for mut body_row in body_rows {
+                let cols = split_at_align(body_row.as_mut_slice(), bump);
+                row_col_counts.push(cols.len());
+                for col in cols {
+                    all_bodies.push(wrap_cell(col, styles));
+                }
+            }
         }
     }
 
@@ -768,13 +744,13 @@ fn split_multiline_fence<'a>(
     });
 
     // Phase 2: Create FencedItems with Ref bodies and pre-set sizing.
-    let mut body_idx = 0;
+    let mut bodies_iter = bodies.iter();
     let mut open = open;
     let mut close = close;
 
     for (i, &ncols) in row_col_counts.iter().enumerate() {
         let is_first = i == 0;
-        let is_last = i == num_body_rows - 1;
+        let is_last = i == row_col_counts.len() - 1;
 
         let mut row_items: BumpVec<'a, MathItem<'a>> =
             BumpVec::with_capacity_in(ncols * 2, bump);
@@ -789,7 +765,7 @@ fn split_multiline_fence<'a>(
                 FencedItem {
                     open: col_open,
                     close: col_close,
-                    body: FencedBody::Ref(&bodies[body_idx]),
+                    body: FencedBody::Ref(bodies_iter.next().unwrap()),
                     balanced,
                     sizing: Cell::new(Some(sizing)),
                 },
@@ -805,7 +781,6 @@ fn split_multiline_fence<'a>(
             row_items.push(
                 MathComponent { kind, props: segment_props, styles: fence_styles }.into(),
             );
-            body_idx += 1;
 
             if !is_last_col {
                 row_items.push(MathItem::Align);
@@ -929,7 +904,13 @@ impl<'a> FencedItem<'a> {
         bump: &'a Bump,
     ) -> MathItem<'a> {
         let kind = MathKind::Fenced(BumpBox::new_in(
-            Self { open, close, body: FencedBody::Owned(body), balanced, sizing: Cell::new(None) },
+            Self {
+                open,
+                close,
+                body: FencedBody::Owned(body),
+                balanced,
+                sizing: Cell::new(None),
+            },
             bump,
         ));
         let props = MathProperties::default(styles).with_span(span);
@@ -1284,41 +1265,20 @@ pub struct MultilineItem<'a> {
     /// The cells, organized as rows[row_idx][col_idx].
     /// Each cell is a MathItem (typically a GroupItem).
     pub rows: BumpBox<'a, [BumpBox<'a, [MathItem<'a>]>]>,
-}
-
-/// Multiple lines of text, each laid out independently.
-///
-/// This represents text content containing literal newlines (e.g.,
-/// `"a\nb\nc"`). Unlike [`MultilineItem`], this is a self-contained block
-/// that does not cause the parent expression to split into multiple rows.
-#[derive(Debug)]
-pub struct MultilineTextItem<'a> {
-    /// The text lines (with newline characters removed).
-    pub lines: BumpBox<'a, [&'a str]>,
+    /// Whether this item is text-like and should be aligned to the axis.
+    pub text_like: bool,
 }
 
 impl<'a> MultilineItem<'a> {
     /// Creates a new multiline item.
     pub(crate) fn create(
         rows: BumpBox<'a, [BumpBox<'a, [MathItem<'a>]>]>,
+        text_like: bool,
         styles: StyleChain<'a>,
         span: Span,
         bump: &'a Bump,
     ) -> MathItem<'a> {
-        let kind = MathKind::Multiline(BumpBox::new_in(Self { rows }, bump));
-        let props = MathProperties::default(styles).with_span(span);
-        MathComponent { kind, props, styles }.into()
-    }
-}
-
-impl<'a> MultilineTextItem<'a> {
-    /// Creates a new multiline text item.
-    pub(crate) fn create(
-        lines: BumpBox<'a, [&'a str]>,
-        styles: StyleChain<'a>,
-        span: Span,
-    ) -> MathItem<'a> {
-        let kind = MathKind::MultilineText(Self { lines });
+        let kind = MathKind::Multiline(BumpBox::new_in(Self { rows, text_like }, bump));
         let props = MathProperties::default(styles).with_span(span);
         MathComponent { kind, props, styles }.into()
     }

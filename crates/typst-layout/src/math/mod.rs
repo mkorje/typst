@@ -45,7 +45,7 @@ use self::run::{
 };
 use self::scripts::{layout_primes, layout_scripts};
 use self::table::layout_table;
-use self::text::{layout_glyph, layout_multiline_text, layout_text};
+use self::text::{layout_glyph, layout_text};
 
 /// Layout an inline equation (in a paragraph).
 #[typst_macros::time(span = elem.span())]
@@ -522,11 +522,15 @@ fn layout_realized(
             layout_skewed_fraction(item, ctx, styles, props)?
         }
         MathKind::Text(item) => layout_text(item, ctx, styles, props)?,
-        MathKind::MultilineText(item) => layout_multiline_text(item, ctx, styles, props)?,
         MathKind::Fenced(item) => layout_fenced(item, ctx, styles, props)?,
         MathKind::Multiline(item) => {
             let builder = layout_multiline(item, ctx, styles)?;
-            ctx.push(FrameFragment::new(props, styles, builder.build()));
+            let mut frame = builder.build();
+            if item.text_like {
+                let axis = ctx.font().math().axis_height.resolve(styles);
+                frame.set_baseline(frame.height() / 2.0 + axis);
+            }
+            ctx.push(FrameFragment::new(props, styles, frame));
         }
         MathKind::Group(_) => {
             let fragment = ctx.layout_into_fragment(item, styles)?;
@@ -588,13 +592,7 @@ fn layout_multiline(
     // 4. Build row frames.
     let align = styles.resolve(AlignElem::alignment).x;
     let rows = cell_frags.into_iter().map(|row_frags| {
-        let sub = sub_columns_into_line_frame(
-            row_frags,
-            &points,
-            LeftRightAlternator::Right,
-            None,
-        );
-        sub
+        sub_columns_into_line_frame(row_frags, &points, LeftRightAlternator::Right, None)
     });
 
     Ok(stack_rows(rows, align, leading, total_width, has_alignment))

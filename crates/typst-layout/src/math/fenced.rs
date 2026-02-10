@@ -13,7 +13,8 @@ pub fn layout_fenced(
     styles: StyleChain,
     props: &MathProperties,
 ) -> SourceResult<()> {
-    let body_frags = ctx.layout_into_fragments(&item.body, styles)?;
+    // Layout the body to compute relative_to for delimiter sizing.
+    let body = ctx.layout_into_fragments(&item.body, styles)?;
     let body_styles = item.body.styles().unwrap_or(styles);
     let relative_to = if let Some(sizing) = item.sizing.get() {
         if let Some(cached) = sizing.cached_relative_to.get() {
@@ -24,7 +25,7 @@ pub fn layout_fenced(
             computed
         }
     } else {
-        relative_to_from_fragments(&body_frags, ctx, body_styles, item.balanced)
+        relative_to_from_fragments(&body, ctx, body_styles, item.balanced)
     };
 
     // Set stretch info for stretched mid items.
@@ -43,13 +44,13 @@ pub fn layout_fenced(
         ctx.push(open);
     }
 
-    // Layout the actual body. If stretch info was updated or if the sizing
-    // body differs, re-layout.
+    // Check if the body needs re-layout, since stretch info was updated after
+    // initial layout.
     if has_mid_stretched {
         let body = ctx.layout_into_fragments(&item.body, styles)?;
         ctx.extend(body);
     } else {
-        ctx.extend(body_frags);
+        ctx.extend(body);
     }
 
     // Layout the closing delimiter if present.

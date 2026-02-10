@@ -1,9 +1,9 @@
 use codex::styling::{MathStyle, to_style};
 use ecow::EcoString;
 use typst_library::diag::SourceResult;
-use typst_library::foundations::{Resolve, StyleChain};
-use typst_library::layout::{Abs, AlignElem, Axis, Frame, Size};
-use typst_library::math::ir::{GlyphItem, MathProperties, MultilineTextItem, TextItem};
+use typst_library::foundations::StyleChain;
+use typst_library::layout::{Abs, Axis, Size};
+use typst_library::math::ir::{GlyphItem, MathProperties, TextItem};
 use typst_library::math::{EquationElem, MathSize, style_dtls, style_flac};
 use typst_library::text::{
     BottomEdge, BottomEdgeMetric, Font, TextElem, TopEdge, TopEdgeMetric,
@@ -13,8 +13,8 @@ use typst_utils::Get;
 use unicode_math_class::MathClass;
 
 use super::MathContext;
-use super::fragment::{FrameFragment, GlyphFragment, MathFragment};
-use super::run::{MathFragmentsExt, math_leading, stack_rows};
+use super::fragment::{FrameFragment, GlyphFragment};
+use super::run::MathFragmentsExt;
 
 /// Lays out a [`TextItem`].
 #[typst_macros::time(name = "math text layout", span = props.span)]
@@ -26,58 +26,6 @@ pub fn layout_text(
 ) -> SourceResult<()> {
     let fragment = layout_inline_text(item.text, props.span, ctx, styles, props)?;
     ctx.push(fragment);
-    Ok(())
-}
-
-/// Lays out a [`MultilineTextItem`].
-#[typst_macros::time(name = "math multiline text layout", span = props.span)]
-pub fn layout_multiline_text(
-    item: &MultilineTextItem,
-    ctx: &mut MathContext,
-    styles: StyleChain,
-    props: &MathProperties,
-) -> SourceResult<()> {
-    let leading = math_leading(styles);
-    let align = styles.resolve(AlignElem::alignment).x;
-    let span = props.span;
-
-    let mut line_frames = Vec::with_capacity(item.lines.len());
-    for &line in item.lines.iter() {
-        if line.is_empty() {
-            line_frames.push(Frame::soft(Size::zero()));
-        } else {
-            let frag: MathFragment =
-                layout_inline_text(line, span, ctx, styles, props)?.into();
-            line_frames.push(frag.into_frame());
-        }
-    }
-
-    // Skip trailing empty line (from trailing newline).
-    let effective = if line_frames.last().is_some_and(|f| f.size() == Size::zero()) {
-        line_frames.len() - 1
-    } else {
-        line_frames.len()
-    };
-
-    let total_width = line_frames
-        .iter()
-        .take(effective)
-        .map(|f| f.width())
-        .max()
-        .unwrap_or_default();
-
-    let mut frame = stack_rows(
-        line_frames.into_iter().take(effective),
-        align,
-        leading,
-        total_width,
-        false,
-    )
-    .build();
-
-    let axis = ctx.font().math().axis_height.resolve(styles);
-    frame.set_baseline(frame.height() / 2.0 + axis);
-    ctx.push(FrameFragment::new(props, styles, frame));
     Ok(())
 }
 

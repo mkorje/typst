@@ -101,7 +101,7 @@ impl<'a, 'v, 'e> MathResolver<'a, 'v, 'e> {
                             && fence.close.is_some())
             );
             if needs_multiline {
-                GroupItem::create([item].into_iter(), false, styles, &self.arenas.bump)
+                GroupItem::create([item], false, styles, &self.arenas.bump)
             } else {
                 item
             }
@@ -248,15 +248,23 @@ fn resolve_text<'a, 'v, 'e>(
 
     if styled_text.contains(is_newline) {
         let bump = &ctx.arenas.bump;
-        let lines: BumpVec<'a, &'a str> = BumpVec::from_iter_in(
-            styled_text.split(is_newline).map(|line| &*bump.alloc_str(line)),
+        let rows = BumpVec::from_iter_in(
+            styled_text.split(is_newline).map(|line| {
+                let num = line.chars().all(|c| c.is_ascii_digit() || c == '.');
+                let item = TextItem::create(
+                    EcoString::from(line),
+                    !num,
+                    styles,
+                    elem.span(),
+                    bump,
+                );
+                let row: BumpBox<[MathItem]> = BumpBox::new_in([item], bump).into();
+                row
+            }),
             bump,
-        );
-        ctx.push(MultilineTextItem::create(
-            lines.into_boxed_slice(),
-            styles,
-            elem.span(),
-        ));
+        )
+        .into_boxed_slice();
+        ctx.push(MultilineItem::create(rows, true, styles, elem.span(), bump));
     } else {
         let num = elem.text.chars().all(|c| c.is_ascii_digit() || c == '.');
         ctx.push(TextItem::create(
@@ -1108,7 +1116,7 @@ fn resolve_cells<'a, 'v, 'e>(
                     // spacing across Align boundaries is computed correctly.
                     let cell: Vec<MathItem<'a>> = if has_align {
                         let bump = &ctx.arenas.bump;
-                        let (preprocessed, _) =
+                        let preprocessed =
                             preprocess(ctx.items.drain(start..), bump, false);
                         let cols = split_at_align(BumpBox::leak(preprocessed), bump);
                         cols.into_iter().map(|col| wrap_cell(col, cell_styles)).collect()

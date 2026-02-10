@@ -4,7 +4,7 @@ use bumpalo::{Bump, boxed::Box as BumpBox, collections::Vec as BumpVec};
 use smallvec::SmallVec;
 use unicode_math_class::MathClass;
 
-use super::item::{MathComponent, MathItem, MathKind};
+use super::item::MathItem;
 use crate::math::{MEDIUM, MathSize, THICK, THIN};
 
 /// Takes the given [`MathItem`]s and processes the spacing between them.
@@ -23,7 +23,7 @@ pub(crate) fn preprocess<'a, I>(
     items: I,
     bump: &'a Bump,
     closing: bool,
-) -> (BumpBox<'a, [MathItem<'a>]>, bool)
+) -> BumpBox<'a, [MathItem<'a>]>
 where
     I: IntoIterator<Item = MathItem<'a>>,
     I::IntoIter: ExactSizeIterator,
@@ -34,7 +34,6 @@ where
 
     let mut last: Option<usize> = None;
     let mut space: Option<MathItem> = None;
-    let mut might_be_multiline = false;
 
     for mut item in iter {
         match item {
@@ -77,7 +76,6 @@ where
 
             // New line, new things.
             MathItem::Linebreak => {
-                might_be_multiline = true;
                 resolved.push(item);
                 space = None;
                 last = None;
@@ -85,21 +83,6 @@ where
             }
 
             _ => {}
-        }
-
-        // Track items that might indicate multiline content.
-        if !might_be_multiline
-            && let MathItem::Component(MathComponent { kind, .. }) = &item
-        {
-            match kind {
-                MathKind::Multiline(_) => might_be_multiline = true,
-                MathKind::Fenced(fence)
-                    if fence.body.is_multiline() || fence.body.ends_with_linebreak() =>
-                {
-                    might_be_multiline = true;
-                }
-                _ => {}
-            }
         }
 
         // Convert variable operators into binary operators if something
@@ -150,11 +133,15 @@ where
     // last one stripped here; the remaining ones produce empty rows in
     // `build_multiline` which are preserved (layout_multiline does not
     // strip trailing empty rows).
-    if resolved.0.last().is_some_and(|item| matches!(item, MathItem::Linebreak)) {
+    if resolved
+        .0
+        .last()
+        .is_some_and(|item| matches!(item, MathItem::Linebreak))
+    {
         resolved.0.pop();
     }
 
-    (BumpVec::from_iter_in(resolved.0, bump).into_boxed_slice(), might_be_multiline)
+    BumpVec::from_iter_in(resolved.0, bump).into_boxed_slice()
 }
 
 /// Computes the spacing between two adjacent math items.
