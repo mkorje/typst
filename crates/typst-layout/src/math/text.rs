@@ -2,19 +2,19 @@ use codex::styling::{MathStyle, to_style};
 use ecow::EcoString;
 use typst_library::diag::SourceResult;
 use typst_library::foundations::{Resolve, StyleChain};
-use typst_library::layout::{Abs, Axis, Size};
-use typst_library::math::ir::{GlyphItem, MathProperties, TextItem};
+use typst_library::layout::{Abs, AlignElem, Axis, Frame, Point, Size};
+use typst_library::math::ir::{GlyphItem, MathProperties, MultilineTextItem, TextItem};
 use typst_library::math::{EquationElem, MathSize, style_dtls, style_flac};
 use typst_library::text::{
     BottomEdge, BottomEdgeMetric, Font, TextElem, TopEdge, TopEdgeMetric,
 };
-use typst_syntax::{Span, is_newline};
+use typst_syntax::Span;
 use typst_utils::Get;
 use unicode_math_class::MathClass;
 
 use super::MathContext;
 use super::fragment::{FrameFragment, GlyphFragment, MathFragment};
-use super::run::MathFragmentsExt;
+use super::run::{MathFragmentsExt, MathRunFrameBuilder, math_leading};
 
 /// Lays out a [`TextItem`].
 #[typst_macros::time(name = "math text layout", span = props.span)]
@@ -24,38 +24,66 @@ pub fn layout_text(
     styles: StyleChain,
     props: &MathProperties,
 ) -> SourceResult<()> {
-    let text = &item.text;
-    let span = props.span;
-    let fragment = if text.contains(is_newline) {
-        layout_text_lines(text.split(is_newline), span, ctx, styles, props)?
-    } else {
-        layout_inline_text(text, span, ctx, styles, props)?
-    };
+    let fragment = layout_inline_text(item.text, props.span, ctx, styles, props)?;
     ctx.push(fragment);
     Ok(())
 }
 
-/// Layout multiple lines of text.
-fn layout_text_lines<'a>(
-    lines: impl Iterator<Item = &'a str>,
-    span: Span,
+/// Lays out a [`MultilineTextItem`].
+#[typst_macros::time(name = "math multiline text layout", span = props.span)]
+pub fn layout_multiline_text(
+    item: &MultilineTextItem,
     ctx: &mut MathContext,
     styles: StyleChain,
     props: &MathProperties,
-) -> SourceResult<FrameFragment> {
-    let mut fragments = vec![];
-    for (i, line) in lines.enumerate() {
-        if i != 0 {
-            fragments.push(MathFragment::Linebreak);
-        }
-        if !line.is_empty() {
-            fragments.push(layout_inline_text(line, span, ctx, styles, props)?.into());
+) -> SourceResult<()> {
+    let leading = math_leading(styles);
+    let align = styles.resolve(AlignElem::alignment).x;
+    let span = props.span;
+
+    let mut line_frames = Vec::with_capacity(item.lines.len());
+    for &line in item.lines.iter() {
+        if line.is_empty() {
+            line_frames.push(Frame::soft(Size::zero()));
+        } else {
+            let frag: MathFragment =
+                layout_inline_text(line, span, ctx, styles, props)?.into();
+            line_frames.push(frag.into_frame());
         }
     }
-    let mut frame = fragments.into_frame(styles);
+
+    // Skip trailing empty line (from trailing newline).
+    let effective = if line_frames.last().is_some_and(|f| f.size() == Size::zero()) {
+        line_frames.len() - 1
+    } else {
+        line_frames.len()
+    };
+
+    let total_width = line_frames
+        .iter()
+        .take(effective)
+        .map(|f| f.width())
+        .max()
+        .unwrap_or_default();
+
+    let mut frames = Vec::with_capacity(effective);
+    let mut size = Size::zero();
+    for (i, sub) in line_frames.into_iter().take(effective).enumerate() {
+        if i > 0 {
+            size.y += leading;
+        }
+        let mut pos = Point::with_y(size.y);
+        pos.x = align.position(total_width - sub.width());
+        size.x.set_max(sub.width());
+        size.y += sub.height();
+        frames.push((sub, pos));
+    }
+
+    let mut frame = MathRunFrameBuilder { size, frames }.build();
     let axis = ctx.font().math().axis_height.resolve(styles);
     frame.set_baseline(frame.height() / 2.0 + axis);
-    Ok(FrameFragment::new(props, styles, frame))
+    ctx.push(FrameFragment::new(props, styles, frame));
+    Ok(())
 }
 
 /// Layout the given text string into a [`FrameFragment`] after styling all
@@ -77,7 +105,7 @@ fn layout_inline_text(
             let glyph = GlyphFragment::new_char(ctx, styles, c, span).unwrap();
             fragments.push(glyph.into());
         }
-        let frame = fragments.into_frame(styles);
+        let frame = fragments.into_frame();
         Ok(FrameFragment::new(props, styles, frame).with_text_like(true))
     } else {
         let local = [

@@ -13,19 +13,22 @@ pub fn layout_fenced(
     styles: StyleChain,
     props: &MathProperties,
 ) -> SourceResult<()> {
-    // Layout the body to compute relative_to for delimiter sizing.
-    let body = ctx.layout_into_fragments(&item.body, styles)?;
+    // Use sizing_body for height computation if available (split fence case),
+    // otherwise use the regular body.
+    let has_sizing_body = item.sizing_body.is_some();
+    let sizing_ref = item.sizing_body.unwrap_or(&item.body);
+    let sizing_frags = ctx.layout_into_fragments(sizing_ref, styles)?;
     let relative_to = if item.balanced {
         let mut max_extent = Abs::zero();
-        for fragment in body.iter() {
-            let (font, size) = fragment.font(ctx, item.body.styles().unwrap_or(styles));
+        for fragment in sizing_frags.iter() {
+            let (font, size) = fragment.font(ctx, sizing_ref.styles().unwrap_or(styles));
             let axis = font.math().axis_height.at(size);
             let extent = (fragment.ascent() - axis).max(fragment.descent() + axis);
             max_extent = max_extent.max(extent);
         }
         2.0 * max_extent
     } else {
-        body.iter().map(|f| f.height()).max().unwrap_or_default()
+        sizing_frags.iter().map(|f| f.height()).max().unwrap_or_default()
     };
 
     // Set stretch info for stretched mid items.
@@ -44,13 +47,16 @@ pub fn layout_fenced(
         ctx.push(open);
     }
 
-    // Check if the body needs re-layout, since stretch info was updated after
-    // initial layout.
-    if has_mid_stretched {
+    // Layout the actual body (which may differ from the sizing body).
+    if has_sizing_body || has_mid_stretched {
+        // Re-layout the actual body since either:
+        // - The sizing body differs from the actual body, or
+        // - Stretch info was updated after initial layout.
         let body = ctx.layout_into_fragments(&item.body, styles)?;
         ctx.extend(body);
     } else {
-        ctx.extend(body);
+        // Reuse the sizing fragments since they're the same as the body.
+        ctx.extend(sizing_frags);
     }
 
     // Layout the closing delimiter if present.

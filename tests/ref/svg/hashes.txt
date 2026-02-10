@@ -966,7 +966,7 @@ f6b059d0ba0898f9c4b09bfc53aacd00 math-align-cases
 252f372180ebe05a2ce86b5436a4c5f3 math-align-lines-mixed
 48b116d9050dc1e89f7931861912297b math-align-post-fix
 e903d4773268550ea6d9ed832de0b32c math-align-spacing
-8292d598c6cfa41d244dbab7e4981097 math-align-spacing-ignorant
+e1d4c7b40e064064af7e3a329708e961 math-align-spacing-ignorant
 a6bc9308e7d2353152aefe65e6fee8af math-align-toggle
 22367cedd3184e70a558e56f3262f4c9 math-align-weird
 d48551a38a1760b2134b753464e7cbbd math-align-wider-first-column

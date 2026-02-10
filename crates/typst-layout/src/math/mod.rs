@@ -22,9 +22,10 @@ use typst_library::layout::{
     OuterHAlignment, Point, Region, Regions, Size, SpecificAlignment, VAlignment,
 };
 use typst_library::math::ir::{
-    BoxItem, ExternalItem, MathItem, MathKind, MathProperties, resolve_equation,
+    BoxItem, ExternalItem, MathItem, MathKind, MathProperties, MultilineItem,
+    resolve_equation,
 };
-use typst_library::math::{EquationElem, families};
+use typst_library::math::{EquationElem, LeftRightAlternator, families};
 use typst_library::model::ParElem;
 use typst_library::routines::Arenas;
 use typst_library::text::{Font, FontFlags, TextEdgeBounds, TextElem, variant};
@@ -38,10 +39,13 @@ use self::fraction::{layout_fraction, layout_skewed_fraction};
 use self::fragment::{FrameFragment, MathFragment};
 use self::line::layout_line;
 use self::radical::layout_radical;
-use self::run::{MathFragmentsExt, MathRunFrameBuilder};
+use self::run::{
+    MathFragmentsExt, MathRunFrameBuilder, cumulative_alignment_points, math_leading,
+    sub_columns_into_line_frame,
+};
 use self::scripts::{layout_primes, layout_scripts};
 use self::table::layout_table;
-use self::text::{layout_glyph, layout_text};
+use self::text::{layout_glyph, layout_multiline_text, layout_text};
 
 /// Layout an inline equation (in a paragraph).
 #[typst_macros::time(span = elem.span())]
@@ -124,9 +128,20 @@ pub fn layout_equation_block(
     let item = resolve_equation(elem, engine, &mut locator, &arenas, styles)?;
 
     let mut ctx = MathContext::new(engine, &mut locator, regions.base(), font.clone());
-    let full_equation_builder = ctx
-        .layout_into_fragments(&item, styles)?
-        .multiline_frame_builder(styles);
+
+    // Check if the top-level item is a MultilineItem and use layout_multiline
+    // directly in that case. Otherwise, use the standard fragment-based path.
+    let full_equation_builder = if let MathItem::Component(comp) = &item
+        && let MathKind::Multiline(multi) = &comp.kind
+    {
+        layout_multiline(multi, &mut ctx, styles)?
+    } else {
+        let frame = ctx.layout_into_fragments(&item, styles)?.into_frame();
+        MathRunFrameBuilder {
+            size: frame.size(),
+            frames: vec![(frame, Point::zero())],
+        }
+    };
     let width = full_equation_builder.size.x;
 
     let equation_builders = if styles.get(BlockElem::breakable) {
@@ -430,7 +445,7 @@ impl<'a, 'v, 'e> MathContext<'a, 'v, 'e> {
 
         let styles = item.styles().unwrap_or(styles);
         let props = MathProperties::default(styles);
-        let frame = fragments.into_frame(styles);
+        let frame = fragments.into_frame();
         Ok(FrameFragment::new(&props, styles, frame)
             .with_text_like(text_like)
             .into())
@@ -476,8 +491,7 @@ fn layout_realized(
             MathItem::Spacing(amount, _) => ctx.push(MathFragment::Space(*amount)),
             MathItem::Space => ctx
                 .push(MathFragment::Space(ctx.font().math().space_width.resolve(styles))),
-            MathItem::Linebreak => ctx.push(MathFragment::Linebreak),
-            MathItem::Align => ctx.push(MathFragment::Align),
+            MathItem::Align => {}
             MathItem::Tag(tag) => ctx.push(MathFragment::Tag(tag.clone())),
             _ => unreachable!(),
         }
@@ -489,16 +503,7 @@ fn layout_realized(
     // Insert left spacing.
     if let Some(lspace) = props.lspace {
         let width = lspace.at(styles.resolve(TextElem::size));
-        let frag = MathFragment::Space(width);
-        if let Some(i) = ctx.fragments.iter().rposition(|f| !f.is_ignorant())
-            && matches!(ctx.fragments[i], MathFragment::Align)
-        {
-            // Skip a single alignment point (if one exists) when placing
-            // spacing on the left.
-            ctx.fragments.insert(i, frag);
-        } else {
-            ctx.push(frag);
-        }
+        ctx.push(MathFragment::Space(width));
     }
 
     // Dispatch based on item kind to the appropriate layout function.
@@ -518,7 +523,12 @@ fn layout_realized(
             layout_skewed_fraction(item, ctx, styles, props)?
         }
         MathKind::Text(item) => layout_text(item, ctx, styles, props)?,
+        MathKind::MultilineText(item) => layout_multiline_text(item, ctx, styles, props)?,
         MathKind::Fenced(item) => layout_fenced(item, ctx, styles, props)?,
+        MathKind::Multiline(item) => {
+            let builder = layout_multiline(item, ctx, styles)?;
+            ctx.push(FrameFragment::new(props, styles, builder.build()));
+        }
         MathKind::Group(_) => {
             let fragment = ctx.layout_into_fragment(item, styles)?;
             let italics = fragment.italics_correction();
@@ -538,6 +548,66 @@ fn layout_realized(
     }
 
     Ok(())
+}
+
+/// Lays out a [`MultilineItem`] into a [`MathRunFrameBuilder`].
+///
+/// Each cell is laid out into fragments. Column widths are computed as the
+/// maximum cell width per column, then converted to cumulative alignment
+/// points. Cells are positioned using left/right alternation at the
+/// alignment points: odd columns (0, 2, 4, ...) are right-aligned to their
+/// point, even columns (1, 3, 5, ...) are left-aligned from the previous
+/// point.
+fn layout_multiline(
+    item: &MultilineItem,
+    ctx: &mut MathContext,
+    styles: StyleChain,
+) -> SourceResult<MathRunFrameBuilder> {
+    let nrows = item.rows.len();
+    let ncols = item.rows.first().map_or(0, |r| r.len());
+
+    // 1. Layout each cell into fragments and compute max column widths.
+    let mut cell_frags: Vec<Vec<Vec<MathFragment>>> = Vec::with_capacity(nrows);
+    let mut col_widths: Vec<Abs> = vec![Abs::zero(); ncols];
+    for row in item.rows.iter() {
+        let mut row_frags = Vec::with_capacity(ncols);
+        for (c, cell) in row.iter().enumerate() {
+            let frags = ctx.layout_into_fragments(cell, styles)?;
+            col_widths[c].set_max(frags.iter().map(|f| f.width()).sum());
+            row_frags.push(frags);
+        }
+        cell_frags.push(row_frags);
+    }
+
+    // 2. Compute cumulative alignment points.
+    let (points, total_width) = cumulative_alignment_points(&col_widths);
+    let has_alignment = !points.is_empty();
+
+    // 3. Compute leading.
+    let leading = math_leading(styles);
+
+    // 4. Build row frames.
+    let align = styles.resolve(AlignElem::alignment).x;
+    let mut frames: Vec<(Frame, Point)> = Vec::with_capacity(nrows);
+    let mut size = Size::zero();
+
+    for (i, row_frags) in cell_frags.into_iter().enumerate() {
+        let sub =
+            sub_columns_into_line_frame(row_frags, &points, LeftRightAlternator::Right);
+
+        if i > 0 {
+            size.y += leading;
+        }
+        let mut pos = Point::with_y(size.y);
+        if !has_alignment {
+            pos.x = align.position(total_width - sub.width());
+        }
+        size.x.set_max(sub.width());
+        size.y += sub.height();
+        frames.push((sub, pos));
+    }
+
+    Ok(MathRunFrameBuilder { size, frames })
 }
 
 /// Lays out a [`BoxItem`].

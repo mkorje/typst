@@ -6,7 +6,11 @@ use typst_syntax::{Span, is_newline};
 use typst_utils::SliceExt;
 use unicode_segmentation::UnicodeSegmentation;
 
+use bumpalo::boxed::Box as BumpBox;
+use bumpalo::collections::Vec as BumpVec;
+
 use super::item::*;
+use super::preprocess::preprocess;
 use crate::diag::{SourceResult, bail, warning};
 use crate::engine::Engine;
 use crate::foundations::{Content, Packed, Resolve, StyleChain, Styles, SymbolElem};
@@ -221,22 +225,33 @@ fn resolve_text<'a, 'v, 'e>(
     // Disable auto-italic.
     let italic = styles.get(EquationElem::italic).or(Some(false));
 
-    let num = elem.text.chars().all(|c| c.is_ascii_digit() || c == '.');
-    let multiline = elem.text.contains(is_newline);
-
     let styled_text: EcoString = elem
         .text
         .chars()
         .flat_map(|c| to_style(c, MathStyle::select(c, variant, bold, italic)))
         .collect();
 
-    ctx.push(TextItem::create(
-        styled_text,
-        !multiline && !num,
-        styles,
-        elem.span(),
-        &ctx.arenas.bump,
-    ));
+    if styled_text.contains(is_newline) {
+        let bump = &ctx.arenas.bump;
+        let lines: BumpVec<'a, &'a str> = BumpVec::from_iter_in(
+            styled_text.split(is_newline).map(|line| &*bump.alloc_str(line)),
+            bump,
+        );
+        ctx.push(MultilineTextItem::create(
+            lines.into_boxed_slice(),
+            styles,
+            elem.span(),
+        ));
+    } else {
+        let num = elem.text.chars().all(|c| c.is_ascii_digit() || c == '.');
+        ctx.push(TextItem::create(
+            styled_text,
+            !num,
+            styles,
+            elem.span(),
+            &ctx.arenas.bump,
+        ));
+    }
     Ok(())
 }
 
@@ -1036,18 +1051,66 @@ fn resolve_cells<'a, 'v, 'e>(
             row.iter()
                 .map(|cell| {
                     let cell_span = cell.span();
-                    let cell = ctx.resolve_into_item(cell, cell_styles)?;
+                    let start = ctx.resolve_into_items(cell, cell_styles)?;
 
-                    // We ignore linebreaks in the cells as we can't differentiate
-                    // alignment points for the whole body from ones for a specific
-                    // cell, and multiline cells don't quite make sense at the moment.
-                    if cell.is_multiline() {
+                    // Scan once for both linebreaks and alignment points.
+                    let mut has_linebreaks = false;
+                    let mut has_align = false;
+                    for item in &ctx.items[start..] {
+                        match item {
+                            MathItem::Linebreak => has_linebreaks = true,
+                            MathItem::Align => has_align = true,
+                            _ => {}
+                        }
+                        if has_linebreaks && has_align {
+                            break;
+                        }
+                    }
+
+                    // Strip linebreaks: they don't make sense in cells since
+                    // we can't differentiate alignment points for the whole
+                    // body from ones for a specific cell.
+                    if has_linebreaks {
                         ctx.engine.sink.warn(warning!(
                            cell_span,
                            "linebreaks are ignored in {}", children;
                            hint: "use commas instead to separate each line";
                         ));
+                        let mut dest = start;
+                        for src in start..ctx.items.len() {
+                            if !matches!(ctx.items[src], MathItem::Linebreak) {
+                                if dest != src {
+                                    ctx.items.swap(dest, src);
+                                }
+                                dest += 1;
+                            }
+                        }
+                        ctx.items.truncate(dest);
                     }
+
+                    // Create the cell's sub-columns by splitting at
+                    // Align markers. Preprocessing is done first so that
+                    // spacing across Align boundaries is computed correctly.
+                    let cell: Vec<MathItem<'a>> = if has_align {
+                        let bump = &ctx.arenas.bump;
+                        let (preprocessed, _) =
+                            preprocess(ctx.items.drain(start..), bump, false);
+                        let cols = split_at_align(BumpBox::leak(preprocessed), bump);
+                        cols.into_iter().map(|col| wrap_cell(col, cell_styles)).collect()
+                    } else {
+                        let len = ctx.items.len() - start;
+                        let item = if len == 1 {
+                            ctx.items.pop().unwrap()
+                        } else {
+                            GroupItem::create(
+                                ctx.items.drain(start..),
+                                false,
+                                cell_styles,
+                                &ctx.arenas.bump,
+                            )
+                        };
+                        vec![item]
+                    };
                     Ok(cell)
                 })
                 .collect::<SourceResult<_>>()
