@@ -92,7 +92,19 @@ impl<'a, 'v, 'e> MathResolver<'a, 'v, 'e> {
         // they get stripped (alignment points are no-ops outside of multiline
         // contexts).
         Ok(if len == 1 && !matches!(self.items.last(), Some(MathItem::Align)) {
-            self.items.pop().unwrap()
+            let item = self.items.pop().unwrap();
+            let needs_multiline = matches!(
+                &item,
+                MathItem::Component(MathComponent { kind: MathKind::Fenced(fence), .. })
+                    if fence.body.is_multiline()
+                        || (fence.body.ends_with_linebreak()
+                            && fence.close.is_some())
+            );
+            if needs_multiline {
+                GroupItem::create([item].into_iter(), false, styles, &self.arenas.bump)
+            } else {
+                item
+            }
         } else {
             GroupItem::create(self.items.drain(start..), false, styles, &self.arenas.bump)
         })

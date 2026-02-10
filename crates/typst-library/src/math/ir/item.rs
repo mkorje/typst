@@ -608,10 +608,8 @@ pub(crate) fn split_at_align<'a>(
                 // Move the lspace to the end of the previous
                 // column as explicit spacing.
                 let resolved = lspace.resolve(comp.styles);
-                if cols.len() >= 2 {
-                    let idx = cols.len() - 2;
-                    cols[idx].push(MathItem::Spacing(resolved, false));
-                }
+                let idx = cols.len() - 2;
+                cols[idx].push(MathItem::Spacing(resolved, false));
             }
             at_boundary = false;
         }
@@ -692,9 +690,14 @@ fn flatten_into_rows<'a>(
 
 /// Splits a multiline fenced item across rows.
 ///
-/// The opening delimiter goes in the current row and the closing delimiter
-/// goes in the last row of the body. Each row's portion is wrapped in its
-/// own FencedItem sharing a `sizing_body` that contains all body items.
+/// The opening delimiter is placed into the first row and the closing
+/// delimiter into the last row so that alignment points inside the body
+/// remain visible at the row level.
+///
+/// Uses a two-phase approach:
+/// 1. Collect all body items into a shared arena slice.
+/// 2. Create `FencedItem`s with `FencedBody::Ref` pointing into the arena
+///    slice and `FenceSizing` pre-set at creation time.
 fn split_multiline_fence<'a>(
     fence: FencedItem<'a>,
     props: MathProperties,
@@ -703,45 +706,113 @@ fn split_multiline_fence<'a>(
     styles: StyleChain<'a>,
     bump: &'a Bump,
 ) {
-    let FencedItem { open, close, body, balanced, sizing_body: _ } = fence;
+    let FencedItem { open, close, body, balanced, sizing: _ } = fence;
 
-    // Get a mutable slice of body items, avoiding heap allocation.
-    let body_slice: &mut [MathItem<'a>] = match body {
-        MathItem::Component(MathComponent { kind: MathKind::Group(group), .. }) => {
-            BumpBox::leak(group.items)
-        }
-        other => core::slice::from_mut(bump.alloc(other)),
+    // Extract the owned body.
+    let body = match body {
+        FencedBody::Owned(item) => item,
+        FencedBody::Ref(_) => unreachable!("original fence always has Owned body"),
     };
 
-    // Build body rows: split body items at linebreaks.
+    // Build body rows: split at linebreaks and preserve alignment points.
     let mut body_rows: BumpVec<'a, BumpVec<'a, MathItem<'a>>> = BumpVec::new_in(bump);
-    body_rows.push(BumpVec::new_in(bump));
-    flatten_into_rows(body_slice, &mut body_rows, styles, bump);
+    match body {
+        MathItem::Component(MathComponent { kind: MathKind::Multiline(multi), .. }) => {
+            let MultilineItem { rows: multi_rows } = BumpBox::into_inner(multi);
+            let multi_rows = BumpBox::leak(multi_rows);
+            for row in multi_rows.iter_mut() {
+                let mut out = BumpVec::new_in(bump);
+                for (col_idx, cell) in row.iter_mut().enumerate() {
+                    if col_idx > 0 {
+                        out.push(MathItem::Align);
+                    }
+                    out.push(mem::replace(cell, MathItem::Space));
+                }
+                body_rows.push(out);
+            }
+        }
+        other => {
+            let body_slice: &mut [MathItem<'a>] = match other {
+                MathItem::Component(MathComponent {
+                    kind: MathKind::Group(group),
+                    ..
+                }) => BumpBox::leak(group.items),
+                item => core::slice::from_mut(bump.alloc(item)),
+            };
+            body_rows.push(BumpVec::new_in(bump));
+            flatten_into_rows(body_slice, &mut body_rows, styles, bump);
+        }
+    }
 
     let num_body_rows = body_rows.len();
+
+    // Phase 1: Collect all body items and record the column count per row.
+    let mut all_bodies: BumpVec<'a, MathItem<'a>> = BumpVec::new_in(bump);
+    let mut row_col_counts: BumpVec<'a, usize> = BumpVec::new_in(bump);
+
+    for mut body_row in body_rows {
+        let cols = split_at_align(body_row.as_mut_slice(), bump);
+        row_col_counts.push(cols.len());
+        for col in cols {
+            all_bodies.push(wrap_cell(col, styles));
+        }
+    }
+
+    // Leak bodies into the arena for shared access.
+    let bodies: &'a [MathItem<'a>] = BumpBox::leak(all_bodies.into_boxed_slice());
+
+    // Build shared FenceSizing from arena references.
+    let sizing = bump.alloc(FenceSizing {
+        items: BumpVec::from_iter_in(bodies.iter(), bump).into_boxed_slice(),
+        cached_relative_to: Cell::new(None),
+    });
+
+    // Phase 2: Create FencedItems with Ref bodies and pre-set sizing.
+    let mut body_idx = 0;
     let mut open = open;
     let mut close = close;
 
-    for (i, body_row) in body_rows.into_iter().enumerate() {
+    for (i, &ncols) in row_col_counts.iter().enumerate() {
         let is_first = i == 0;
         let is_last = i == num_body_rows - 1;
 
-        let row_open = if is_first { open.take() } else { None };
-        let row_close = if is_last { close.take() } else { None };
+        let mut row_items: BumpVec<'a, MathItem<'a>> =
+            BumpVec::with_capacity_in(ncols * 2, bump);
 
-        let body_item = wrap_cell(body_row, styles);
+        for col_idx in 0..ncols {
+            let is_first_col = col_idx == 0;
+            let is_last_col = col_idx + 1 == ncols;
+            let col_open = if is_first && is_first_col { open.take() } else { None };
+            let col_close = if is_last && is_last_col { close.take() } else { None };
 
-        let fenced = FencedItem::create(
-            row_open,
-            row_close,
-            body_item,
-            balanced,
-            fence_styles,
-            props.span,
-            bump,
-        );
+            let fence = BumpBox::new_in(
+                FencedItem {
+                    open: col_open,
+                    close: col_close,
+                    body: FencedBody::Ref(&bodies[body_idx]),
+                    balanced,
+                    sizing: Cell::new(Some(sizing)),
+                },
+                bump,
+            );
+            let kind = MathKind::Fenced(fence);
 
-        rows.last_mut().unwrap().push(fenced);
+            let mut segment_props = props;
+            segment_props.lspace =
+                if is_first && is_first_col { props.lspace } else { None };
+            segment_props.rspace =
+                if is_last && is_last_col { props.rspace } else { None };
+            row_items.push(
+                MathComponent { kind, props: segment_props, styles: fence_styles }.into(),
+            );
+            body_idx += 1;
+
+            if !is_last_col {
+                row_items.push(MathItem::Align);
+            }
+        }
+
+        rows.last_mut().unwrap().extend(row_items);
 
         if !is_last {
             rows.push(BumpVec::new_in(bump));
@@ -794,6 +865,36 @@ impl<'a> RadicalItem<'a> {
     }
 }
 
+/// Shared sizing information for a split fence.
+#[derive(Debug)]
+pub struct FenceSizing<'a> {
+    /// The body items of all split fence segments (linebreak/align removed).
+    pub items: BumpBox<'a, [&'a MathItem<'a>]>,
+    /// Cached target height for stretch calculation.
+    pub cached_relative_to: Cell<Option<Abs>>,
+}
+
+/// The body of a [`FencedItem`], which can be either owned or a reference
+/// to a shared arena-allocated item.
+#[derive(Debug)]
+pub enum FencedBody<'a> {
+    /// Body created during resolution (owned by this FencedItem).
+    Owned(MathItem<'a>),
+    /// Body allocated in a shared arena slice (used by split fence segments).
+    Ref(&'a MathItem<'a>),
+}
+
+impl<'a> std::ops::Deref for FencedBody<'a> {
+    type Target = MathItem<'a>;
+
+    fn deref(&self) -> &MathItem<'a> {
+        match self {
+            FencedBody::Owned(item) => item,
+            FencedBody::Ref(item) => item,
+        }
+    }
+}
+
 /// An item enclosed in delimiters.
 #[derive(Debug)]
 pub struct FencedItem<'a> {
@@ -802,7 +903,7 @@ pub struct FencedItem<'a> {
     /// The optional closing delimiter.
     pub close: Option<MathItem<'a>>,
     /// The item between the delimiters.
-    pub body: MathItem<'a>,
+    pub body: FencedBody<'a>,
     /// How the target height for the delimiters should be calculated.
     ///
     /// If true, the height for each body item is two times the maximum of its
@@ -811,11 +912,9 @@ pub struct FencedItem<'a> {
     ///
     /// Only used in paged export.
     pub balanced: bool,
-    /// When this fenced item was split from a multiline body, this holds
-    /// a reference to the complete body (all rows' items combined, without
-    /// linebreaks). Used only for computing delimiter height (`relative_to`).
-    /// If `None`, `body` is used for height computation.
-    pub sizing_body: Option<&'a MathItem<'a>>,
+    /// When this fenced item was split from a multiline body, this points to
+    /// shared sizing data across all segments. If `None`, `body` is used.
+    pub sizing: Cell<Option<&'a FenceSizing<'a>>>,
 }
 
 impl<'a> FencedItem<'a> {
@@ -830,7 +929,7 @@ impl<'a> FencedItem<'a> {
         bump: &'a Bump,
     ) -> MathItem<'a> {
         let kind = MathKind::Fenced(BumpBox::new_in(
-            Self { open, close, body, balanced, sizing_body: None },
+            Self { open, close, body: FencedBody::Owned(body), balanced, sizing: Cell::new(None) },
             bump,
         ));
         let props = MathProperties::default(styles).with_span(span);
