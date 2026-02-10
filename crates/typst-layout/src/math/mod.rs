@@ -491,7 +491,6 @@ fn layout_realized(
             MathItem::Spacing(amount, _) => ctx.push(MathFragment::Space(*amount)),
             MathItem::Space => ctx
                 .push(MathFragment::Space(ctx.font().math().space_width.resolve(styles))),
-            MathItem::Align => {}
             MathItem::Tag(tag) => ctx.push(MathFragment::Tag(tag.clone())),
             _ => unreachable!(),
         }

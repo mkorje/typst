@@ -88,7 +88,10 @@ impl<'a, 'v, 'e> MathResolver<'a, 'v, 'e> {
     ) -> SourceResult<MathItem<'a>> {
         let start = self.resolve_into_items(elem, styles)?;
         let len = self.items.len() - start;
-        Ok(if len == 1 {
+        // Route standalone alignment points through GroupItem::create so
+        // they get stripped (alignment points are no-ops outside of multiline
+        // contexts).
+        Ok(if len == 1 && !matches!(self.items.last(), Some(MathItem::Align)) {
             self.items.pop().unwrap()
         } else {
             GroupItem::create(self.items.drain(start..), false, styles, &self.arenas.bump)

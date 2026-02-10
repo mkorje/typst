@@ -453,6 +453,25 @@ impl<'a> GroupItem<'a> {
             return build_multiline(preprocessed, styles, bump);
         }
 
+        // Strip alignment points — they only have an effect in multiline
+        // contexts (handled above via `build_multiline` → `split_at_align`).
+        let preprocessed =
+            if preprocessed.iter().any(|i| matches!(i, MathItem::Align)) {
+                BumpVec::from_iter_in(
+                    BumpBox::leak(preprocessed).iter_mut().filter_map(|item| {
+                        if matches!(item, MathItem::Align) {
+                            None
+                        } else {
+                            Some(mem::replace(item, MathItem::Space))
+                        }
+                    }),
+                    bump,
+                )
+                .into_boxed_slice()
+            } else {
+                preprocessed
+            };
+
         let props = MathProperties::default(styles);
         let kind = MathKind::Group(Self { items: preprocessed });
         MathComponent { kind, props, styles }.into()
