@@ -584,7 +584,8 @@ pub(crate) fn split_at_align<'a>(
 ) -> BumpVec<'a, BumpVec<'a, MathItem<'a>>> {
     let mut cols: BumpVec<'a, BumpVec<'a, MathItem<'a>>> = BumpVec::new_in(bump);
     cols.push(BumpVec::new_in(bump));
-    let mut at_align_boundary = false;
+
+    let mut at_boundary = false;
     for slot in items.iter_mut() {
         let mut item = mem::replace(slot, MathItem::Space);
         if matches!(item, MathItem::Align) {
@@ -594,27 +595,29 @@ pub(crate) fn split_at_align<'a>(
                 fixup_rspace_in_last_pair(&mut cols);
             }
             cols.push(BumpVec::new_in(bump));
-            at_align_boundary = true;
-        } else {
-            // If we just passed an alignment point, check if this item
-            // has lspace that should be moved to the previous column.
-            if at_align_boundary && !item.is_ignorant() {
-                if let MathItem::Component(ref mut comp) = item
-                    && let Some(lspace) = comp.props.lspace.take()
-                {
-                    // Move the lspace to the end of the previous
-                    // column as explicit spacing.
-                    let resolved = lspace.resolve(comp.styles);
-                    if cols.len() >= 2 {
-                        let idx = cols.len() - 2;
-                        cols[idx].push(MathItem::Spacing(resolved, false));
-                    }
-                }
-                at_align_boundary = false;
-            }
-            cols.last_mut().unwrap().push(item);
+            at_boundary = true;
+            continue;
         }
+
+        // If we just passed an alignment point, check if this item
+        // has lspace that should be moved to the previous column.
+        if at_boundary && !item.is_ignorant() {
+            if let MathItem::Component(ref mut comp) = item
+                && let Some(lspace) = comp.props.lspace.take()
+            {
+                // Move the lspace to the end of the previous
+                // column as explicit spacing.
+                let resolved = lspace.resolve(comp.styles);
+                if cols.len() >= 2 {
+                    let idx = cols.len() - 2;
+                    cols[idx].push(MathItem::Spacing(resolved, false));
+                }
+            }
+            at_boundary = false;
+        }
+        cols.last_mut().unwrap().push(item);
     }
+
     // Fix up the last pair if complete.
     if cols.len() % 2 == 0 {
         fixup_rspace_in_last_pair(&mut cols);

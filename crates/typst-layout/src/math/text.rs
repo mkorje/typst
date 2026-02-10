@@ -2,7 +2,7 @@ use codex::styling::{MathStyle, to_style};
 use ecow::EcoString;
 use typst_library::diag::SourceResult;
 use typst_library::foundations::{Resolve, StyleChain};
-use typst_library::layout::{Abs, AlignElem, Axis, Frame, Point, Size};
+use typst_library::layout::{Abs, AlignElem, Axis, Frame, Size};
 use typst_library::math::ir::{GlyphItem, MathProperties, MultilineTextItem, TextItem};
 use typst_library::math::{EquationElem, MathSize, style_dtls, style_flac};
 use typst_library::text::{
@@ -14,7 +14,7 @@ use unicode_math_class::MathClass;
 
 use super::MathContext;
 use super::fragment::{FrameFragment, GlyphFragment, MathFragment};
-use super::run::{MathFragmentsExt, MathRunFrameBuilder, math_leading};
+use super::run::{MathFragmentsExt, math_leading, stack_rows};
 
 /// Lays out a [`TextItem`].
 #[typst_macros::time(name = "math text layout", span = props.span)]
@@ -66,20 +66,15 @@ pub fn layout_multiline_text(
         .max()
         .unwrap_or_default();
 
-    let mut frames = Vec::with_capacity(effective);
-    let mut size = Size::zero();
-    for (i, sub) in line_frames.into_iter().take(effective).enumerate() {
-        if i > 0 {
-            size.y += leading;
-        }
-        let mut pos = Point::with_y(size.y);
-        pos.x = align.position(total_width - sub.width());
-        size.x.set_max(sub.width());
-        size.y += sub.height();
-        frames.push((sub, pos));
-    }
+    let mut frame = stack_rows(
+        line_frames.into_iter().take(effective),
+        align,
+        leading,
+        total_width,
+        false,
+    )
+    .build();
 
-    let mut frame = MathRunFrameBuilder { size, frames }.build();
     let axis = ctx.font().math().axis_height.resolve(styles);
     frame.set_baseline(frame.height() / 2.0 + axis);
     ctx.push(FrameFragment::new(props, styles, frame));

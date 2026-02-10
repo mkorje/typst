@@ -1,5 +1,5 @@
 use typst_library::foundations::{Resolve, StyleChain};
-use typst_library::layout::{Abs, Em, Frame, InlineItem, Point, Size};
+use typst_library::layout::{Abs, Em, FixedAlignment, Frame, InlineItem, Point, Size};
 use typst_library::math::{EquationElem, LeftRightAlternator, MathSize};
 use typst_library::model::ParElem;
 use unicode_math_class::MathClass;
@@ -36,6 +36,33 @@ pub(super) fn cumulative_alignment_points(widths: &[Abs]) -> (Vec<Abs>, Abs) {
     (points, cumulative)
 }
 
+/// Vertically stack rows of frames with optional alignment.
+pub fn stack_rows(
+    rows: impl IntoIterator<Item = Frame>,
+    align: FixedAlignment,
+    leading: Abs,
+    total_width: Abs,
+    has_alignment: bool,
+) -> MathRunFrameBuilder {
+    let mut frames = Vec::new();
+    let mut size = Size::zero();
+
+    for (i, sub) in rows.into_iter().enumerate() {
+        if i > 0 {
+            size.y += leading;
+        }
+        let mut pos = Point::with_y(size.y);
+        if !has_alignment {
+            pos.x = align.position(total_width - sub.width());
+        }
+        size.x.set_max(sub.width());
+        size.y += sub.height();
+        frames.push((sub, pos));
+    }
+
+    MathRunFrameBuilder { size, frames }
+}
+
 pub trait MathFragmentsExt {
     fn into_frame(self) -> Frame;
     fn into_par_items(self) -> Vec<InlineItem>;
@@ -44,7 +71,7 @@ pub trait MathFragmentsExt {
 impl MathFragmentsExt for Vec<MathFragment> {
     /// Lay out [`MathFragment`]s into a one-row [`Frame`] sequentially.
     fn into_frame(self) -> Frame {
-        sub_columns_into_line_frame(vec![self], &[], LeftRightAlternator::Right)
+        sub_columns_into_line_frame(vec![self], &[], LeftRightAlternator::Right, None)
     }
 
     /// Convert this run of math fragments into a vector of inline items for
@@ -152,6 +179,17 @@ impl MathRunFrameBuilder {
     }
 }
 
+/// Measure the ascent and descent of a list of sub-columns.
+pub fn measure_sub_columns(sub_cols: &[Vec<MathFragment>]) -> (Abs, Abs) {
+    sub_cols
+        .iter()
+        .flat_map(|sc| sc.iter())
+        .filter(|f| !matches!(f, MathFragment::Tag(_)))
+        .map(|f| (f.ascent(), f.descent()))
+        .reduce(|(a1, d1), (a2, d2)| (a1.max(a2), d1.max(d2)))
+        .unwrap_or_default()
+}
+
 /// Build a frame from sub-column fragments positioned at alignment points.
 ///
 /// Each sub-column's fragments are positioned using left/right alternation
@@ -161,14 +199,9 @@ pub fn sub_columns_into_line_frame(
     sub_cols: Vec<Vec<MathFragment>>,
     points: &[Abs],
     mut alternator: LeftRightAlternator,
+    dimensions: Option<(Abs, Abs)>,
 ) -> Frame {
-    let (ascent, descent) = sub_cols
-        .iter()
-        .flat_map(|sc| sc.iter())
-        .filter(|f| !matches!(f, MathFragment::Tag(_)))
-        .map(|f| (f.ascent(), f.descent()))
-        .reduce(|(a1, d1), (a2, d2)| (a1.max(a2), d1.max(d2)))
-        .unwrap_or_default();
+    let (ascent, descent) = dimensions.unwrap_or_else(|| measure_sub_columns(&sub_cols));
 
     let mut frame = Frame::soft(Size::new(Abs::zero(), ascent + descent));
     frame.set_baseline(ascent);

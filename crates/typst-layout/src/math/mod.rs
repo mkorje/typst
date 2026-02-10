@@ -41,7 +41,7 @@ use self::line::layout_line;
 use self::radical::layout_radical;
 use self::run::{
     MathFragmentsExt, MathRunFrameBuilder, cumulative_alignment_points, math_leading,
-    sub_columns_into_line_frame,
+    stack_rows, sub_columns_into_line_frame,
 };
 use self::scripts::{layout_primes, layout_scripts};
 use self::table::layout_table;
@@ -587,26 +587,17 @@ fn layout_multiline(
 
     // 4. Build row frames.
     let align = styles.resolve(AlignElem::alignment).x;
-    let mut frames: Vec<(Frame, Point)> = Vec::with_capacity(nrows);
-    let mut size = Size::zero();
+    let rows = cell_frags.into_iter().map(|row_frags| {
+        let sub = sub_columns_into_line_frame(
+            row_frags,
+            &points,
+            LeftRightAlternator::Right,
+            None,
+        );
+        sub
+    });
 
-    for (i, row_frags) in cell_frags.into_iter().enumerate() {
-        let sub =
-            sub_columns_into_line_frame(row_frags, &points, LeftRightAlternator::Right);
-
-        if i > 0 {
-            size.y += leading;
-        }
-        let mut pos = Point::with_y(size.y);
-        if !has_alignment {
-            pos.x = align.position(total_width - sub.width());
-        }
-        size.x.set_max(sub.width());
-        size.y += sub.height();
-        frames.push((sub, pos));
-    }
-
-    Ok(MathRunFrameBuilder { size, frames })
+    Ok(stack_rows(rows, align, leading, total_width, has_alignment))
 }
 
 /// Lays out a [`BoxItem`].
