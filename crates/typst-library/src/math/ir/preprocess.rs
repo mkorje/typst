@@ -1,11 +1,34 @@
 use std::ops::{Deref, DerefMut};
 
-use bumpalo::{Bump, boxed::Box as BumpBox, collections::Vec as BumpVec};
+use bumpalo::{Bump, collections::Vec as BumpVec};
 use smallvec::SmallVec;
 use unicode_math_class::MathClass;
 
 use super::item::MathItem;
 use crate::math::{MEDIUM, MathSize, THICK, THIN};
+
+/// How preprocessing should handle alignment markers and linebreaks.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub(crate) enum PreprocessMode {
+    /// Prepare for generic grouping. If no multiline content remains, `Align`
+    /// markers are stripped after spacing has been resolved.
+    Group,
+    /// Preserve `Align` markers for downstream split-at-align handling and
+    /// strip all linebreak markers.
+    TableCell,
+}
+
+/// The result of preprocessing math items.
+pub(crate) struct PreprocessOutput<'a> {
+    /// Preprocessed items.
+    pub items: BumpVec<'a, MathItem<'a>>,
+    /// Whether the original input contained any linebreak markers.
+    pub had_linebreaks: bool,
+    /// Whether the preprocessed items contain multiline content.
+    pub has_linebreaks: bool,
+    /// Whether the preprocessed items contain alignment markers.
+    pub has_align: bool,
+}
 
 /// Takes the given [`MathItem`]s and processes the spacing between them.
 ///
@@ -23,7 +46,8 @@ pub(crate) fn preprocess<'a, I>(
     items: I,
     bump: &'a Bump,
     closing: bool,
-) -> BumpBox<'a, [MathItem<'a>]>
+    mode: PreprocessMode,
+) -> PreprocessOutput<'a>
 where
     I: IntoIterator<Item = MathItem<'a>>,
     I::IntoIter: ExactSizeIterator,
@@ -34,6 +58,9 @@ where
 
     let mut last: Option<usize> = None;
     let mut space: Option<MathItem> = None;
+    let mut had_linebreaks = false;
+    let mut has_align = false;
+    let mut linebreaks_in_resolved: u32 = 0;
 
     for mut item in iter {
         match item {
@@ -70,12 +97,18 @@ where
 
             // Alignment points are resolved later.
             MathItem::Align => {
+                has_align = true;
                 resolved.push(item);
                 continue;
             }
 
             // New line, new things.
             MathItem::Linebreak => {
+                had_linebreaks = true;
+                if matches!(mode, PreprocessMode::TableCell) {
+                    continue;
+                }
+                linebreaks_in_resolved += 1;
                 resolved.push(item);
                 space = None;
                 last = None;
@@ -128,7 +161,27 @@ where
         resolved.0.remove(idx);
     }
 
-    BumpVec::from_iter_in(resolved.0, bump).into_boxed_slice()
+    // Strip final trailing linebreak.
+    if !closing
+        && let Some(idx) = resolved.last_index()
+        && matches!(resolved.0[idx], MathItem::Linebreak)
+    {
+        resolved.0.remove(idx);
+        linebreaks_in_resolved -= 1;
+    }
+
+    let has_linebreaks = linebreaks_in_resolved > 0;
+    if !has_linebreaks && matches!(mode, PreprocessMode::Group) {
+        resolved.retain(|item| !matches!(item, MathItem::Align));
+        has_align = false;
+    }
+
+    PreprocessOutput {
+        items: BumpVec::from_iter_in(resolved.0, bump),
+        had_linebreaks,
+        has_linebreaks,
+        has_align,
+    }
 }
 
 /// Computes the spacing between two adjacent math items.
