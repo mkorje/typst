@@ -91,26 +91,39 @@ impl<'a, 'v, 'e> MathResolver<'a, 'v, 'e> {
     ) -> SourceResult<MathItem<'a>> {
         let start = self.resolve_into_items(elem, styles)?;
         let len = self.items.len() - start;
-        // Route standalone alignment points through GroupItem::create so
-        // they get stripped (alignment points are no-ops outside of multiline
-        // contexts).
-        Ok(if len == 1 && !matches!(self.items.last(), Some(MathItem::Align)) {
-            let item = self.items.pop().unwrap();
-            let needs_multiline = matches!(
-                &item,
-                MathItem::Component(MathComponent { kind: MathKind::Fenced(fence), .. })
-                    if fence.body.is_multiline()
-                        || (fence.body.ends_with_linebreak()
-                            && fence.close.is_some())
-            );
-            if needs_multiline {
-                GroupItem::create([item], false, styles, &self.arenas.bump)
+        // Route standalone alignment points and linebreaks through
+        // GroupItem::create so they get stripped (alignment points are no-ops
+        // outside of multiline contexts and linebreaks are only meaningful as
+        // row separators).
+        Ok(
+            if len == 1
+                && !matches!(
+                    self.items.last(),
+                    Some(MathItem::Align | MathItem::Linebreak)
+                )
+            {
+                let item = self.items.pop().unwrap();
+                let needs_multiline = matches!(
+                    &item,
+                    MathItem::Component(MathComponent { kind: MathKind::Fenced(fence), .. })
+                        if fence.body.is_multiline()
+                            || (fence.body.ends_with_linebreak()
+                                && fence.close.is_some())
+                );
+                if needs_multiline {
+                    GroupItem::create([item], false, styles, &self.arenas.bump)
+                } else {
+                    item
+                }
             } else {
-                item
-            }
-        } else {
-            GroupItem::create(self.items.drain(start..), false, styles, &self.arenas.bump)
-        })
+                GroupItem::create(
+                    self.items.drain(start..),
+                    false,
+                    styles,
+                    &self.arenas.bump,
+                )
+            },
+        )
     }
 
     /// Resolve arbitrary content.
