@@ -1095,6 +1095,7 @@ e25055c41d17ea05af790f438cb86741 math-lr-ignore-ignorant
 8a185f1e21e13006977027fadccc28c5 math-lr-mid-class
 c50fba95232f506dea27c9cc1ef91eef math-lr-mid-size
 fbeea106452a9012ef82688192526f42 math-lr-mid-size-nested-equation
+68c80e54f5d855ecbec5bfd41517cfc7 math-lr-multiline-trailing
 0e88ceb23714dbf2a1a5ad5257d689f3 math-lr-nested
 eb1c6673c26e5140e5026422d977157a math-lr-nested-mid
 43464929359aada5317f5ffb3af6345b math-lr-scripts

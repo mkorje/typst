@@ -203,3 +203,6 @@ $ bracket.l(x, nope: "nope") $
 // The outline thing is just a roundabout way to force a cast from symbol to
 // function...
 #test(repr(outline(indent: sym.chevron.l.curly).indent), "(..) => ..")
+
+--- math-lr-multiline-trailing paged ---
+$ (a \ ) $

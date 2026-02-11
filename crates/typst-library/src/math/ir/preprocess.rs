@@ -128,17 +128,12 @@ where
         resolved.0.remove(idx);
     }
 
-    // Strip one trailing linebreak so it never reaches the layout phase.
-    // Multiple trailing linebreaks (e.g., `$ x \ \ \ $`) only have their
-    // last one stripped here; the remaining ones produce empty rows in
-    // `build_multiline` which are preserved (layout_multiline does not
-    // strip trailing empty rows).
-    if resolved
-        .0
-        .last()
-        .is_some_and(|item| matches!(item, MathItem::Linebreak))
+    // Strip final trailing linebreak.
+    if !closing
+        && let Some(idx) = resolved.last_index()
+        && matches!(resolved.0[idx], MathItem::Linebreak)
     {
-        resolved.0.pop();
+        resolved.0.remove(idx);
     }
 
     BumpVec::from_iter_in(resolved.0, bump).into_boxed_slice()
