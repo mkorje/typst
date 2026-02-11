@@ -1227,24 +1227,25 @@ impl<'a> PrimesItem<'a> {
 pub struct TextItem<'a> {
     /// The text content.
     pub text: &'a str,
+    /// Whether the text is a number.
+    pub num: bool,
 }
 
 impl<'a> TextItem<'a> {
     /// Creates a new text item.
     ///
-    /// The `line` parameter indicates that the text does not contain a newline
-    /// and is not a number. If true, then the resulting item is spaced and has
-    /// alphabetic math class.
+    /// The `num` parameter indicates that the text is a number. If false, then
+    /// the resulting item is spaced and has alphabetic math class.
     pub(crate) fn create(
         text: EcoString,
-        line: bool,
+        num: bool,
         styles: StyleChain<'a>,
         span: Span,
         bump: &'a Bump,
     ) -> MathItem<'a> {
         let text = bump.alloc_str(&text);
-        let kind = MathKind::Text(Self { text });
-        let props = if line {
+        let kind = MathKind::Text(Self { text, num });
+        let props = if !num {
             MathProperties::with_explicit_class(styles, MathClass::Alphabetic)
                 .with_spaced(true)
         } else {

@@ -18,7 +18,10 @@ use crate::introspection::{SplitLocator, TagElem};
 use crate::layout::{Abs, Axes, BoxElem, FixedAlignment, HElem, Ratio, Rel, Spacing};
 use crate::math::*;
 use crate::routines::{Arenas, RealizationKind};
-use crate::text::{LinebreakElem, SpaceElem, TextElem, is_default_ignorable};
+use crate::text::{
+    BottomEdge, BottomEdgeMetric, LinebreakElem, SpaceElem, TextElem, TopEdge,
+    TopEdgeMetric, is_default_ignorable,
+};
 use crate::visualize::FixedStroke;
 
 /// The math IR builder.
@@ -246,35 +249,42 @@ fn resolve_text<'a, 'v, 'e>(
         .flat_map(|c| to_style(c, MathStyle::select(c, variant, bold, italic)))
         .collect();
 
-    if styled_text.contains(is_newline) {
-        let bump = &ctx.arenas.bump;
-        let rows = BumpVec::from_iter_in(
-            styled_text.split(is_newline).map(|line| {
-                let num = line.chars().all(|c| c.is_ascii_digit() || c == '.');
-                let item = TextItem::create(
-                    EcoString::from(line),
-                    !num,
-                    styles,
-                    elem.span(),
-                    bump,
-                );
-                let row: BumpBox<[MathItem]> = BumpBox::new_in([item], bump).into();
-                row
-            }),
-            bump,
-        )
-        .into_boxed_slice();
-        ctx.push(MultilineItem::create(rows, true, styles, elem.span(), bump));
-    } else {
-        let num = elem.text.chars().all(|c| c.is_ascii_digit() || c == '.');
-        ctx.push(TextItem::create(
-            styled_text,
-            !num,
-            styles,
-            elem.span(),
-            &ctx.arenas.bump,
-        ));
+    // Create item with correct styles and properties.
+    let mut local_styles = None;
+    let mut create_item = |str: EcoString| {
+        let num = str.chars().all(|c| c.is_ascii_digit() || c == '.');
+        let styles = if !num {
+            *local_styles.get_or_insert_with(|| {
+                let local = [
+                    TextElem::top_edge.set(TopEdge::Metric(TopEdgeMetric::Bounds)),
+                    TextElem::bottom_edge
+                        .set(BottomEdge::Metric(BottomEdgeMetric::Bounds)),
+                    TextElem::overhang.set(false),
+                ]
+                .map(|p| p.wrap());
+                ctx.chain_styles(styles, local)
+            })
+        } else {
+            styles
+        };
+        TextItem::create(str, num, styles, elem.span(), &ctx.arenas.bump)
+    };
+
+    if !styled_text.contains(is_newline) {
+        ctx.push(create_item(styled_text));
+        return Ok(());
     }
+
+    let bump = &ctx.arenas.bump;
+    let rows = BumpVec::from_iter_in(
+        styled_text.split(is_newline).map(|line| {
+            let item = create_item(EcoString::from(line));
+            BumpBox::new_in([item], bump).into()
+        }),
+        bump,
+    )
+    .into_boxed_slice();
+    ctx.push(MultilineItem::create(rows, true, styles, elem.span(), bump));
     Ok(())
 }
 
