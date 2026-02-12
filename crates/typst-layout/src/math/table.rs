@@ -1,7 +1,7 @@
 use typst_library::diag::SourceResult;
 use typst_library::foundations::{Resolve, StyleChain};
 use typst_library::layout::{Abs, Em, Frame, FrameItem, Point, Rel, Size};
-use typst_library::math::ir::{MathProperties, TableItem};
+use typst_library::math::ir::{MathItem, MathProperties, TableItem};
 use typst_library::math::{AugmentOffsets, style_for_denominator};
 use typst_library::text::TextElem;
 use typst_library::visualize::{FillRule, FixedStroke, Geometry, LineCap, Shape};
@@ -14,6 +14,16 @@ use super::run::{
 };
 
 const DEFAULT_STROKE_THICKNESS: Em = Em::new(0.05);
+
+type SubColumnFragments = Vec<Vec<MathFragment>>;
+type RowHeights = Vec<(Abs, Abs)>;
+type ColumnLayouts = Vec<Vec<CellLayout>>;
+type PreparedTableLayout = (ColumnLayouts, RowHeights);
+
+struct CellLayout {
+    sub_columns: SubColumnFragments,
+    dims: (Abs, Abs),
+}
 
 /// Layout a [`TableItem`].
 #[typst_macros::time(name = "math table layout", span = props.span)]
@@ -57,21 +67,6 @@ pub fn layout_table(
         _ => (AugmentOffsets::default(), AugmentOffsets::default(), default_stroke),
     };
 
-    // Before the full matrix body can be laid out, the
-    // individual cells must first be independently laid out
-    // so we can ensure alignment across rows and columns.
-    //
-    // Each cell is pre-split at Align markers in the IR, so each cell
-    // is a slice of sub-column MathItems. We lay out each sub-column
-    // into fragments independently.
-    //
-    // We also store the ascent and descent of each cell to avoid re-computing
-    // them later.
-    let mut cols: Vec<Vec<(Vec<Vec<MathFragment>>, (Abs, Abs))>> = vec![vec![]; ncols];
-
-    // This variable stores the maximum ascent and descent for each row.
-    let mut heights = vec![(Abs::zero(), Abs::zero()); nrows];
-
     let denom_style = style_for_denominator(styles);
     // We pad ascent and descent with the ascent and descent of the paren
     // to ensure that normal matrices are aligned with others unless they are
@@ -81,21 +76,13 @@ pub fn layout_table(
         GlyphFragment::new_char(ctx, styles.chain(&denom_style), '(', Span::detached())
             .unwrap();
 
-    for (r, row) in rows.iter().enumerate() {
-        for (c, cell) in row.iter().enumerate() {
-            let mut sub_frags: Vec<Vec<MathFragment>> = Vec::with_capacity(cell.len());
-            for sub_col_item in cell.iter() {
-                sub_frags.push(ctx.layout_into_fragments(sub_col_item, styles)?);
-            }
-
-            let (cell_ascent, cell_descent) = measure_sub_columns(&sub_frags);
-
-            heights[r].0.set_max(cell_ascent.max(paren.ascent()));
-            heights[r].1.set_max(cell_descent.max(paren.descent()));
-
-            cols[c].push((sub_frags, (cell_ascent, cell_descent)));
-        }
-    }
+    let (cols, heights) = collect_columns_and_row_heights(
+        item,
+        ctx,
+        styles,
+        paren.ascent(),
+        paren.descent(),
+    )?;
 
     for line in hline.0.iter_mut() {
         if *line < 0 {
@@ -136,38 +123,7 @@ pub fn layout_table(
     }
 
     for (index, col) in cols.into_iter().enumerate() {
-        // Compute max sub-column widths across all rows in this table column.
-        // Rows without alignment (1 sub-column) have their total width tracked
-        // as `pending_width`, which is incorporated as a minimum when new
-        // sub-column width entries are first established.
-        let max_nsub = col.iter().map(|(c, _)| c.len()).max().unwrap_or(1);
-        let mut sub_widths = Vec::<Abs>::with_capacity(max_nsub);
-        let mut pending_width = Abs::zero();
-
-        for (cell_sub_cols, _) in &col {
-            let is_aligned = cell_sub_cols.len() > 1;
-            if !is_aligned && max_nsub > 1 {
-                // Non-aligned row in an aligned column: accumulate as pending
-                // or into the first sub-column.
-                let w: Abs = cell_sub_cols[0].iter().map(|f| f.width()).sum();
-                if sub_widths.is_empty() {
-                    pending_width.set_max(w);
-                } else {
-                    sub_widths[0].set_max(w);
-                }
-            } else {
-                for (i, sc) in cell_sub_cols.iter().enumerate() {
-                    let w: Abs = sc.iter().map(|f| f.width()).sum();
-                    if i < sub_widths.len() {
-                        sub_widths[i].set_max(w);
-                    } else if i == 0 {
-                        sub_widths.push(w.max(pending_width));
-                    } else {
-                        sub_widths.push(w);
-                    }
-                }
-            }
-        }
+        let sub_widths = compute_sub_column_widths(&col);
 
         // Compute cumulative alignment points from sub-column widths.
         let (points, rcol) = cumulative_alignment_points(&sub_widths);
@@ -175,14 +131,12 @@ pub fn layout_table(
 
         let mut y = if hline.0.contains(&0) { gap.y } else { Abs::zero() };
 
-        for ((cell_sub_cols, cell_dims), &(ascent, descent)) in
-            col.into_iter().zip(&heights)
-        {
+        for (cell_layout, &(ascent, descent)) in col.into_iter().zip(&heights) {
             let cell = sub_columns_into_line_frame(
-                cell_sub_cols,
+                cell_layout.sub_columns,
                 &points,
                 item.alternator,
-                Some(cell_dims),
+                Some(cell_layout.dims),
             );
             let pos = Point::new(
                 if !has_alignment {
@@ -239,6 +193,83 @@ pub fn layout_table(
 
     ctx.push(FrameFragment::new(props, styles, frame));
     Ok(())
+}
+
+fn layout_cell_sub_columns(
+    cell: &[MathItem],
+    ctx: &mut MathContext,
+    styles: StyleChain,
+) -> SourceResult<SubColumnFragments> {
+    let mut sub_columns = Vec::with_capacity(cell.len());
+    for sub_col_item in cell {
+        sub_columns.push(ctx.layout_into_fragments(sub_col_item, styles)?);
+    }
+    Ok(sub_columns)
+}
+
+fn collect_columns_and_row_heights(
+    item: &TableItem,
+    ctx: &mut MathContext,
+    styles: StyleChain,
+    min_ascent: Abs,
+    min_descent: Abs,
+) -> SourceResult<PreparedTableLayout> {
+    let rows = &item.cells;
+    let nrows = rows.len();
+    let ncols = rows.first().map_or(0, |row| row.len());
+    let mut cols: ColumnLayouts = (0..ncols).map(|_| Vec::with_capacity(nrows)).collect();
+    let mut heights: RowHeights = vec![(Abs::zero(), Abs::zero()); nrows];
+
+    for (r, row) in rows.iter().enumerate() {
+        for (c, cell) in row.iter().enumerate() {
+            let sub_columns = layout_cell_sub_columns(cell, ctx, styles)?;
+            let dims = measure_sub_columns(&sub_columns);
+
+            heights[r].0.set_max(dims.0.max(min_ascent));
+            heights[r].1.set_max(dims.1.max(min_descent));
+
+            cols[c].push(CellLayout { sub_columns, dims });
+        }
+    }
+
+    Ok((cols, heights))
+}
+
+fn compute_sub_column_widths(col: &[CellLayout]) -> Vec<Abs> {
+    // Compute max sub-column widths across all rows in this table column.
+    // Rows without alignment (1 sub-column) have their total width tracked
+    // as `pending_width`, which is incorporated as a minimum when new
+    // sub-column width entries are first established.
+    let max_nsub = col.iter().map(|cell| cell.sub_columns.len()).max().unwrap_or(1);
+    let mut sub_widths = Vec::<Abs>::with_capacity(max_nsub);
+    let mut pending_width = Abs::zero();
+
+    for cell in col {
+        let is_aligned = cell.sub_columns.len() > 1;
+        if !is_aligned && max_nsub > 1 {
+            // Non-aligned row in an aligned column: accumulate as pending
+            // or into the first sub-column.
+            let width: Abs = cell.sub_columns[0].iter().map(|f| f.width()).sum();
+            if sub_widths.is_empty() {
+                pending_width.set_max(width);
+            } else {
+                sub_widths[0].set_max(width);
+            }
+        } else {
+            for (i, sub_column) in cell.sub_columns.iter().enumerate() {
+                let width: Abs = sub_column.iter().map(|f| f.width()).sum();
+                if i < sub_widths.len() {
+                    sub_widths[i].set_max(width);
+                } else if i == 0 {
+                    sub_widths.push(width.max(pending_width));
+                } else {
+                    sub_widths.push(width);
+                }
+            }
+        }
+    }
+
+    sub_widths
 }
 
 fn line_item(length: Abs, vertical: bool, stroke: FixedStroke, span: Span) -> FrameItem {
