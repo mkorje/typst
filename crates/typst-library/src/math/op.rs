@@ -18,8 +18,8 @@ use crate::text::TextElem;
 /// Typst predefines the operators `arccos`, `arcsin`, `arctan`, `arg`, `cos`,
 /// `cosh`, `cot`, `coth`, `csc`, `csch`, `ctg`, `deg`, `det`, `dim`, `exp`,
 /// `gcd`, `lcm`, `hom`, `id`, `im`, `inf`, `ker`, `lg`, `lim`, `liminf`,
-/// `limsup`, `ln`, `log`, `max`, `min`, `mod`, `Pr`, `sec`, `sech`, `sin`,
-/// `sinc`, `sinh`, `sup`, `tan`, `tanh`, `tg` and `tr`.
+/// `limsup`, `ln`, `log`, `max`, `min`, `mod`, `Pr`, `sec`, `sech`, `sgn`,
+/// `sin`, `sinc`, `sinh`, `sup`, `tan`, `tanh`, `tg` and `tr`.
 #[elem(title = "Text Operator", Mathy)]
 pub struct OpElem {
     /// The operator's text.
@@ -94,6 +94,7 @@ ops! {
     Pr (limits),
     sec,
     sech,
+    sgn,
     sin,
     sinc,
     sinh,
