@@ -5,8 +5,8 @@ use typst_library::layout::{
 use typst_utils::Numeric;
 
 use super::{
-    Child, Composer, FlowResult, LineChild, MultiChild, MultiSpill, PlacedChild,
-    SingleChild, Stop, Work,
+    Child, Composer, FlowResult, LineChild, MultiChild, MultiSpill, ParagraphChild,
+    PlacedChild, SingleChild, Stop, Work,
 };
 
 /// Distributes as many children as fit from `composer.work` into the first
@@ -156,6 +156,99 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         }
     }
 
+    /// Keeps grouped paragraph children together for widow/orphan prevention.
+    fn keep_paragraph_group_together(
+        &mut self,
+        para: Option<ParagraphChild>,
+        height: Abs,
+    ) -> FlowResult<()> {
+        let Some(para) = para else {
+            return Ok(());
+        };
+
+        let needed_followups = if para.prevent_all && para.index == 0 {
+            2
+        } else if (para.prevent_orphans && para.index == 0)
+            || (para.prevent_widows && para.index >= 2 && para.index + 2 == para.len)
+        {
+            1
+        } else {
+            0
+        };
+
+        if needed_followups == 0 {
+            return Ok(());
+        }
+
+        let mut need = height;
+        for nth in 1..=needed_followups {
+            let available = (self.regions.size.y - need - para.leading).max(Abs::zero());
+            let Some(next_height) =
+                self.peek_paragraph_height(para.id, nth, available)?
+            else {
+                return Ok(());
+            };
+            need += para.leading + next_height;
+        }
+
+        if !self.regions.size.y.fits(need)
+            && self.regions.iter().nth(1).is_some_and(|region| region.y.fits(need))
+        {
+            return Err(Stop::Finish(false));
+        }
+
+        Ok(())
+    }
+
+    /// Peek the height of the `nth` upcoming child that participates in the same
+    /// paragraph.
+    fn peek_paragraph_height(
+        &mut self,
+        paragraph: usize,
+        nth: usize,
+        available: Abs,
+    ) -> FlowResult<Option<Abs>> {
+        let mut seen = 0;
+
+        for child in self.composer.work.children.iter().skip(1) {
+            let matches_paragraph = |para: Option<ParagraphChild>| {
+                para.is_some_and(|para| para.id == paragraph)
+            };
+
+            let height = match child {
+                Child::Line(line) if matches_paragraph(line.para) => {
+                    Some(line.frame.height())
+                }
+                Child::Single(single) if matches_paragraph(single.para) => {
+                    let frame = single.layout(
+                        self.composer.engine,
+                        Region::new(
+                            Size::new(self.regions.base().x, available),
+                            self.regions.expand,
+                        ),
+                    )?;
+                    Some(frame.height())
+                }
+                Child::Multi(multi) if matches_paragraph(multi.para) => {
+                    let mut regions = self.regions;
+                    regions.size.y = available;
+                    let (frame, _) = multi.layout(self.composer.engine, regions)?;
+                    Some(frame.height())
+                }
+                _ => None,
+            };
+
+            if let Some(height) = height {
+                seen += 1;
+                if seen == nth {
+                    return Ok(Some(height));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
     /// Processes relative spacing.
     fn rel(&mut self, amount: Rel<Abs>, weakness: u8) {
         let amount = amount.relative_to(self.regions.base().y);
@@ -278,17 +371,16 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
             return Err(Stop::Finish(false));
         }
 
-        // If the line's need, which includes its own height and that of
-        // following lines grouped by widow/orphan prevention, does not fit into
-        // the current region, but does fit into the next region, finish the
-        // region.
-        if !self.regions.size.y.fits(line.need)
+        if line.para.is_some() {
+            self.keep_paragraph_group_together(line.para, line.frame.height())?;
+        } else if !self.regions.size.y.fits(line.need)
             && self
                 .regions
                 .iter()
                 .nth(1)
                 .is_some_and(|region| region.y.fits(line.need))
         {
+            // Keep behavior for non-paragraph inline layout unchanged.
             return Err(Stop::Finish(false));
         }
 
@@ -318,6 +410,8 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
             return Err(Stop::Finish(false));
         }
 
+        self.keep_paragraph_group_together(single.para, frame.height())?;
+
         // Push tags around an inline block to the frame.
         if let Some((_, tags, tags_before)) = &single.inline {
             push_tags(&mut frame, tags, *tags_before);
@@ -345,6 +439,8 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
             // avoid any invisible orphans at the end of this region.
             return Err(Stop::Finish(false));
         }
+
+        self.keep_paragraph_group_together(multi.para, frame.height())?;
 
         // Push tags around an inline block to the frame.
         if let Some((_, tags, tags_before)) = &multi.inline {

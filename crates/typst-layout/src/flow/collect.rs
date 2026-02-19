@@ -48,6 +48,7 @@ pub fn collect<'a>(
         expand,
         output: Vec::with_capacity(children.len()),
         par_situation: ParSituation::First,
+        next_paragraph: 0,
     }
     .run(mode)
 }
@@ -62,6 +63,7 @@ struct Collector<'a, 'x, 'y> {
     locator: SplitLocator<'a>,
     output: Vec<Child<'a>>,
     par_situation: ParSituation,
+    next_paragraph: usize,
 }
 
 impl<'a> Collector<'a, '_, '_> {
@@ -174,10 +176,12 @@ impl<'a> Collector<'a, '_, '_> {
 
         let spacing = elem.spacing.resolve(styles);
         let leading = elem.leading.resolve(styles);
+        let paragraph = self.next_paragraph;
+        self.next_paragraph += 1;
 
         self.output.push(Child::Rel(spacing.into(), 4));
 
-        self.par_children(children, leading, styles);
+        self.par_children(children, paragraph, leading, styles);
 
         self.output.push(Child::Rel(spacing.into(), 4));
         self.par_situation = ParSituation::Consecutive;
@@ -189,67 +193,50 @@ impl<'a> Collector<'a, '_, '_> {
     fn par_children(
         &mut self,
         children: Vec<ParChild>,
+        paragraph: usize,
         leading: Abs,
         styles: StyleChain<'a>,
     ) {
         let align = styles.resolve(AlignElem::alignment);
         let costs = styles.get(TextElem::costs);
 
-        // TODO: collect frames for widow/orphan prevention calculation. Should
-        // frames only (not blocks) participate in widow/orphan prevention?
-        // Regardless, the code here is a little weird.
-        let frames: Vec<_> = children
-            .iter()
-            .filter_map(|c| match c {
-                ParChild::Frame(f) => Some(f),
-                ParChild::Block { .. } => None,
-            })
-            .collect();
+        let len = children.len();
+        let child_empty = |i: usize| {
+            children.get(i).is_some_and(
+                |child| matches!(child, ParChild::Frame(frame) if frame.is_empty()),
+            )
+        };
 
-        // Determine whether to prevent widow and orphans.
-        let len = frames.len();
+        // Determine whether to prevent widow and orphans in this paragraph run.
         let prevent_orphans =
-            costs.orphan() > Ratio::zero() && len >= 2 && !frames[1].is_empty();
+            costs.orphan() > Ratio::zero() && len >= 2 && !child_empty(1);
         let prevent_widows =
-            costs.widow() > Ratio::zero() && len >= 2 && !frames[len - 2].is_empty();
+            costs.widow() > Ratio::zero() && len >= 2 && !child_empty(len - 2);
         let prevent_all = len == 3 && prevent_orphans && prevent_widows;
 
-        // Store the heights of lines at the edges because we'll potentially
-        // need these later when `frames` is already moved.
-        let height_at = |i: usize| frames.get(i).map(|f| f.height()).unwrap_or_default();
-        let front_1 = height_at(0);
-        let front_2 = height_at(1);
-        let back_2 = height_at(len.saturating_sub(2));
-        let back_1 = height_at(len.saturating_sub(1));
-
-        let mut frame_idx = 0;
         for (i, child) in children.into_iter().enumerate() {
             if i > 0 {
                 self.output.push(Child::Rel(leading.into(), 5));
             }
 
+            let para = Some(ParagraphChild {
+                id: paragraph,
+                index: i,
+                len,
+                leading,
+                prevent_orphans,
+                prevent_widows,
+                prevent_all,
+            });
+
             match child {
                 ParChild::Frame(frame) => {
-                    // To prevent widows and orphans, we require enough space for
-                    // - all lines if it's just three
-                    // - the first two lines if we're at the first line
-                    // - the last two lines if we're at the second to last line
-                    let need = if prevent_all && frame_idx == 0 {
-                        front_1 + leading + front_2 + leading + back_1
-                    } else if prevent_orphans && frame_idx == 0 {
-                        front_1 + leading + front_2
-                    } else if prevent_widows && frame_idx >= 2 && frame_idx + 2 == len {
-                        back_2 + leading + back_1
-                    } else {
-                        frame.height()
-                    };
-
                     self.output.push(Child::Line(self.boxed(LineChild {
                         frame,
                         align,
-                        need,
+                        need: Abs::zero(),
+                        para,
                     })));
-                    frame_idx += 1;
                 }
                 ParChild::Block { elem, styles, width, tags, tags_before } => {
                     // Bump-allocate the owned data to give it lifetime 'a.
@@ -267,6 +254,7 @@ impl<'a> Collector<'a, '_, '_> {
                             sticky: false,
                             alone: false,
                             inline: Some((width, tags, tags_before)),
+                            para,
                             elem,
                             styles,
                             locator,
@@ -279,6 +267,7 @@ impl<'a> Collector<'a, '_, '_> {
                             alone: false,
                             fr: None,
                             inline: Some((width, tags, tags_before)),
+                            para,
                             elem,
                             styles,
                             locator,
@@ -330,8 +319,12 @@ impl<'a> Collector<'a, '_, '_> {
                 frame.height()
             };
 
-            self.output
-                .push(Child::Line(self.boxed(LineChild { frame, align, need })));
+            self.output.push(Child::Line(self.boxed(LineChild {
+                frame,
+                align,
+                need,
+                para: None,
+            })));
         }
     }
 
@@ -364,6 +357,7 @@ impl<'a> Collector<'a, '_, '_> {
                 alone,
                 fr,
                 inline: None,
+                para: None,
                 elem,
                 styles,
                 locator,
@@ -375,6 +369,7 @@ impl<'a> Collector<'a, '_, '_> {
                 sticky,
                 alone,
                 inline: None,
+                para: None,
                 elem,
                 styles,
                 locator,
@@ -478,7 +473,22 @@ pub enum Child<'a> {
 pub struct LineChild {
     pub frame: Frame,
     pub align: Axes<FixedAlignment>,
+    /// Precomputed need for non-paragraph inline layout.
     pub need: Abs,
+    /// Paragraph participation metadata for widow/orphan prevention.
+    pub para: Option<ParagraphChild>,
+}
+
+/// Metadata for a child participating in paragraph widow/orphan prevention.
+#[derive(Debug, Copy, Clone)]
+pub struct ParagraphChild {
+    pub id: usize,
+    pub index: usize,
+    pub len: usize,
+    pub leading: Abs,
+    pub prevent_orphans: bool,
+    pub prevent_widows: bool,
+    pub prevent_all: bool,
 }
 
 /// A child that encapsulates a prepared unbreakable block.
@@ -492,6 +502,8 @@ pub struct SingleChild<'a> {
     /// and its associated tags in logical order with the number of tags that
     /// are logically before the block.
     pub inline: Option<(Abs, Vec<Tag>, usize)>,
+    /// Paragraph participation metadata for widow/orphan prevention.
+    pub para: Option<ParagraphChild>,
     elem: &'a Packed<BlockElem>,
     styles: StyleChain<'a>,
     locator: Locator<'a>,
@@ -566,6 +578,8 @@ pub struct MultiChild<'a> {
     /// and its associated tags in logical order with the number of tags that
     /// are logically before the block.
     pub inline: Option<(Abs, Vec<Tag>, usize)>,
+    /// Paragraph participation metadata for widow/orphan prevention.
+    pub para: Option<ParagraphChild>,
     elem: &'a Packed<BlockElem>,
     styles: StyleChain<'a>,
     locator: Locator<'a>,
