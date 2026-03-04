@@ -1,8 +1,6 @@
 use std::cell::{Cell, LazyCell};
 use std::sync::LazyLock;
 
-use bumpalo::boxed::Box as BumpBox;
-use bumpalo::collections::Vec as BumpVec;
 use codex::styling::{MathStyle, to_style};
 use ecow::EcoString;
 use typst_syntax::{Span, is_newline};
@@ -115,7 +113,7 @@ impl<'a, 'v, 'e> MathResolver<'a, 'v, 'e> {
             return Ok(self.items.pop().unwrap());
         }
 
-        Ok(MathItem::group(self.items.drain(start..), false, styles, &self.arenas.bump))
+        Ok(MathItem::group(self.items.drain(start..), false, styles))
     }
 
     /// Resolve arbitrary content.
@@ -258,9 +256,9 @@ fn resolve_text<'a, 'v, 'e>(
             .flat_map(|c| to_style(c, MathStyle::select(c, variant, bold, italic)))
             .collect();
         if num {
-            NumberItem::create(styled_text, styles, elem.span(), &ctx.arenas.bump)
+            NumberItem::create(styled_text, styles, elem.span())
         } else {
-            TextItem::create(styled_text, *local_styles, elem.span(), &ctx.arenas.bump)
+            TextItem::create(styled_text, *local_styles, elem.span())
         }
     };
 
@@ -268,15 +266,9 @@ fn resolve_text<'a, 'v, 'e>(
     let item = if !text.contains(is_newline) {
         create_item(text)
     } else {
-        let bump = &ctx.arenas.bump;
-        let rows = BumpVec::from_iter_in(
-            text.split(is_newline).map(|line| {
-                let item = create_item(line);
-                BumpVec::from_iter_in([item], bump)
-            }),
-            bump,
-        );
-        let row_lengths = bump.alloc_slice_fill_copy(rows.len(), 1);
+        let rows: Vec<_> =
+            text.split(is_newline).map(|line| vec![create_item(line)]).collect();
+        let row_lengths = vec![1; rows.len()];
         MultilineItem::create(rows, row_lengths, styles).with_multiline_centering()
     };
     ctx.push(item);
@@ -304,7 +296,7 @@ fn resolve_symbol<'a, 'v, 'e>(
             .flat_map(|c| to_style(c, MathStyle::select(c, variant, bold, italic)))
             .collect();
 
-        let item = GlyphItem::create(text, styles, elem.span(), &ctx.arenas.bump);
+        let item = GlyphItem::create(text, styles, elem.span());
 
         if item.class() == MathClass::Large && item.size().unwrap() == MathSize::Display {
             let target = Rel::new(Ratio::one(), Abs::zero());
@@ -345,7 +337,7 @@ fn resolve_accent<'a, 'v, 'e>(
     let width = elem.size.resolve(styles);
     accent.set_stretch(Stretch::new().with_x(StretchInfo::new(width, ACCENT_SHORT_FALL)));
 
-    ctx.push(AccentItem::create(base, accent, position, false, styles, &ctx.arenas.bump));
+    ctx.push(AccentItem::create(base, accent, position, false, styles));
     Ok(())
 }
 
@@ -526,7 +518,6 @@ fn resolve_inner_attach<'a, 'v, 'e>(
         top_right,
         bottom_right,
         styles,
-        &ctx.arenas.bump,
     ))
 }
 
@@ -557,7 +548,7 @@ fn resolve_primes<'a, 'v, 'e>(
                 ctx.store(SymbolElem::packed('′').spanned(elem.span())),
                 styles,
             )?;
-            ctx.push(PrimesItem::create(prime, count, styles, &ctx.arenas.bump));
+            ctx.push(PrimesItem::create(prime, count, styles));
         }
     }
     Ok(())
@@ -629,7 +620,6 @@ fn resolve_cancel<'a, 'v, 'e>(
         angle.clone(),
         styles,
         elem.span(),
-        &ctx.arenas.bump,
     ));
     Ok(())
 }
@@ -699,15 +689,8 @@ fn resolve_vertical_frac_like<'a, 'v, 'e>(
         bumped_styles.chain(denom_style),
     )?;
 
-    let frac = FractionItem::create(
-        numerator,
-        denominator,
-        !binom,
-        FRAC_PADDING,
-        styles,
-        span,
-        &ctx.arenas.bump,
-    );
+    let frac =
+        FractionItem::create(numerator, denominator, !binom, FRAC_PADDING, styles, span);
 
     if binom {
         let stretch =
@@ -722,15 +705,7 @@ fn resolve_vertical_frac_like<'a, 'v, 'e>(
             styles,
         )?;
         close.set_stretch(stretch);
-        ctx.push(FencedItem::create(
-            Some(open),
-            Some(close),
-            frac,
-            false,
-            styles,
-            span,
-            &ctx.arenas.bump,
-        ));
+        ctx.push(FencedItem::create(Some(open), Some(close), frac, false, styles, span));
     } else {
         ctx.push(frac);
     }
@@ -808,13 +783,7 @@ fn resolve_skewed_frac<'a, 'v, 'e>(
         Stretch::new().with_y(StretchInfo::new(Rel::one(), DELIM_SHORT_FALL)),
     );
 
-    ctx.push(SkewedFractionItem::create(
-        numerator,
-        denominator,
-        slash,
-        styles,
-        &ctx.arenas.bump,
-    ));
+    ctx.push(SkewedFractionItem::create(numerator, denominator, slash, styles));
 
     Ok(())
 }
@@ -920,7 +889,7 @@ fn resolve_lr<'a, 'v, 'e>(
 
     let open = opening_exists.then(|| inner_items.remove(0));
     let close = closing_exists.then(|| inner_items.pop().unwrap());
-    let body = MathItem::group(inner_items, closing_exists, styles, &ctx.arenas.bump);
+    let body = MathItem::group(inner_items, closing_exists, styles);
 
     let insert_pos = start + start_idx;
     if let MathItem::Component(MathComponent {
@@ -928,25 +897,11 @@ fn resolve_lr<'a, 'v, 'e>(
         ..
     }) = body
     {
-        let items = split_into_fenced_segments(
-            open,
-            close,
-            multiline,
-            styles,
-            elem.span(),
-            &ctx.arenas.bump,
-        );
+        let items =
+            split_into_fenced_segments(open, close, multiline, styles, elem.span());
         ctx.items.splice(insert_pos..insert_pos, items);
     } else {
-        let item = FencedItem::create(
-            open,
-            close,
-            body,
-            true,
-            styles,
-            elem.span(),
-            &ctx.arenas.bump,
-        );
+        let item = FencedItem::create(open, close, body, true, styles, elem.span());
         ctx.items.insert(insert_pos, item);
     }
 
@@ -961,15 +916,14 @@ fn split_into_fenced_segments<'a>(
     multiline: MultilineItem<'a>,
     styles: StyleChain<'a>,
     span: Span,
-    bump: &'a bumpalo::Bump,
 ) -> Vec<MathItem<'a>> {
     // Flatten multiline into a list of cells.
-    let mut bodies = BumpVec::new_in(bump);
-    for (row, len) in multiline.rows.into_iter().zip(multiline.row_lengths) {
+    let mut bodies = Vec::new();
+    for (row, len) in multiline.rows.into_iter().zip(multiline.row_lengths.iter()) {
         bodies.extend(row.into_iter().take(*len));
     }
 
-    let sizing = SharedFenceSizing::new(bodies.into_boxed_slice());
+    let sizing = SharedFenceSizing::new(bodies);
     let ncells: usize = multiline.row_lengths.iter().sum();
     let nrows = multiline.row_lengths.len();
 
@@ -995,7 +949,6 @@ fn split_into_fenced_segments<'a>(
                 true,
                 styles,
                 span,
-                bump,
             ));
 
             body_idx += 1;
@@ -1144,19 +1097,14 @@ fn resolve_cells<'a, 'v, 'e>(
     children: &str,
 ) -> SourceResult<MathItem<'a>> {
     let cell_styles = ctx.chain_styles(styles, style_for_denominator(styles));
-    let bump = &ctx.arenas.bump;
 
-    let mut cells = BumpVec::with_capacity_in(rows.len(), bump);
+    let mut cells = Vec::with_capacity(rows.len());
     for row in rows {
-        let mut resolved_row = BumpVec::with_capacity_in(row.len(), bump);
+        let mut resolved_row = Vec::with_capacity(row.len());
         for cell in row {
             let start = ctx.resolve_into_items(cell, cell_styles)?;
-            let preprocessed = preprocess(
-                ctx.items.drain(start..),
-                bump,
-                false,
-                PreprocessMode::TableCell,
-            );
+            let preprocessed =
+                preprocess(ctx.items.drain(start..), false, PreprocessMode::TableCell);
 
             // We strip linebreaks in the cells as we can't differentiate
             // alignment points for the whole body from ones for a specific
@@ -1170,34 +1118,20 @@ fn resolve_cells<'a, 'v, 'e>(
             }
 
             // Create the cell's sub-columns by splitting at alignment points.
-            let sub_columns = if preprocessed.has_align {
-                let cols = split_at_align(preprocessed.items, bump);
-                BumpVec::from_iter_in(
-                    cols.into_iter().map(|col| MathItem::wrap(col, cell_styles)),
-                    bump,
-                )
-                .into_boxed_slice()
+            let sub_columns: TableCell<'_> = if preprocessed.has_align {
+                let cols = split_at_align(preprocessed.items);
+                cols.into_iter().map(|col| MathItem::wrap(col, cell_styles)).collect()
             } else {
-                let item = MathItem::wrap(preprocessed.items, cell_styles);
-                BumpBox::new_in([item], bump).into()
+                vec![MathItem::wrap(preprocessed.items, cell_styles)]
             };
 
             resolved_row.push(sub_columns);
         }
 
-        cells.push(resolved_row.into_boxed_slice());
+        cells.push(resolved_row);
     }
 
-    Ok(TableItem::create(
-        cells.into_boxed_slice(),
-        gap,
-        augment,
-        align,
-        alternator,
-        styles,
-        span,
-        &ctx.arenas.bump,
-    ))
+    Ok(TableItem::create(cells, gap, augment, align, alternator, styles, span))
 }
 
 /// Resolves the delimiters around the body of a vector, matrix, or cases.
@@ -1224,15 +1158,7 @@ fn resolve_delimiters<'a, 'v, 'e>(
         .transpose()?
         .inspect(|x| x.set_stretch(stretch));
 
-    ctx.push(FencedItem::create(
-        open,
-        close,
-        cells,
-        false,
-        styles,
-        span,
-        &ctx.arenas.bump,
-    ));
+    ctx.push(FencedItem::create(open, close, cells, false, styles, span));
     Ok(())
 }
 
@@ -1297,14 +1223,7 @@ fn resolve_root<'a, 'v, 'e>(
         styles,
     )?;
     sqrt.set_stretch(Stretch::new().with_y(StretchInfo::new(Rel::one(), Em::zero())));
-    ctx.push(RadicalItem::create(
-        radicand,
-        index,
-        sqrt,
-        styles,
-        elem.span(),
-        &ctx.arenas.bump,
-    ));
+    ctx.push(RadicalItem::create(radicand, index, sqrt, styles, elem.span()));
     Ok(())
 }
 
@@ -1315,13 +1234,7 @@ fn resolve_underline<'a, 'v, 'e>(
     styles: StyleChain<'a>,
 ) -> SourceResult<()> {
     let base = ctx.resolve_into_item(&elem.body, styles)?;
-    ctx.push(LineItem::create(
-        base,
-        Position::Below,
-        styles,
-        elem.span(),
-        &ctx.arenas.bump,
-    ));
+    ctx.push(LineItem::create(base, Position::Below, styles, elem.span()));
     Ok(())
 }
 
@@ -1335,13 +1248,7 @@ fn resolve_overline<'a, 'v, 'e>(
 ) -> SourceResult<()> {
     let cramped_styles = ctx.chain_styles(styles, style_cramped());
     let base = ctx.resolve_into_item(&elem.body, cramped_styles)?;
-    ctx.push(LineItem::create(
-        base,
-        Position::Above,
-        styles,
-        elem.span(),
-        &ctx.arenas.bump,
-    ));
+    ctx.push(LineItem::create(base, Position::Above, styles, elem.span()));
     Ok(())
 }
 
@@ -1501,7 +1408,7 @@ fn resolve_underoverspreader<'a, 'v, 'e>(
     accent.set_class(MathClass::Diacritic);
     accent.set_stretch(Stretch::new().with_x(StretchInfo::new(Rel::one(), Em::zero())));
 
-    let base = AccentItem::create(base, accent, position, true, styles, &ctx.arenas.bump);
+    let base = AccentItem::create(base, accent, position, true, styles);
 
     let Some(annotation) = annotation else {
         ctx.push(base);
@@ -1521,7 +1428,6 @@ fn resolve_underoverspreader<'a, 'v, 'e>(
                 None,
                 None,
                 styles,
-                &ctx.arenas.bump,
             )
         }
         Position::Above => {
@@ -1536,7 +1442,6 @@ fn resolve_underoverspreader<'a, 'v, 'e>(
                 None,
                 None,
                 styles,
-                &ctx.arenas.bump,
             )
         }
     };

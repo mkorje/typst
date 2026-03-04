@@ -3,7 +3,6 @@ use std::cell::Cell;
 use std::ops::{Deref, MulAssign};
 use std::rc::Rc;
 
-use bumpalo::{Bump, boxed::Box as BumpBox, collections::Vec as BumpVec};
 use ecow::EcoString;
 use typst_syntax::Span;
 use typst_utils::{Get, default_math_class};
@@ -22,7 +21,7 @@ use crate::math::{
 use crate::visualize::FixedStroke;
 
 /// A cell in a table, split at alignment points into sub-columns.
-type TableCell<'a> = [BumpBox<'a, [MathItem<'a>]>];
+pub(crate) type TableCell<'a> = Vec<MathItem<'a>>;
 
 /// The top-level item in the math IR.
 #[derive(Debug)]
@@ -61,17 +60,16 @@ impl<'a> MathItem<'a> {
         items: I,
         closing_exists: bool,
         styles: StyleChain<'a>,
-        bump: &'a Bump,
     ) -> MathItem<'a>
     where
         I: IntoIterator<Item = MathItem<'a>>,
         I::IntoIter: ExactSizeIterator,
     {
-        let preprocessed = preprocess(items, bump, closing_exists, PreprocessMode::Group);
+        let preprocessed = preprocess(items, closing_exists, PreprocessMode::Group);
         if preprocessed.has_linebreaks {
-            build_multiline(preprocessed.items, styles, bump)
+            build_multiline(preprocessed.items, styles)
         } else {
-            GroupItem::create(preprocessed.items.into_boxed_slice(), styles)
+            GroupItem::create(preprocessed.items, styles)
         }
     }
 
@@ -82,13 +80,13 @@ impl<'a> MathItem<'a> {
     /// have already been processed and contain no alignment points or
     /// linebreaks.
     pub(crate) fn wrap(
-        mut items: BumpVec<'a, MathItem<'a>>,
+        mut items: Vec<MathItem<'a>>,
         styles: StyleChain<'a>,
     ) -> MathItem<'a> {
         if items.len() == 1 {
             items.pop().unwrap()
         } else {
-            GroupItem::create(items.into_boxed_slice(), styles)
+            GroupItem::create(items, styles)
         }
     }
 
@@ -343,31 +341,31 @@ pub enum MathKind<'a> {
     /// A multiline equation with items pre-split into rows and columns.
     Multiline(MultilineItem<'a>),
     /// A radical (square root or nth root).
-    Radical(BumpBox<'a, RadicalItem<'a>>),
+    Radical(Box<RadicalItem<'a>>),
     /// An item enclosed in delimiters.
-    Fenced(BumpBox<'a, FencedItem<'a>>),
+    Fenced(Box<FencedItem<'a>>),
     /// A vertical fraction.
-    Fraction(BumpBox<'a, FractionItem<'a>>),
+    Fraction(Box<FractionItem<'a>>),
     /// An inline skewed fraction.
-    SkewedFraction(BumpBox<'a, SkewedFractionItem<'a>>),
+    SkewedFraction(Box<SkewedFractionItem<'a>>),
     /// A 2D collection of math items laid out as a table/matrix.
-    Table(BumpBox<'a, TableItem<'a>>),
+    Table(Box<TableItem<'a>>),
     /// A base with scripts (subscripts/superscripts) and/or limits attached.
-    Scripts(BumpBox<'a, ScriptsItem<'a>>),
+    Scripts(Box<ScriptsItem<'a>>),
     /// A base with an accent mark above or below.
-    Accent(BumpBox<'a, AccentItem<'a>>),
+    Accent(Box<AccentItem<'a>>),
     /// A base with a line overlaid.
-    Cancel(BumpBox<'a, CancelItem<'a>>),
+    Cancel(Box<CancelItem<'a>>),
     /// A base with a line drawn above or below.
-    Line(BumpBox<'a, LineItem<'a>>),
+    Line(Box<LineItem<'a>>),
     /// Grouped prime symbols.
-    Primes(BumpBox<'a, PrimesItem<'a>>),
+    Primes(Box<PrimesItem<'a>>),
     /// A text string.
-    Text(TextItem<'a>),
+    Text(TextItem),
     /// A number.
-    Number(NumberItem<'a>),
+    Number(NumberItem),
     /// A single glyph (grapheme cluster).
-    Glyph(BumpBox<'a, GlyphItem>),
+    Glyph(Box<GlyphItem>),
     /// Inline content.
     Box(BoxItem<'a>),
     /// External content that needs to be laid out separately.
@@ -446,13 +444,13 @@ impl MathProperties {
 #[derive(Debug)]
 pub struct GroupItem<'a> {
     /// The items in the group.
-    pub items: BumpBox<'a, [MathItem<'a>]>,
+    pub items: Vec<MathItem<'a>>,
 }
 
 impl<'a> GroupItem<'a> {
     /// Creates a new group item.
     pub(crate) fn create(
-        items: BumpBox<'a, [MathItem<'a>]>,
+        items: Vec<MathItem<'a>>,
         styles: StyleChain<'a>,
     ) -> MathItem<'a> {
         let props = MathProperties::default(styles);
@@ -469,9 +467,9 @@ pub struct MultilineItem<'a> {
     /// Rows correspond to linebreaks in the source. Columns within each row
     /// correspond to alignment points. All rows are padded to have the same
     /// number of columns.
-    pub rows: BumpVec<'a, BumpVec<'a, MathItem<'a>>>,
+    pub rows: Vec<Vec<MathItem<'a>>>,
     /// The number of columns originally in each row before padding.
-    pub(crate) row_lengths: &'a [usize],
+    pub(crate) row_lengths: Vec<usize>,
     /// Whether the resulting frame should be aligned on the math axis.
     ///
     /// Only used in paged export.
@@ -481,8 +479,8 @@ pub struct MultilineItem<'a> {
 impl<'a> MultilineItem<'a> {
     /// Creates a new multiline item.
     pub(crate) fn create(
-        rows: BumpVec<'a, BumpVec<'a, MathItem<'a>>>,
-        row_lengths: &'a [usize],
+        rows: Vec<Vec<MathItem<'a>>>,
+        row_lengths: Vec<usize>,
         styles: StyleChain<'a>,
     ) -> MathItem<'a> {
         let kind = MathKind::Multiline(Self { rows, row_lengths, centered: false });
@@ -512,10 +510,8 @@ impl<'a> RadicalItem<'a> {
         sqrt: MathItem<'a>,
         styles: StyleChain<'a>,
         span: Span,
-        bump: &'a Bump,
     ) -> MathItem<'a> {
-        let kind =
-            MathKind::Radical(BumpBox::new_in(Self { radicand, index, sqrt }, bump));
+        let kind = MathKind::Radical(Box::new(Self { radicand, index, sqrt }));
         let props = MathProperties::default(styles).with_span(span);
         MathComponent { kind, props, styles }.into()
     }
@@ -549,12 +545,9 @@ impl<'a> FencedItem<'a> {
         balanced: bool,
         styles: StyleChain<'a>,
         span: Span,
-        bump: &'a Bump,
     ) -> MathItem<'a> {
-        let kind = MathKind::Fenced(BumpBox::new_in(
-            Self { open, close, body: body.into(), balanced },
-            bump,
-        ));
+        let kind =
+            MathKind::Fenced(Box::new(Self { open, close, body: body.into(), balanced }));
         let props = MathProperties::default(styles).with_span(span);
         MathComponent { kind, props, styles }.into()
     }
@@ -582,12 +575,9 @@ impl<'a> FractionItem<'a> {
         padding: Em,
         styles: StyleChain<'a>,
         span: Span,
-        bump: &'a Bump,
     ) -> MathItem<'a> {
-        let kind = MathKind::Fraction(BumpBox::new_in(
-            Self { numerator, denominator, line, padding },
-            bump,
-        ));
+        let kind =
+            MathKind::Fraction(Box::new(Self { numerator, denominator, line, padding }));
         let props = MathProperties::default(styles).with_span(span);
         MathComponent { kind, props, styles }.into()
     }
@@ -613,12 +603,9 @@ impl<'a> SkewedFractionItem<'a> {
         denominator: MathItem<'a>,
         slash: MathItem<'a>,
         styles: StyleChain<'a>,
-        bump: &'a Bump,
     ) -> MathItem<'a> {
-        let kind = MathKind::SkewedFraction(BumpBox::new_in(
-            Self { numerator, denominator, slash },
-            bump,
-        ));
+        let kind =
+            MathKind::SkewedFraction(Box::new(Self { numerator, denominator, slash }));
         let props = MathProperties::default(styles);
         MathComponent { kind, props, styles }.into()
     }
@@ -628,7 +615,7 @@ impl<'a> SkewedFractionItem<'a> {
 #[derive(Debug)]
 pub struct TableItem<'a> {
     /// The cells of the table, organized by row.
-    pub cells: BumpBox<'a, [BumpBox<'a, TableCell<'a>>]>,
+    pub cells: Vec<Vec<TableCell<'a>>>,
     /// The gap between rows and columns.
     pub gap: Axes<Rel<Abs>>,
     /// Optional augmentation lines to draw.
@@ -642,19 +629,16 @@ pub struct TableItem<'a> {
 impl<'a> TableItem<'a> {
     /// Creates a new table item.
     pub(crate) fn create(
-        cells: BumpBox<'a, [BumpBox<'a, TableCell<'a>>]>,
+        cells: Vec<Vec<TableCell<'a>>>,
         gap: Axes<Rel<Abs>>,
         augment: Option<Augment<Abs>>,
         align: FixedAlignment,
         alternator: LeftRightAlternator,
         styles: StyleChain<'a>,
         span: Span,
-        bump: &'a Bump,
     ) -> MathItem<'a> {
-        let kind = MathKind::Table(BumpBox::new_in(
-            Self { cells, gap, augment, align, alternator },
-            bump,
-        ));
+        let kind =
+            MathKind::Table(Box::new(Self { cells, gap, augment, align, alternator }));
         let props = MathProperties::default(styles).with_span(span);
         MathComponent { kind, props, styles }.into()
     }
@@ -692,21 +676,17 @@ impl<'a> ScriptsItem<'a> {
         top_right: Option<MathItem<'a>>,
         bottom_right: Option<MathItem<'a>>,
         styles: StyleChain<'a>,
-        bump: &'a Bump,
     ) -> MathItem<'a> {
         let props = MathProperties::new(styles, base.class());
-        let kind = MathKind::Scripts(BumpBox::new_in(
-            Self {
-                base,
-                top,
-                bottom,
-                top_left,
-                bottom_left,
-                top_right,
-                bottom_right,
-            },
-            bump,
-        ));
+        let kind = MathKind::Scripts(Box::new(Self {
+            base,
+            top,
+            bottom,
+            top_left,
+            bottom_left,
+            top_right,
+            bottom_right,
+        }));
         MathComponent { kind, props, styles }.into()
     }
 }
@@ -736,13 +716,14 @@ impl<'a> AccentItem<'a> {
         position: Position,
         exact_frame_width: bool,
         styles: StyleChain<'a>,
-        bump: &'a Bump,
     ) -> MathItem<'a> {
         let props = MathProperties::new(styles, base.class());
-        let kind = MathKind::Accent(BumpBox::new_in(
-            Self { base, accent, position, exact_frame_width },
-            bump,
-        ));
+        let kind = MathKind::Accent(Box::new(Self {
+            base,
+            accent,
+            position,
+            exact_frame_width,
+        }));
         MathComponent { kind, props, styles }.into()
     }
 }
@@ -777,20 +758,16 @@ impl<'a> CancelItem<'a> {
         angle: Smart<CancelAngle>,
         styles: StyleChain<'a>,
         span: Span,
-        bump: &'a Bump,
     ) -> MathItem<'a> {
         let props = MathProperties::new(styles, base.class()).with_span(span);
-        let kind = MathKind::Cancel(BumpBox::new_in(
-            Self {
-                base,
-                length,
-                stroke,
-                cross,
-                invert_first_line,
-                angle,
-            },
-            bump,
-        ));
+        let kind = MathKind::Cancel(Box::new(Self {
+            base,
+            length,
+            stroke,
+            cross,
+            invert_first_line,
+            angle,
+        }));
         MathComponent { kind, props, styles }.into()
     }
 }
@@ -813,10 +790,9 @@ impl<'a> LineItem<'a> {
         position: Position,
         styles: StyleChain<'a>,
         span: Span,
-        bump: &'a Bump,
     ) -> MathItem<'a> {
         let props = MathProperties::new(styles, base.class()).with_span(span);
-        let kind = MathKind::Line(BumpBox::new_in(Self { base, position }, bump));
+        let kind = MathKind::Line(Box::new(Self { base, position }));
         MathComponent { kind, props, styles }.into()
     }
 }
@@ -839,9 +815,8 @@ impl<'a> PrimesItem<'a> {
         prime: MathItem<'a>,
         count: usize,
         styles: StyleChain<'a>,
-        bump: &'a Bump,
     ) -> MathItem<'a> {
-        let kind = MathKind::Primes(BumpBox::new_in(Self { prime, count }, bump));
+        let kind = MathKind::Primes(Box::new(Self { prime, count }));
         let props = MathProperties::default(styles);
         MathComponent { kind, props, styles }.into()
     }
@@ -849,22 +824,20 @@ impl<'a> PrimesItem<'a> {
 
 /// A text string.
 #[derive(Debug)]
-pub struct TextItem<'a> {
+pub struct TextItem {
     /// The text content.
-    pub text: &'a str,
+    pub text: EcoString,
 }
 
-impl<'a> TextItem<'a> {
+impl TextItem {
     /// Creates a new text item.
     ///
     /// The resulting item is spaced and has alphabetic math class.
-    pub(crate) fn create(
+    pub(crate) fn create<'a>(
         text: EcoString,
         styles: StyleChain<'a>,
         span: Span,
-        bump: &'a Bump,
     ) -> MathItem<'a> {
-        let text = bump.alloc_str(&text);
         let kind = MathKind::Text(Self { text });
         let props = MathProperties::new(styles, MathClass::Alphabetic)
             .with_spaced(true)
@@ -875,20 +848,18 @@ impl<'a> TextItem<'a> {
 
 /// A number.
 #[derive(Debug)]
-pub struct NumberItem<'a> {
+pub struct NumberItem {
     /// The number's text content.
-    pub text: &'a str,
+    pub text: EcoString,
 }
 
-impl<'a> NumberItem<'a> {
+impl NumberItem {
     /// Creates a new number item.
-    pub(crate) fn create(
+    pub(crate) fn create<'a>(
         text: EcoString,
         styles: StyleChain<'a>,
         span: Span,
-        bump: &'a Bump,
     ) -> MathItem<'a> {
-        let text = bump.alloc_str(&text);
         let kind = MathKind::Number(Self { text });
         let props = MathProperties::default(styles).with_span(span);
         MathComponent { kind, props, styles }.into()
@@ -917,7 +888,6 @@ impl GlyphItem {
         text: EcoString,
         styles: StyleChain<'a>,
         span: Span,
-        bump: &'a Bump,
     ) -> MathItem<'a> {
         assert!(text.graphemes(true).count() == 1);
 
@@ -930,15 +900,12 @@ impl GlyphItem {
             .or(default_class)
             .unwrap_or(MathClass::Normal);
 
-        let kind = MathKind::Glyph(BumpBox::new_in(
-            Self {
-                text,
-                stretch: Cell::new(Stretch::new()),
-                mid_stretched: Cell::new(None),
-                flac: Cell::new(false),
-            },
-            bump,
-        ));
+        let kind = MathKind::Glyph(Box::new(Self {
+            text,
+            stretch: Cell::new(Stretch::new()),
+            mid_stretched: Cell::new(None),
+            flac: Cell::new(false),
+        }));
         let props =
             MathProperties::new(styles, class).with_limits(limits).with_span(span);
         MathComponent { kind, props, styles }.into()
@@ -991,14 +958,14 @@ impl<'a> ExternalItem<'a> {
 #[derive(Debug)]
 pub struct SharedFenceSizing<'a> {
     /// The body items of all fence segments.
-    items: BumpBox<'a, [MathItem<'a>]>,
+    items: Vec<MathItem<'a>>,
     /// Relative to height for stretch size calculation.
     relative_to: Cell<Option<Abs>>,
 }
 
 impl<'a> SharedFenceSizing<'a> {
     /// Creates a new shared sizing information.
-    pub(crate) fn new(items: BumpBox<'a, [MathItem<'a>]>) -> Rc<Self> {
+    pub(crate) fn new(items: Vec<MathItem<'a>>) -> Rc<Self> {
         Rc::new(Self { items, relative_to: Cell::new(None) })
     }
 

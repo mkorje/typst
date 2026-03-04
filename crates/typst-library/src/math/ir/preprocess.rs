@@ -1,6 +1,5 @@
 use std::ops::{Deref, DerefMut};
 
-use bumpalo::{Bump, collections::Vec as BumpVec};
 use smallvec::SmallVec;
 use unicode_math_class::MathClass;
 
@@ -18,7 +17,7 @@ pub(crate) enum PreprocessMode {
 /// The result of preprocessing math items.
 pub(crate) struct PreprocessOutput<'a> {
     /// Preprocessed items.
-    pub items: BumpVec<'a, MathItem<'a>>,
+    pub items: Vec<MathItem<'a>>,
     /// Whether the original input contained any linebreaks.
     pub had_linebreaks: bool,
     /// Whether the preprocessed items contain multiline content.
@@ -42,7 +41,6 @@ pub(crate) struct PreprocessOutput<'a> {
 /// function.
 pub(crate) fn preprocess<'a, I>(
     items: I,
-    bump: &'a Bump,
     closing: bool,
     mode: PreprocessMode,
 ) -> PreprocessOutput<'a>
@@ -175,7 +173,7 @@ where
     }
 
     PreprocessOutput {
-        items: BumpVec::from_iter_in(resolved.0, bump),
+        items: resolved.0.into_iter().collect(),
         had_linebreaks,
         has_linebreaks,
         has_align,

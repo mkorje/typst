@@ -21,7 +21,7 @@ pub fn layout_text(
     styles: StyleChain,
     props: &MathProperties,
 ) -> SourceResult<()> {
-    let text = item.text;
+    let text = &item.text;
     let span = props.span;
     let elem = TextElem::packed(text).spanned(span);
 
@@ -50,7 +50,7 @@ pub fn layout_number(
     styles: StyleChain,
     props: &MathProperties,
 ) -> SourceResult<()> {
-    let text = item.text;
+    let text = &item.text;
     let span = props.span;
     // Small optimization for numbers. Note that this lays out slightly
     // differently to normal text and is worth re-evaluating in the future.

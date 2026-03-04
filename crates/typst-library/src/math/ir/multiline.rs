@@ -1,13 +1,10 @@
-use bumpalo::{Bump, collections::Vec as BumpVec};
-
 use super::item::*;
 use crate::foundations::{Resolve, StyleChain};
 
 /// Builds a multiline item from preprocessed items that contain linebreaks.
 pub(super) fn build_multiline<'a>(
-    items: BumpVec<'a, MathItem<'a>>,
+    items: Vec<MathItem<'a>>,
     styles: StyleChain<'a>,
-    bump: &'a Bump,
 ) -> MathItem<'a> {
     let nrows = items
         .iter()
@@ -15,37 +12,33 @@ pub(super) fn build_multiline<'a>(
         .count()
         + 1;
 
-    let mut rows: BumpVec<'a, BumpVec<'a, BumpVec<'a, MathItem<'a>>>> =
-        BumpVec::with_capacity_in(nrows, bump);
+    let mut rows = Vec::with_capacity(nrows);
 
-    let mut row = BumpVec::new_in(bump);
+    let mut row = Vec::new();
     for item in items {
         if matches!(item, MathItem::Linebreak) {
-            rows.push(split_at_align(row.drain(..), bump));
+            rows.push(split_at_align(row.drain(..)));
         } else {
             row.push(item);
         }
     }
-    rows.push(split_at_align(row, bump));
+    rows.push(split_at_align(row));
 
-    let row_lengths = bump.alloc_slice_fill_iter(rows.iter().map(|row| row.len()));
+    let row_lengths: Vec<_> = rows.iter().map(|row| row.len()).collect();
 
     let ncols = row_lengths.iter().copied().max().unwrap_or_default();
-    let rows = BumpVec::from_iter_in(
-        rows.into_iter().map(|mut row| {
+    let rows = rows
+        .into_iter()
+        .map(|mut row| {
             // Pad rows to have the same number of columns.
             while row.len() < ncols {
-                row.push(BumpVec::new_in(bump));
+                row.push(Vec::new());
             }
 
             // Wrap each column's items into a single MathItem.
-            BumpVec::from_iter_in(
-                row.into_iter().map(|cell| MathItem::wrap(cell, styles)),
-                bump,
-            )
-        }),
-        bump,
-    );
+            row.into_iter().map(|cell| MathItem::wrap(cell, styles)).collect()
+        })
+        .collect();
 
     MultilineItem::create(rows, row_lengths, styles)
 }
@@ -53,19 +46,16 @@ pub(super) fn build_multiline<'a>(
 /// Splits preprocessed items at alignment point markers into columns, moving
 /// spacing between items in different columns of a (right-aligned,
 /// left-aligned) pair to the right-aligned column.
-pub(crate) fn split_at_align<'a, I>(
-    items: I,
-    bump: &'a Bump,
-) -> BumpVec<'a, BumpVec<'a, MathItem<'a>>>
+pub(crate) fn split_at_align<'a, I>(items: I) -> Vec<Vec<MathItem<'a>>>
 where
     I: IntoIterator<Item = MathItem<'a>>,
 {
-    let mut cols = BumpVec::from_iter_in([BumpVec::new_in(bump)], bump);
+    let mut cols = vec![vec![]];
 
     let mut at_boundary = false;
     for mut item in items {
         if matches!(item, MathItem::Align) {
-            cols.push(BumpVec::new_in(bump));
+            cols.push(Vec::new());
             at_boundary = true;
             continue;
         }
