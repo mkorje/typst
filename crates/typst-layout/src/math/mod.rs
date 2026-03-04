@@ -127,6 +127,7 @@ pub fn layout_equation_block(
     let mut ctx = MathContext::new(engine, &mut locator, regions.base(), font.clone());
     let full_equation_builder = if let MathItem::Component(MathComponent {
         kind: MathKind::Multiline(multi),
+        styles,
         ..
     }) = item
     {
