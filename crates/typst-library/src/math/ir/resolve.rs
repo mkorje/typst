@@ -261,12 +261,13 @@ fn resolve_text<'a, 'v, 'e>(
         TextItem::create(styled_text, num, styles, elem.span(), &ctx.arenas.bump)
     };
 
-    let item = if !elem.text.contains(is_newline) {
-        create_item(&elem.text)
+    let text = elem.text.strip_suffix(is_newline).unwrap_or(&elem.text);
+    let item = if !text.contains(is_newline) {
+        create_item(text)
     } else {
         let bump = &ctx.arenas.bump;
         let rows = BumpVec::from_iter_in(
-            elem.text.split_terminator(is_newline).map(|line| {
+            text.split(is_newline).map(|line| {
                 let item = create_item(line);
                 BumpVec::from_iter_in([item], bump)
             }),

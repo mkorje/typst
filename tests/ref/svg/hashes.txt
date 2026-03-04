@@ -1141,6 +1141,7 @@ c22f82156063456f6375cc7d867a0b78 math-mat-spread-2d
 ae3b440c89afe53e2bd0398acdc831c9 math-multiline-multiple-trailing-linebreaks
 1b7feb3eadd07aaafc6b03421f6ec234 math-multiline-no-trailing-linebreak
 575304ee89e4ca6caff93eff96356520 math-multiline-string
+73a7fd423e1bf4300e3596957ab221a1 math-multiline-string-alignment
 ca38f19088793920cd0d995c9c3e089b math-multiline-trailing-linebreak
 346bad082800b1287a38a09cfc76e4b5 math-nested-normal-layout
 acc8d43c8ee2474c2d4e7e3e44a0d21e math-non-math-content
