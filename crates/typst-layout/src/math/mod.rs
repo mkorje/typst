@@ -39,7 +39,7 @@ use self::fraction::{layout_fraction, layout_skewed_fraction};
 use self::fragment::{FrameFragment, MathFragment};
 use self::line::layout_line;
 use self::radical::layout_radical;
-use self::run::{MathFragmentsExt, MathRunFrameBuilder, layout_multiline};
+use self::run::{MathFragmentsExt, MathRun, MathRunFrameBuilder, layout_multiline};
 use self::scripts::{layout_primes, layout_scripts};
 use self::table::layout_table;
 use self::text::{layout_glyph, layout_number, layout_text};
@@ -370,7 +370,7 @@ struct MathContext<'a, 'v, 'e> {
     region: Region,
     // Mutable.
     fonts_stack: Vec<Font>,
-    fragments: Vec<MathFragment>,
+    fragments: MathRun,
 }
 
 impl<'a, 'v, 'e> MathContext<'a, 'v, 'e> {
@@ -412,7 +412,7 @@ impl<'a, 'v, 'e> MathContext<'a, 'v, 'e> {
         &mut self,
         item: &MathItem,
         styles: StyleChain,
-    ) -> SourceResult<Vec<MathFragment>> {
+    ) -> SourceResult<MathRun> {
         let start = self.fragments.len();
         self.layout_into_self(item, styles)?;
         Ok(self.fragments.drain(start..).collect())

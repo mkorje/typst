@@ -8,8 +8,8 @@ use typst_library::visualize::{FillRule, FixedStroke, Geometry, LineCap, Shape};
 use typst_syntax::Span;
 
 use super::MathContext;
-use super::fragment::{FrameFragment, GlyphFragment, MathFragment};
-use super::run::{measure_sub_columns, stack_sub_column_rows};
+use super::fragment::{FrameFragment, GlyphFragment};
+use super::run::{MathRun, RowLayout, measure_row, stack_rows};
 
 const DEFAULT_STROKE_THICKNESS: Em = Em::new(0.05);
 
@@ -77,8 +77,8 @@ pub fn layout_table(
         for (c, cell) in row.iter().enumerate() {
             let cell = layout_cell(cell, ctx, styles)?;
 
-            heights[r].0.set_max(cell.dims.0.max(paren.ascent()));
-            heights[r].1.set_max(cell.dims.1.max(paren.descent()));
+            heights[r].0.set_max(cell.height.0.max(paren.ascent()));
+            heights[r].1.set_max(cell.height.1.max(paren.descent()));
 
             cols[c].push(cell);
         }
@@ -124,11 +124,13 @@ pub fn layout_table(
 
     for (index, col) in cols.into_iter().enumerate() {
         let sub_widths = compute_sub_column_widths(&col);
-        let rows = col.into_iter().enumerate().map(|(row, cell_layout)| {
-            (cell_layout.sub_columns, cell_layout.dims, heights[row])
+        let rows = col.into_iter().enumerate().map(|(row, cell_layout)| RowLayout {
+            cells: cell_layout.sub_columns,
+            frame_height: cell_layout.height,
+            row_height: Some(heights[row]),
         });
 
-        let builder = stack_sub_column_rows(
+        let builder = stack_rows(
             rows,
             &sub_widths,
             item.alternator,
@@ -186,8 +188,8 @@ pub fn layout_table(
 }
 
 struct CellLayout {
-    sub_columns: Vec<Vec<MathFragment>>,
-    dims: (Abs, Abs),
+    sub_columns: Vec<MathRun>,
+    height: (Abs, Abs),
 }
 
 /// Layout one cell, split at alignment points into sub-columns.
@@ -200,8 +202,8 @@ fn layout_cell(
     for item in cell {
         sub_columns.push(ctx.layout_into_fragments(item, styles)?);
     }
-    let dims = measure_sub_columns(&sub_columns);
-    Ok(CellLayout { sub_columns, dims })
+    let height = measure_row(&sub_columns);
+    Ok(CellLayout { sub_columns, height })
 }
 
 /// Compute max sub-column widths across a table column.
