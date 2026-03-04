@@ -257,8 +257,11 @@ fn resolve_text<'a, 'v, 'e>(
             .chars()
             .flat_map(|c| to_style(c, MathStyle::select(c, variant, bold, italic)))
             .collect();
-        let styles = if !num { *local_styles } else { styles };
-        TextItem::create(styled_text, num, styles, elem.span(), &ctx.arenas.bump)
+        if num {
+            NumberItem::create(styled_text, styles, elem.span(), &ctx.arenas.bump)
+        } else {
+            TextItem::create(styled_text, *local_styles, elem.span(), &ctx.arenas.bump)
+        }
     };
 
     let text = elem.text.strip_suffix(is_newline).unwrap_or(&elem.text);

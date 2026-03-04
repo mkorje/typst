@@ -361,6 +361,8 @@ pub enum MathKind<'a> {
     Primes(BumpBox<'a, PrimesItem<'a>>),
     /// A text string.
     Text(TextItem<'a>),
+    /// A number.
+    Number(NumberItem<'a>),
     /// A single glyph (grapheme cluster).
     Glyph(BumpBox<'a, GlyphItem>),
     /// Inline content.
@@ -851,30 +853,45 @@ impl<'a> PrimesItem<'a> {
 pub struct TextItem<'a> {
     /// The text content.
     pub text: &'a str,
-    /// Whether the text is a number.
-    pub num: bool,
 }
 
 impl<'a> TextItem<'a> {
     /// Creates a new text item.
     ///
-    /// The `num` parameter indicates that the text is a number. If false, then
-    /// the resulting item is spaced and has alphabetic math class.
+    /// The resulting item is spaced and has alphabetic math class.
     pub(crate) fn create(
         text: EcoString,
-        num: bool,
         styles: StyleChain<'a>,
         span: Span,
         bump: &'a Bump,
     ) -> MathItem<'a> {
         let text = bump.alloc_str(&text);
-        let kind = MathKind::Text(Self { text, num });
-        let props = if !num {
-            MathProperties::new(styles, MathClass::Alphabetic).with_spaced(true)
-        } else {
-            MathProperties::default(styles)
-        }
-        .with_span(span);
+        let kind = MathKind::Text(Self { text });
+        let props = MathProperties::new(styles, MathClass::Alphabetic)
+            .with_spaced(true)
+            .with_span(span);
+        MathComponent { kind, props, styles }.into()
+    }
+}
+
+/// A number.
+#[derive(Debug)]
+pub struct NumberItem<'a> {
+    /// The number's text content.
+    pub text: &'a str,
+}
+
+impl<'a> NumberItem<'a> {
+    /// Creates a new number item.
+    pub(crate) fn create(
+        text: EcoString,
+        styles: StyleChain<'a>,
+        span: Span,
+        bump: &'a Bump,
+    ) -> MathItem<'a> {
+        let text = bump.alloc_str(&text);
+        let kind = MathKind::Number(Self { text });
+        let props = MathProperties::default(styles).with_span(span);
         MathComponent { kind, props, styles }.into()
     }
 }

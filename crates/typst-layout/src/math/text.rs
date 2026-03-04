@@ -3,7 +3,7 @@ use ecow::EcoString;
 use typst_library::diag::SourceResult;
 use typst_library::foundations::StyleChain;
 use typst_library::layout::{Abs, Axis, Size};
-use typst_library::math::ir::{GlyphItem, MathProperties, TextItem};
+use typst_library::math::ir::{GlyphItem, MathProperties, NumberItem, TextItem};
 use typst_library::math::{EquationElem, MathSize, style_dtls, style_flac};
 use typst_library::text::{Font, TextElem};
 use typst_utils::Get;
@@ -23,34 +23,45 @@ pub fn layout_text(
 ) -> SourceResult<()> {
     let text = item.text;
     let span = props.span;
-    let frame = if item.num {
-        // Small optimization for numbers. Note that this lays out slightly
-        // differently to normal text and is worth re-evaluating in the future.
-        let mut fragments = vec![];
-        for c in text.chars() {
-            // This won't panic as ASCII digits and '.' will never end up as
-            // nothing after shaping.
-            let glyph = GlyphFragment::new_char(ctx, styles, c, span).unwrap();
-            fragments.push(glyph.into());
-        }
-        fragments.into_frame()
-    } else {
-        let elem = TextElem::packed(text).spanned(span);
+    let elem = TextElem::packed(text).spanned(span);
 
-        // There isn't a natural width for a paragraph in a math environment;
-        // because it will be placed somewhere probably not at the left margin
-        // it will overflow. So emulate an `hbox` instead and allow the
-        // paragraph to extend as far as needed.
-        crate::inline::layout_inline(
-            ctx.engine,
-            &[(&elem, styles)],
-            &mut ctx.locator.next(&span).split(),
-            styles,
-            Size::splat(Abs::inf()),
-            false,
-        )?
-        .into_frame()
-    };
+    // There isn't a natural width for a paragraph in a math environment;
+    // because it will be placed somewhere probably not at the left margin
+    // it will overflow. So emulate an `hbox` instead and allow the
+    // paragraph to extend as far as needed.
+    let frame = crate::inline::layout_inline(
+        ctx.engine,
+        &[(&elem, styles)],
+        &mut ctx.locator.next(&span).split(),
+        styles,
+        Size::splat(Abs::inf()),
+        false,
+    )?
+    .into_frame();
+    ctx.push(FrameFragment::new(props, styles, frame).with_text_like(true));
+    Ok(())
+}
+
+/// Lays out a [`NumberItem`].
+#[typst_macros::time(name = "math number layout", span = props.span)]
+pub fn layout_number(
+    item: &NumberItem,
+    ctx: &mut MathContext,
+    styles: StyleChain,
+    props: &MathProperties,
+) -> SourceResult<()> {
+    let text = item.text;
+    let span = props.span;
+    // Small optimization for numbers. Note that this lays out slightly
+    // differently to normal text and is worth re-evaluating in the future.
+    let mut fragments = vec![];
+    for c in text.chars() {
+        // This won't panic as ASCII digits and '.' will never end up as
+        // nothing after shaping.
+        let glyph = GlyphFragment::new_char(ctx, styles, c, span).unwrap();
+        fragments.push(glyph.into());
+    }
+    let frame = fragments.into_frame();
     ctx.push(FrameFragment::new(props, styles, frame).with_text_like(true));
     Ok(())
 }

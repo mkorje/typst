@@ -42,7 +42,7 @@ use self::radical::layout_radical;
 use self::run::{MathFragmentsExt, MathRunFrameBuilder, layout_multiline};
 use self::scripts::{layout_primes, layout_scripts};
 use self::table::layout_table;
-use self::text::{layout_glyph, layout_text};
+use self::text::{layout_glyph, layout_number, layout_text};
 
 /// Layout an inline equation (in a paragraph).
 #[typst_macros::time(span = elem.span())]
@@ -514,6 +514,7 @@ fn layout_realized(
             layout_skewed_fraction(item, ctx, styles, props)?
         }
         MathKind::Text(item) => layout_text(item, ctx, styles, props)?,
+        MathKind::Number(item) => layout_number(item, ctx, styles, props)?,
         MathKind::Fenced(item) => layout_fenced(item, ctx, styles, props)?,
         MathKind::Multiline(item) => {
             let mut frame = layout_multiline(item, ctx, styles)?.build();
