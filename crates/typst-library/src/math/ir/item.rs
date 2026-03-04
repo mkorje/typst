@@ -48,6 +48,9 @@ impl<'a> MathItem<'a> {
     /// Groups the given items together, returning a multiline item if there
     /// are linebreaks and a group item otherwise.
     ///
+    /// Use this function instead of [`Self::wrap`] when the items are "raw"
+    /// and have not had any processing done to them.
+    ///
     /// The items are preprocessed to calculate spacing between them. The
     /// `closing_exists` parameter indicates whether a closing delimiter
     /// will follow the group of items.
@@ -71,6 +74,10 @@ impl<'a> MathItem<'a> {
 
     /// Wraps the given items into a group item, or returns the single item if
     /// there is only one.
+    ///
+    /// Use this function instead of [`Self::group`] when the items you have
+    /// have already been processed and contain no alignment points or
+    /// linebreaks.
     pub(crate) fn wrap(
         mut items: BumpVec<'a, MathItem<'a>>,
         styles: StyleChain<'a>,
@@ -237,12 +244,12 @@ impl<'a> MathItem<'a> {
         }
     }
 
-    /// If this is a multiline item, sets the align field to true.
-    pub(crate) fn with_multiline_align(mut self) -> Self {
+    /// If this is a multiline item, sets the centered field to true.
+    pub(crate) fn with_multiline_centering(mut self) -> Self {
         if let Self::Component(comp) = &mut self
             && let MathKind::Multiline(multiline) = &mut comp.kind
         {
-            multiline.align = true;
+            multiline.centered = true;
         }
         self
     }
@@ -459,11 +466,11 @@ pub struct MultilineItem<'a> {
     /// number of columns.
     pub rows: BumpVec<'a, BumpVec<'a, MathItem<'a>>>,
     /// The number of columns originally in each row before padding.
-    pub row_lengths: &'a [usize],
+    pub(crate) row_lengths: &'a [usize],
     /// Whether the resulting frame should be aligned on the math axis.
     ///
     /// Only used in paged export.
-    pub align: bool,
+    pub centered: bool,
 }
 
 impl<'a> MultilineItem<'a> {
@@ -473,7 +480,7 @@ impl<'a> MultilineItem<'a> {
         row_lengths: &'a [usize],
         styles: StyleChain<'a>,
     ) -> MathItem<'a> {
-        let kind = MathKind::Multiline(Self { rows, row_lengths, align: false });
+        let kind = MathKind::Multiline(Self { rows, row_lengths, centered: false });
         let props = MathProperties::default(styles);
         MathComponent { kind, props, styles }.into()
     }

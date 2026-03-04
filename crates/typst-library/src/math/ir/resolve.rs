@@ -1,11 +1,12 @@
-use std::cell::Cell;
+use std::cell::{Cell, LazyCell};
+use std::sync::LazyLock;
 
 use bumpalo::boxed::Box as BumpBox;
 use bumpalo::collections::Vec as BumpVec;
 use codex::styling::{MathStyle, to_style};
 use ecow::EcoString;
 use typst_syntax::{Span, is_newline};
-use typst_utils::SliceExt;
+use typst_utils::{LazyHash, SliceExt};
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::item::*;
@@ -13,7 +14,9 @@ use super::multiline::split_at_align;
 use super::preprocess::{PreprocessMode, preprocess};
 use crate::diag::{SourceResult, bail, warning};
 use crate::engine::Engine;
-use crate::foundations::{Content, Packed, Resolve, StyleChain, Styles, SymbolElem};
+use crate::foundations::{
+    Content, Packed, Resolve, Style, StyleChain, Styles, SymbolElem,
+};
 use crate::introspection::{SplitLocator, TagElem};
 use crate::layout::{Abs, Axes, BoxElem, FixedAlignment, HElem, Ratio, Rel, Spacing};
 use crate::math::*;
@@ -23,6 +26,16 @@ use crate::text::{
     TopEdgeMetric, is_default_ignorable,
 };
 use crate::visualize::FixedStroke;
+
+/// Base styles chained to the style chain for text items.
+static TEXT_BASE_LOCAL_STYLES: LazyLock<[LazyHash<Style>; 3]> = LazyLock::new(|| {
+    [
+        TextElem::top_edge.set(TopEdge::Metric(TopEdgeMetric::Bounds)),
+        TextElem::bottom_edge.set(BottomEdge::Metric(BottomEdgeMetric::Bounds)),
+        TextElem::overhang.set(false),
+    ]
+    .map(|p| p.wrap())
+});
 
 /// The math IR builder.
 pub(crate) struct MathResolver<'a, 'v, 'e> {
@@ -236,27 +249,15 @@ fn resolve_text<'a, 'v, 'e>(
     let italic = styles.get(EquationElem::italic).or(Some(false));
 
     // Create item with correct styles and properties.
-    let mut local_styles = None;
-    let mut create_item = |text: &str| {
+    let local_styles =
+        LazyCell::new(|| ctx.chain_styles(styles, TEXT_BASE_LOCAL_STYLES.clone()));
+    let create_item = |text: &str| {
         let num = text.chars().all(|c| c.is_ascii_digit() || c == '.');
         let styled_text: EcoString = text
             .chars()
             .flat_map(|c| to_style(c, MathStyle::select(c, variant, bold, italic)))
             .collect();
-        let styles = if !num {
-            *local_styles.get_or_insert_with(|| {
-                let local = [
-                    TextElem::top_edge.set(TopEdge::Metric(TopEdgeMetric::Bounds)),
-                    TextElem::bottom_edge
-                        .set(BottomEdge::Metric(BottomEdgeMetric::Bounds)),
-                    TextElem::overhang.set(false),
-                ]
-                .map(|p| p.wrap());
-                ctx.chain_styles(styles, local)
-            })
-        } else {
-            styles
-        };
+        let styles = if !num { *local_styles } else { styles };
         TextItem::create(styled_text, num, styles, elem.span(), &ctx.arenas.bump)
     };
 
@@ -272,7 +273,7 @@ fn resolve_text<'a, 'v, 'e>(
             bump,
         );
         let row_lengths = bump.alloc_slice_fill_copy(rows.len(), 1);
-        MultilineItem::create(rows, row_lengths, styles).with_multiline_align()
+        MultilineItem::create(rows, row_lengths, styles).with_multiline_centering()
     };
     ctx.push(item);
     Ok(())
@@ -377,7 +378,7 @@ fn resolve_attach<'a, 'v, 'e>(
 /// Unfortunately, this does require the complication of interior mutability,
 /// i.e. the `Cell` type, due to lifetime variance. See the linked section of
 /// "Learning Rust With Entirely Too Many Linked Lists" for more explanation:
-/// https://rust-unofficial.github.io/too-many-lists/infinity-stack-allocated.html
+/// <https://rust-unofficial.github.io/too-many-lists/infinity-stack-allocated.html>
 enum AttachmentList<'a> {
     Node {
         /// We use `Option<Content>` instead of just `Content` to allow for the
@@ -1276,7 +1277,7 @@ fn resolve_root<'a, 'v, 'e>(
     let radicand = {
         let cramped = ctx.store_styles(style_cramped());
         ctx.resolve_into_item(&elem.radicand, bumped_styles.chain(cramped))?
-            .with_multiline_align()
+            .with_multiline_centering()
     };
     let index = {
         let sscript =

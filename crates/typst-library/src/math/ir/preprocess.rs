@@ -38,7 +38,8 @@ pub(crate) struct PreprocessOutput<'a> {
 /// > point, and move the spacing between items in different columns of a
 /// > (right-aligned, left-aligned) pair to the right-aligned column
 ///
-/// This is handled in the [`split_at_align`] function.
+/// This is handled in the [`split_at_align`](super::multiline::split_at_align)
+/// function.
 pub(crate) fn preprocess<'a, I>(
     items: I,
     bump: &'a Bump,

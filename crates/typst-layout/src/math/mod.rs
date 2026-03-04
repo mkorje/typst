@@ -517,7 +517,7 @@ fn layout_realized(
         MathKind::Fenced(item) => layout_fenced(item, ctx, styles, props)?,
         MathKind::Multiline(item) => {
             let mut frame = layout_multiline(item, ctx, styles)?.build();
-            if item.align {
+            if item.centered {
                 let axis = ctx.font().math().axis_height.resolve(styles);
                 frame.set_baseline(frame.height() / 2.0 + axis);
             }

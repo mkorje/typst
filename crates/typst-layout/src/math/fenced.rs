@@ -3,7 +3,8 @@ use typst_library::foundations::StyleChain;
 use typst_library::layout::{Abs, Axis};
 use typst_library::math::ir::{FencedItem, MathItem, MathProperties};
 
-use super::{MathContext, fragment::MathFragment};
+use super::MathContext;
+use super::fragment::MathFragment;
 
 /// Lays out a [`FencedItem`].
 #[typst_macros::time(name = "math fenced layout", span = props.span)]
