@@ -21,6 +21,9 @@ use crate::math::{
 };
 use crate::visualize::FixedStroke;
 
+/// A cell in a table, split at alignment points into sub-columns.
+type TableCell<'a> = [BumpBox<'a, [MathItem<'a>]>];
+
 /// The top-level item in the math IR.
 #[derive(Debug)]
 pub enum MathItem<'a> {
@@ -623,12 +626,9 @@ impl<'a> SkewedFractionItem<'a> {
 
 /// A 2D collection of math items laid out as a table/matrix.
 #[derive(Debug)]
-#[allow(clippy::type_complexity)]
 pub struct TableItem<'a> {
     /// The cells of the table, organized by row.
-    ///
-    /// Each cell is split at alignment points into sub-columns.
-    pub cells: BumpBox<'a, [BumpBox<'a, [BumpBox<'a, [MathItem<'a>]>]>]>,
+    pub cells: BumpBox<'a, [BumpBox<'a, TableCell<'a>>]>,
     /// The gap between rows and columns.
     pub gap: Axes<Rel<Abs>>,
     /// Optional augmentation lines to draw.
@@ -641,9 +641,8 @@ pub struct TableItem<'a> {
 
 impl<'a> TableItem<'a> {
     /// Creates a new table item.
-    #[allow(clippy::type_complexity)]
     pub(crate) fn create(
-        cells: BumpBox<'a, [BumpBox<'a, [BumpBox<'a, [MathItem<'a>]>]>]>,
+        cells: BumpBox<'a, [BumpBox<'a, TableCell<'a>>]>,
         gap: Axes<Rel<Abs>>,
         augment: Option<Augment<Abs>>,
         align: FixedAlignment,
