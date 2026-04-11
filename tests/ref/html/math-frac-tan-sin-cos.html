@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+      /* Tables */
+      mtable {
+        math-style: inherit;
+      }
+      mtd {
+        math-depth: auto-add;
+        math-style: compact;
+        math-shift: compact;
+      }
+      
+      /* Equations */
+      mtable.multiline-equation mtd {
+        math-depth: inherit;
+        math-style: inherit;
+        math-shift: inherit;
+        padding: 0;
+      }
+      mtable.multiline-equation mtr:not(:last-child) mtd {
+        padding-bottom: 0;
+      }
+      math:is(:not([display])) > mtable.multiline-equation mtd,
+      mtable.multiline-equation.aligned-equation mtd:nth-child(even) {
+        text-align: -webkit-left;
+      }
+      mtable.multiline-equation.aligned-equation mtd:nth-child(odd) {
+        text-align: -webkit-right;
+      }
+      
+      /* Fractions */
+      mfrac {
+        padding-inline: 0;
+        margin-inline: 0.1em;
+      }
+      
+      /* Other rules for scriptlevel, displaystyle and math-shift */
+      munder > :nth-child(2),
+      munderover > :nth-child(2) {
+        math-shift: compact
+      }
+      munder[accentunder="true" i] > :not(:first-child),
+      mover[accent="true" i] > :not(:first-child) {
+        math-depth: inherit;
+        math-style: inherit;
+        math-shift: inherit;
+      }
+    </style>
+  </head>
+  <body>
+    <math display="block">
+      <mtable class="multiline-equation">
+        <mtr>
+          <mtd>
+            <mo lspace="0em" rspace="0em">tan</mo>
+            <mrow>
+              <mo>(</mo>
+              <mi>𝑥</mi>
+              <mo>)</mo>
+            </mrow>
+            <mo>=</mo>
+            <mfrac>
+              <mrow>
+                <mo lspace="0em" rspace="0em">sin</mo>
+                <mrow>
+                  <mo>(</mo>
+                  <mi>𝑥</mi>
+                  <mo>)</mo>
+                </mrow>
+              </mrow>
+              <mrow>
+                <mo lspace="0em" rspace="0em">cos</mo>
+                <mrow>
+                  <mo>(</mo>
+                  <mi>𝑥</mi>
+                  <mo>)</mo>
+                </mrow>
+              </mrow>
+            </mfrac>
+          </mtd>
+        </mtr>
+        <mtr>
+          <mtd>
+            <mo lspace="0em" rspace="0.16666666666666666em">tan</mo>
+            <mi>𝑥</mi>
+            <mo>=</mo>
+            <mfrac>
+              <mrow>
+                <mo lspace="0em" rspace="0.16666666666666666em">sin</mo>
+                <mi>𝑥</mi>
+              </mrow>
+              <mrow>
+                <mo lspace="0em" rspace="0.16666666666666666em">cos</mo>
+                <mi>𝑥</mi>
+              </mrow>
+            </mfrac>
+          </mtd>
+        </mtr>
+      </mtable>
+    </math>
+  </body>
+</html>

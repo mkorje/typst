@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+      /* Tables */
+      mtable {
+        math-style: inherit;
+      }
+      mtd {
+        math-depth: auto-add;
+        math-style: compact;
+        math-shift: compact;
+      }
+      
+      /* Equations */
+      mtable.multiline-equation mtd {
+        math-depth: inherit;
+        math-style: inherit;
+        math-shift: inherit;
+        padding: 0;
+      }
+      mtable.multiline-equation mtr:not(:last-child) mtd {
+        padding-bottom: 0;
+      }
+      math:is(:not([display])) > mtable.multiline-equation mtd,
+      mtable.multiline-equation.aligned-equation mtd:nth-child(even) {
+        text-align: -webkit-left;
+      }
+      mtable.multiline-equation.aligned-equation mtd:nth-child(odd) {
+        text-align: -webkit-right;
+      }
+      
+      /* Fractions */
+      mfrac {
+        padding-inline: 0;
+        margin-inline: 0.1em;
+      }
+      
+      /* Other rules for scriptlevel, displaystyle and math-shift */
+      munder > :nth-child(2),
+      munderover > :nth-child(2) {
+        math-shift: compact
+      }
+      munder[accentunder="true" i] > :not(:first-child),
+      mover[accent="true" i] > :not(:first-child) {
+        math-depth: inherit;
+        math-style: inherit;
+        math-shift: inherit;
+      }
+    </style>
+  </head>
+  <body>
+    <p>Discuss <math><msub><mo lspace="0em" rspace="0.16666666666666666em">lim</mo><mrow><mi>𝑛</mi><mo lspace="0em" rspace="0em" stretchy="false">→</mo><mi>∞</mi></mrow></msub><mfrac><mn>1</mn><mi>𝑛</mi></mfrac></math> now.</p>
+    <math display="block">
+      <munder>
+        <mo lspace="0em" rspace="0.16666666666666666em">lim</mo>
+        <mrow>
+          <mi>𝑛</mi>
+          <mo lspace="0em" rspace="0em" stretchy="false">→</mo>
+          <mi>∞</mi>
+        </mrow>
+      </munder>
+      <mfrac>
+        <mn>1</mn>
+        <mi>𝑛</mi>
+      </mfrac>
+      <mo>=</mo>
+      <mn>0</mn>
+    </math>
+  </body>
+</html>

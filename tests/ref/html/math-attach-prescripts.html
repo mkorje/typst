@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+      /* Tables */
+      mtable {
+        math-style: inherit;
+      }
+      mtd {
+        math-depth: auto-add;
+        math-style: compact;
+        math-shift: compact;
+      }
+      
+      /* Equations */
+      mtable.multiline-equation mtd {
+        math-depth: inherit;
+        math-style: inherit;
+        math-shift: inherit;
+        padding: 0;
+      }
+      mtable.multiline-equation mtr:not(:last-child) mtd {
+        padding-bottom: 0;
+      }
+      math:is(:not([display])) > mtable.multiline-equation mtd,
+      mtable.multiline-equation.aligned-equation mtd:nth-child(even) {
+        text-align: -webkit-left;
+      }
+      mtable.multiline-equation.aligned-equation mtd:nth-child(odd) {
+        text-align: -webkit-right;
+      }
+      
+      /* Fractions */
+      mfrac {
+        padding-inline: 0;
+        margin-inline: 0.1em;
+      }
+      
+      /* Other rules for scriptlevel, displaystyle and math-shift */
+      munder > :nth-child(2),
+      munderover > :nth-child(2) {
+        math-shift: compact
+      }
+      munder[accentunder="true" i] > :not(:first-child),
+      mover[accent="true" i] > :not(:first-child) {
+        math-depth: inherit;
+        math-style: inherit;
+        math-shift: inherit;
+      }
+    </style>
+  </head>
+  <body>
+    <math display="block">
+      <mmultiscripts>
+        <mi mathvariant="normal">O</mi>
+        <mn>2</mn>
+        <mrow>
+          <mn>2</mn>
+          <mo form="infix" lspace="0em" rspace="0em">−</mo>
+        </mrow>
+        <mprescripts/>
+        <mn>8</mn>
+        <mn>16</mn>
+      </mmultiscripts>
+      <mo>,</mo>
+      <mmultiscripts>
+        <mtext>Pb</mtext>
+        <mrow></mrow>
+        <mrow></mrow>
+        <mprescripts/>
+        <mn>82</mn>
+        <mn>207</mn>
+      </mmultiscripts>
+      <mo>+</mo>
+      <mmultiscripts>
+        <mi mathvariant="normal">e</mi>
+        <mrow></mrow>
+        <mrow></mrow>
+        <mprescripts/>
+        <mrow>
+          <mo>−</mo>
+          <mn>1</mn>
+        </mrow>
+        <mn>0</mn>
+      </mmultiscripts>
+      <mo>+</mo>
+      <msub>
+        <mover accent="true">
+          <mi>𝑣</mi>
+          <mo lspace="0em" rspace="0em">̄</mo>
+        </mover>
+        <mi>𝑒</mi>
+      </msub>
+    </math>
+  </body>
+</html>
