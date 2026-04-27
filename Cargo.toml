@@ -96,7 +96,7 @@ palette = { version = "0.7.3", default-features = false, features = ["approx", "
 parking_lot = "0.12.1"
 pathdiff = "0.2"
 phf = { version = "0.13", features = ["macros"] }
-pixglyph = "0.6"
+pixglyph = { git = "https://github.com/mkorje/pixglyph", rev = "c588ad4" }
 png = "0.17"
 portable-atomic = "1.6"
 proc-macro2 = "1"

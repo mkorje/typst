@@ -2013,10 +2013,9 @@ checksum = "5be167a7af36ee22fe3115051bc51f6e6c7054c9348e28deb4f49bd6f705a315"
 [[package]]
 name = "pixglyph"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c1106193bc18a4b840eb075ff6664c8a0b0270f0531bb12a7e9c803e53b55c5"
+source = "git+https://github.com/mkorje/pixglyph?rev=c588ad4#c588ad439473709cee1402712dc1881ce8db0f59"
 dependencies = [
- "ttf-parser",
+ "skrifa 0.42.1",
 ]
 
 [[package]]
@@ -3378,8 +3377,8 @@ dependencies = [
  "libm",
  "pixglyph",
  "resvg",
+ "skrifa 0.42.1",
  "tiny-skia",
- "ttf-parser",
  "typst-assets",
  "typst-layout",
  "typst-library",
