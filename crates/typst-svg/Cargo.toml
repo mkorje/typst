@@ -30,6 +30,7 @@ indexmap = { workspace = true }
 itoa = { workspace = true }
 rustc-hash = { workspace = true }
 ryu = { workspace = true }
+skrifa = { workspace = true }
 ttf-parser = { workspace = true }
 xmlwriter = { workspace = true }
 

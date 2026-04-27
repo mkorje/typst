@@ -14,7 +14,10 @@ use std::fmt::{self, Debug, Formatter};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 
-use ttf_parser::{GlyphId, name_id};
+use read_fonts::TableProvider;
+use read_fonts::types::{BoundingBox, GlyphId, NameId};
+use skrifa::MetadataProvider;
+use skrifa::instance::{LocationRef, Size as ScalerSize};
 
 use self::book::find_name;
 use crate::foundations::{Bytes, Cast};
@@ -68,8 +71,8 @@ impl Font {
         let ttf = ttf_parser::Face::parse(slice, index).ok()?;
         let fontations = read_fonts::FontRef::from_index(slice, index).ok()?;
         let shaper_data = harfrust::ShaperData::new(&fontations);
-        let metrics = FontMetrics::from_ttf(&ttf);
-        let info = FontInfo::from_ttf(&ttf)?;
+        let metrics = FontMetrics::from_fontations(&fontations);
+        let info = FontInfo::from_fontations(&fontations)?;
 
         Some(Self(Arc::new(FontInner {
             data,
@@ -84,7 +87,11 @@ impl Font {
 
     /// Parse all fonts in the given data.
     pub fn iter(data: Bytes) -> impl Iterator<Item = Self> {
-        let count = ttf_parser::fonts_in_collection(&data).unwrap_or(1);
+        let count = match read_fonts::FileRef::new(&data) {
+            Ok(read_fonts::FileRef::Font(_)) => 1,
+            Ok(read_fonts::FileRef::Collection(ttc)) => ttc.len(),
+            _ => 1,
+        };
         (0..count).filter_map(move |index| Self::new(data.clone(), index))
     }
 
@@ -126,27 +133,28 @@ impl Font {
 
     /// Look up the horizontal advance width of a glyph.
     pub fn x_advance(&self, glyph: u16) -> Option<Em> {
-        self.0
-            .ttf
-            .glyph_hor_advance(GlyphId(glyph))
+        self.fontations()
+            .glyph_metrics(ScalerSize::unscaled(), LocationRef::default())
+            .advance_width(GlyphId::new(u32::from(glyph)))
             .map(|units| self.to_em(units))
     }
 
     /// Look up the vertical advance width of a glyph.
     pub fn y_advance(&self, glyph: u16) -> Option<Em> {
-        self.0
-            .ttf
-            .glyph_ver_advance(GlyphId(glyph))
+        self.fontations()
+            .vmtx()
+            .ok()?
+            .advance(GlyphId::new(u32::from(glyph)))
             .map(|units| self.to_em(units))
     }
 
     /// Lookup a name by id.
-    pub fn find_name(&self, id: u16) -> Option<String> {
-        find_name(&self.0.ttf, id)
+    pub fn find_name(&self, id: NameId) -> Option<String> {
+        find_name(self.fontations(), id)
     }
 
     /// A reference to the underlying `ttf-parser` face.
-    pub fn ttf(&self) -> &ttf_parser::Face<'_> {
+    fn ttf(&self) -> &ttf_parser::Face<'_> {
         // We can't implement Deref because that would leak the
         // internal 'static lifetime.
         &self.0.ttf
@@ -177,11 +185,15 @@ impl Font {
         font_size: Abs,
         bounds: TextEdgeBounds,
     ) -> (Abs, Abs) {
-        let cell = OnceCell::new();
-        let bbox = |gid, f: fn(ttf_parser::Rect) -> i16| {
-            cell.get_or_init(|| self.ttf().glyph_bounding_box(GlyphId(gid)))
-                .map(|bbox| self.to_em(f(bbox)).at(font_size))
-                .unwrap_or_default()
+        let cell = OnceCell::<Option<BoundingBox<f32>>>::new();
+        let bbox = |gid, f: fn(BoundingBox<f32>) -> f32| {
+            cell.get_or_init(|| {
+                self.fontations()
+                    .glyph_metrics(ScalerSize::unscaled(), LocationRef::default())
+                    .bounds(GlyphId::new(u32::from(gid)))
+            })
+            .map(|bbox| self.to_em(f(bbox)).at(font_size))
+            .unwrap_or_default()
         };
 
         let top = match top_edge {
@@ -262,17 +274,44 @@ pub struct FontMetrics {
 
 impl FontMetrics {
     /// Extract the font's metrics.
-    pub fn from_ttf(ttf: &ttf_parser::Face) -> Self {
-        let units_per_em = f64::from(ttf.units_per_em());
-        let to_em = |units| Em::from_units(units, units_per_em);
+    pub fn from_fontations(font: &read_fonts::FontRef) -> Self {
+        let units_per_em =
+            f64::from(font.head().map(|h| h.units_per_em()).unwrap_or(1000));
+        let to_em = |units: i16| Em::from_units(units, units_per_em);
 
-        let ascender = to_em(ttf.typographic_ascender().unwrap_or(ttf.ascender()));
-        let cap_height = ttf.capital_height().filter(|&h| h > 0).map_or(ascender, to_em);
-        let x_height = ttf.x_height().filter(|&h| h > 0).map_or(ascender, to_em);
-        let descender = to_em(ttf.typographic_descender().unwrap_or(ttf.descender()));
+        let os2 = font.os2().ok();
+        let hhea = font.hhea().ok();
 
-        let strikeout = ttf.strikeout_metrics();
-        let underline = ttf.underline_metrics();
+        // Mirrors `ttf_parser::Face::typographic_ascender`/`ascender`: prefer
+        // the OS/2 typographic ascender if the table is available, otherwise
+        // fall back to the hhea ascender.
+        let ascender =
+            to_em(os2.as_ref().map(|os2| os2.s_typo_ascender()).unwrap_or_else(|| {
+                hhea.as_ref().map(|h| h.ascender().to_i16()).unwrap_or(0)
+            }));
+        let cap_height = os2
+            .as_ref()
+            .and_then(|os2| os2.s_cap_height())
+            .filter(|&h| h > 0)
+            .map_or(ascender, to_em);
+        let x_height = os2
+            .as_ref()
+            .and_then(|os2| os2.sx_height())
+            .filter(|&h| h > 0)
+            .map_or(ascender, to_em);
+        let descender =
+            to_em(os2.as_ref().map(|os2| os2.s_typo_descender()).unwrap_or_else(|| {
+                hhea.as_ref().map(|h| h.descender().to_i16()).unwrap_or(0)
+            }));
+
+        let strikeout = os2.as_ref().map(|os2| LineMetricsRaw {
+            position: os2.y_strikeout_position(),
+            thickness: os2.y_strikeout_size(),
+        });
+        let underline = font.post().ok().map(|post| LineMetricsRaw {
+            position: post.underline_position().to_i16(),
+            thickness: post.underline_thickness().to_i16(),
+        });
 
         let strikethrough = LineMetrics {
             position: strikeout.map_or(Em::new(0.25), |s| to_em(s.position)),
@@ -293,18 +332,18 @@ impl FontMetrics {
             thickness: underline.thickness,
         };
 
-        let subscript = ttf.subscript_metrics().map(|metrics| ScriptMetrics {
-            width: to_em(metrics.x_size),
-            height: to_em(metrics.y_size),
-            horizontal_offset: to_em(metrics.x_offset),
-            vertical_offset: -to_em(metrics.y_offset),
+        let subscript = os2.as_ref().map(|os2| ScriptMetrics {
+            width: to_em(os2.y_subscript_x_size()),
+            height: to_em(os2.y_subscript_y_size()),
+            horizontal_offset: to_em(os2.y_subscript_x_offset()),
+            vertical_offset: -to_em(os2.y_subscript_y_offset()),
         });
 
-        let superscript = ttf.superscript_metrics().map(|metrics| ScriptMetrics {
-            width: to_em(metrics.x_size),
-            height: to_em(metrics.y_size),
-            horizontal_offset: to_em(metrics.x_offset),
-            vertical_offset: to_em(metrics.y_offset),
+        let superscript = os2.as_ref().map(|os2| ScriptMetrics {
+            width: to_em(os2.y_superscript_x_size()),
+            height: to_em(os2.y_superscript_y_size()),
+            horizontal_offset: to_em(os2.y_superscript_x_offset()),
+            vertical_offset: to_em(os2.y_superscript_y_offset()),
         });
 
         Self {
@@ -326,13 +365,15 @@ impl FontMetrics {
         let ttf = font.ttf();
         let metrics = font.metrics();
 
-        let space_width = ttf
-            .glyph_index(' ')
-            .and_then(|id| ttf.glyph_hor_advance(id).map(|units| font.to_em(units)))
+        let space_width = font
+            .fontations()
+            .charmap()
+            .map(' ')
+            .and_then(|id| font.x_advance(id.to_u32() as u16))
             .unwrap_or(typst_library::math::THICK);
 
         let is_cambria = || {
-            font.find_name(name_id::POST_SCRIPT_NAME)
+            font.find_name(NameId::POSTSCRIPT_NAME)
                 .is_some_and(|name| name == "CambriaMath")
         };
 
@@ -541,6 +582,13 @@ pub struct LineMetrics {
     pub position: Em,
     /// The thickness of the line.
     pub thickness: Em,
+}
+
+/// Raw line metrics in font units, used for computing [`LineMetrics`].
+#[derive(Copy, Clone)]
+struct LineMetricsRaw {
+    position: i16,
+    thickness: i16,
 }
 
 /// Metrics for subscripts or superscripts.

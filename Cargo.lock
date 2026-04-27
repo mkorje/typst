@@ -1019,7 +1019,7 @@ dependencies = [
  "phf",
  "rustc-hash",
  "siphasher",
- "skrifa",
+ "skrifa 0.37.0",
  "smallvec",
  "yoke 0.8.0",
 ]
@@ -1477,7 +1477,7 @@ dependencies = [
  "rustc-hash",
  "rustybuzz",
  "siphasher",
- "skrifa",
+ "skrifa 0.37.0",
  "smallvec",
  "subsetter",
  "tiny-skia-path",
@@ -2578,6 +2578,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "skrifa"
+version = "0.42.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c34617370ae968efb7161bb2beb517d9084659aae19e24b89e3db25b46e4564"
+dependencies = [
+ "bytemuck",
+ "core_maths",
+ "read-fonts 0.39.2",
+]
+
+[[package]]
 name = "slab"
 version = "0.4.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2667,7 +2678,7 @@ checksum = "cb6895a12ac5599bb6057362f00e8a3cf1daab4df33f553a55690a44e4fed8d0"
 dependencies = [
  "kurbo 0.12.0",
  "rustc-hash",
- "skrifa",
+ "skrifa 0.37.0",
  "write-fonts",
 ]
 
@@ -3220,6 +3231,7 @@ dependencies = [
  "memchr",
  "read-fonts 0.39.2",
  "rustc-hash",
+ "skrifa 0.42.1",
  "smallvec",
  "ttf-parser",
  "typst-assets",
@@ -3279,6 +3291,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "siphasher",
+ "skrifa 0.42.1",
  "smallvec",
  "syntect",
  "time",
@@ -3389,6 +3402,7 @@ dependencies = [
  "itoa",
  "rustc-hash",
  "ryu",
+ "skrifa 0.42.1",
  "ttf-parser",
  "typst-assets",
  "typst-layout",

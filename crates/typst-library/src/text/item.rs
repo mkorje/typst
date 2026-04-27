@@ -2,6 +2,8 @@ use std::fmt::{self, Debug, Formatter};
 use std::ops::Range;
 
 use ecow::EcoString;
+use skrifa::MetadataProvider;
+use skrifa::instance::{LocationRef, Size};
 use typst_syntax::Span;
 
 use crate::layout::{Abs, Em, Point, Rect};
@@ -53,8 +55,11 @@ impl TextItem {
                 Point::new(glyph.x_advance.at(self.size), glyph.y_advance.at(self.size));
             let offset =
                 Point::new(glyph.x_offset.at(self.size), glyph.y_offset.at(self.size));
-            if let Some(rect) =
-                self.font.ttf().glyph_bounding_box(ttf_parser::GlyphId(glyph.id))
+            if let Some(rect) = self
+                .font
+                .fontations()
+                .glyph_metrics(Size::unscaled(), LocationRef::default())
+                .bounds(glyph.id.into())
             {
                 let pos = cursor + offset;
                 let a = pos

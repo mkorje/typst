@@ -2,8 +2,11 @@ use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::fmt::{self, Debug, Formatter};
 
+use read_fonts::TableProvider;
+use read_fonts::tables::cmap::PlatformId;
+use read_fonts::tables::os2::SelectionFlags;
+use read_fonts::types::{NameId, Tag};
 use serde::{Deserialize, Serialize};
-use ttf_parser::{PlatformId, Tag, name_id};
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::exceptions::find_exception;
@@ -209,19 +212,23 @@ bitflags::bitflags! {
 impl FontInfo {
     /// Compute metadata for font at the `index` of the given data.
     pub fn new(data: &[u8], index: u32) -> Option<Self> {
-        let ttf = ttf_parser::Face::parse(data, index).ok()?;
-        Self::from_ttf(&ttf)
+        let font = read_fonts::FontRef::from_index(data, index).ok()?;
+        Self::from_fontations(&font)
     }
 
     /// Compute metadata for all fonts in the given data.
     pub fn iter(data: &[u8]) -> impl Iterator<Item = FontInfo> + '_ {
-        let count = ttf_parser::fonts_in_collection(data).unwrap_or(1);
+        let count = match read_fonts::FileRef::new(data) {
+            Ok(read_fonts::FileRef::Font(_)) => 1,
+            Ok(read_fonts::FileRef::Collection(ttc)) => ttc.len(),
+            _ => 1,
+        };
         (0..count).filter_map(move |index| Self::new(data, index))
     }
 
-    /// Compute metadata for a single ttf-parser face.
-    pub(super) fn from_ttf(ttf: &ttf_parser::Face) -> Option<Self> {
-        let ps_name = find_name(ttf, name_id::POST_SCRIPT_NAME);
+    /// Compute metadata for a single fontations face.
+    pub(super) fn from_fontations(font: &read_fonts::FontRef) -> Option<Self> {
+        let ps_name = find_name(font, NameId::POSTSCRIPT_NAME);
         let exception = ps_name.as_deref().and_then(find_exception);
         // We cannot use Name ID 16 "Typographic Family", because for some
         // fonts it groups together more than just Style / Weight / Stretch
@@ -236,26 +243,28 @@ impl FontInfo {
         // "ExtraBold").
         let family =
             exception.and_then(|c| c.family.map(str::to_string)).or_else(|| {
-                let family = find_name(ttf, name_id::FAMILY)?;
+                let family = find_name(font, NameId::FAMILY_NAME)?;
                 Some(typographic_family(&family).to_string())
             })?;
 
+        let os2 = font.os2().ok();
+
         let variant = {
             let style = exception.and_then(|c| c.style).unwrap_or_else(|| {
-                let mut full = find_name(ttf, name_id::FULL_NAME).unwrap_or_default();
+                let mut full = find_name(font, NameId::FULL_NAME).unwrap_or_default();
                 full.make_ascii_lowercase();
 
                 // Some fonts miss the relevant bits for italic or oblique, so
                 // we also try to infer that from the full name.
                 //
-                // We do not use `ttf.is_italic()` because that also checks the
-                // italic angle which leads to false positives for some oblique
-                // fonts.
+                // We do not check the italic angle, because that leads to
+                // false positives for some oblique fonts.
                 //
                 // See <https://github.com/typst/typst/issues/7479>.
-                let italic =
-                    ttf.style() == ttf_parser::Style::Italic || full.contains("italic");
-                let oblique = ttf.is_oblique()
+                let fs = os2.as_ref().map(|os2| os2.fs_selection());
+                let italic = fs.is_some_and(|fs| fs.contains(SelectionFlags::ITALIC))
+                    || full.contains("italic");
+                let oblique = fs.is_some_and(|fs| fs.contains(SelectionFlags::OBLIQUE))
                     || full.contains("oblique")
                     || full.contains("slanted");
 
@@ -267,35 +276,48 @@ impl FontInfo {
             });
 
             let weight = exception.and_then(|c| c.weight).unwrap_or_else(|| {
-                let number = ttf.weight().to_number();
+                let number = os2.as_ref().map(|os2| os2.us_weight_class()).unwrap_or(400);
                 FontWeight::from_number(number)
             });
 
-            let stretch = exception
-                .and_then(|c| c.stretch)
-                .unwrap_or_else(|| FontStretch::from_number(ttf.width().to_number()));
+            let stretch = exception.and_then(|c| c.stretch).unwrap_or_else(|| {
+                let number = os2.as_ref().map(|os2| os2.us_width_class()).unwrap_or(5);
+                FontStretch::from_number(number)
+            });
 
             FontVariant { style, weight, stretch }
         };
 
         // Determine the unicode coverage.
         let mut codepoints = vec![];
-        for subtable in ttf.tables().cmap.into_iter().flat_map(|table| table.subtables) {
-            if subtable.is_unicode() {
-                subtable.codepoints(|c| codepoints.push(c));
+        if let Ok(cmap) = font.cmap() {
+            for record in cmap.encoding_records() {
+                let is_unicode = match (record.platform_id(), record.encoding_id()) {
+                    (PlatformId::Unicode, _) => true,
+                    (PlatformId::Windows, 1 | 10) => true,
+                    _ => false,
+                };
+                if !is_unicode {
+                    continue;
+                }
+                if let Ok(subtable) = record.subtable(cmap.offset_data()) {
+                    for (cp, _) in subtable.iter() {
+                        codepoints.push(cp);
+                    }
+                }
             }
         }
 
         let mut flags = FontFlags::empty();
-        flags.set(FontFlags::MONOSPACE, ttf.is_monospaced());
-        flags.set(FontFlags::MATH, ttf.tables().math.is_some());
-        flags.set(FontFlags::VARIABLE, ttf.is_variable());
+        let is_monospace = font.post().map(|p| p.is_fixed_pitch() != 0).unwrap_or(false);
+        flags.set(FontFlags::MONOSPACE, is_monospace);
+        flags.set(FontFlags::MATH, font.data_for_tag(Tag::new(b"MATH")).is_some());
+        flags.set(FontFlags::VARIABLE, font.fvar().is_ok());
 
         // Determine whether this is a serif or sans-serif font.
-        if let Some(panose) = ttf
-            .raw_face()
-            .table(Tag::from_bytes(b"OS/2"))
-            .and_then(|os2| os2.get(32..45))
+        if let Some(panose) = font
+            .data_for_tag(Tag::new(b"OS/2"))
+            .and_then(|data| data.as_bytes().get(32..45))
             && matches!(panose, [2, 2..=10, ..])
         {
             flags.insert(FontFlags::SERIF);
@@ -317,41 +339,22 @@ impl FontInfo {
 }
 
 /// Try to find and decode the name with the given id.
-pub(super) fn find_name(ttf: &ttf_parser::Face, name_id: u16) -> Option<String> {
-    ttf.names().into_iter().find_map(|entry| {
-        if entry.name_id == name_id {
-            if let Some(string) = entry.to_string() {
-                return Some(string);
-            }
+pub(super) fn find_name(font: &read_fonts::FontRef, name_id: NameId) -> Option<String> {
+    let name = font.name().ok()?;
+    let string_data = name.string_data();
+    name.name_record().iter().find_map(|record| {
+        if record.name_id() != name_id {
+            return None;
+        }
 
-            if entry.platform_id == PlatformId::Macintosh && entry.encoding_id == 0 {
-                return Some(decode_mac_roman(entry.name));
-            }
+        let string = record.string(string_data).ok()?;
+        if record.is_unicode() || (record.platform_id() == 1 && record.encoding_id() == 0)
+        {
+            return Some(string.chars().collect());
         }
 
         None
     })
-}
-
-/// Decode mac roman encoded bytes into a string.
-fn decode_mac_roman(coded: &[u8]) -> String {
-    #[rustfmt::skip]
-    const TABLE: [char; 128] = [
-        'Ä', 'Å', 'Ç', 'É', 'Ñ', 'Ö', 'Ü', 'á', 'à', 'â', 'ä', 'ã', 'å', 'ç', 'é', 'è',
-        'ê', 'ë', 'í', 'ì', 'î', 'ï', 'ñ', 'ó', 'ò', 'ô', 'ö', 'õ', 'ú', 'ù', 'û', 'ü',
-        '†', '°', '¢', '£', '§', '•', '¶', 'ß', '®', '©', '™', '´', '¨', '≠', 'Æ', 'Ø',
-        '∞', '±', '≤', '≥', '¥', 'µ', '∂', '∑', '∏', 'π', '∫', 'ª', 'º', 'Ω', 'æ', 'ø',
-        '¿', '¡', '¬', '√', 'ƒ', '≈', '∆', '«', '»', '…', '\u{a0}', 'À', 'Ã', 'Õ', 'Œ', 'œ',
-        '–', '—', '“', '”', '‘', '’', '÷', '◊', 'ÿ', 'Ÿ', '⁄', '€', '‹', '›', 'ﬁ', 'ﬂ',
-        '‡', '·', '‚', '„', '‰', 'Â', 'Ê', 'Á', 'Ë', 'È', 'Í', 'Î', 'Ï', 'Ì', 'Ó', 'Ô',
-        '\u{f8ff}', 'Ò', 'Ú', 'Û', 'Ù', 'ı', 'ˆ', '˜', '¯', '˘', '˙', '˚', '¸', '˝', '˛', 'ˇ',
-    ];
-
-    fn char_from_mac_roman(code: u8) -> char {
-        if code < 128 { code as char } else { TABLE[(code - 128) as usize] }
-    }
-
-    coded.iter().copied().map(char_from_mac_roman).collect()
 }
 
 /// Trim style naming from a family name and fix bad names.

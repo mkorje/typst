@@ -37,6 +37,7 @@ libm = { workspace = true }
 memchr = { workspace = true }
 read-fonts = { workspace = true }
 rustc-hash = { workspace = true }
+skrifa = { workspace = true }
 smallvec = { workspace = true }
 ttf-parser = { workspace = true }
 unicode-bidi = { workspace = true }

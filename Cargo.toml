@@ -121,6 +121,7 @@ shell-escape = "0.1.5"
 sigpipe = "0.1"
 similar = { version = "2.7.0", features = ["inline", "unicode"] }
 siphasher = "1"
+skrifa = { version = "0.42", features = ["libm"] }
 smallvec = { version = "1.11.1", features = ["union", "const_generics", "const_new"] }
 stacker = "0.1.19"
 syn = { version = "2", features = ["full", "extra-traits"] }

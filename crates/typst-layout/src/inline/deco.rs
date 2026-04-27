@@ -1,5 +1,8 @@
 use kurbo::{BezPath, Line, ParamCurve};
-use ttf_parser::{GlyphId, OutlineBuilder};
+use skrifa::MetadataProvider;
+use skrifa::instance::{LocationRef, Size as ScalerSize};
+use skrifa::outline::{DrawSettings, OutlinePen};
+use skrifa::raw::types::GlyphId;
 use typst_library::layout::{Abs, Em, Frame, FrameItem, Point, Size};
 use typst_library::text::{
     BottomEdge, DecoLine, Decoration, TextEdgeBounds, TextItem, TopEdge,
@@ -88,12 +91,30 @@ pub fn decorate(
     let mut x = pos.x;
     let mut intersections = vec![];
 
+    let outline_glyphs = text.font.fontations().outline_glyphs();
+    let glyph_metrics = text
+        .font
+        .fontations()
+        .glyph_metrics(ScalerSize::unscaled(), LocationRef::default());
+
     for glyph in text.glyphs.iter() {
         let dx = glyph.x_offset.at(text.size) + x;
         let mut builder =
             BezPathBuilder::new(font_metrics.units_per_em, text.size, dx.to_raw());
 
-        let bbox = text.font.ttf().outline_glyph(GlyphId(glyph.id), &mut builder);
+        let glyph_id = GlyphId::new(u32::from(glyph.id));
+        let bbox = outline_glyphs.get(glyph_id).and_then(|outline| {
+            outline
+                .draw(
+                    DrawSettings::unhinted(
+                        ScalerSize::unscaled(),
+                        LocationRef::default(),
+                    ),
+                    &mut builder,
+                )
+                .ok()?;
+            glyph_metrics.bounds(glyph_id)
+        });
         let path = builder.finish();
 
         x += glyph.x_advance.at(text.size);
@@ -190,7 +211,7 @@ impl BezPathBuilder {
     }
 }
 
-impl OutlineBuilder for BezPathBuilder {
+impl OutlinePen for BezPathBuilder {
     fn move_to(&mut self, x: f32, y: f32) {
         self.path.move_to(self.p(x, y));
     }

@@ -38,11 +38,11 @@ use harfrust::Feature;
 use icu_properties::sets::CodePointSetData;
 use icu_provider::AsDeserializingBufferProvider;
 use icu_provider_blob::BlobDataProvider;
+use read_fonts::types::InvalidTag;
 use read_fonts::types::Tag;
 use smallvec::SmallVec;
 use typst_syntax::Spanned;
 use typst_utils::singleton;
-use unicode_segmentation::UnicodeSegmentation;
 
 use crate::World;
 use crate::diag::{Hint, HintedStrResult, SourceResult, StrResult, bail, warning};
@@ -1247,37 +1247,25 @@ pub struct FontFeatures(pub Vec<(Tag, u32)>);
 cast! {
     Tag,
     v: Str => {
-        // Tags must: https://learn.microsoft.com/en-us/typography/opentype/spec/otff#data-types
-        // - be one to four bytes in length
-        // - be representable as printable ASCII (0x20..=0x7E)
-        // - contain at least one character that isn't padding (0x20, space)
-        // - padding may only appear at the end of a tag
-
-        if let Some(cluster) = v.graphemes(true).find(|v| {
-            !v.as_bytes().iter().all(|v| (0x20..=0x7E).contains(v))
-        }) {
-            bail!(
-                "feature tag may contain only printable ASCII characters";
-                hint: "found invalid cluster `{}`", cluster.repr();
-            )
-        }
-
-        if !(1..=4).contains(&v.len()) {
-            bail!(
-                "feature tag must be one to four characters in length";
-                hint: "found {} characters", v.len();
-            );
-        }
-
-        let mut within_padding = false;
-        for (i, &v) in v.as_bytes().iter().enumerate() {
-            if (within_padding && v != b' ') || (i == 0 && v == b' ') {
+        match Self::new_checked(v.as_bytes()) {
+            Ok(v) => v,
+            Err(InvalidTag::InvalidLength(len)) => {
+                bail!(
+                    "feature tag must be one to four characters in length";
+                    hint: "found {} characters", len;
+                );
+            }
+            Err(InvalidTag::InvalidByte { byte, .. }) => {
+                bail!(
+                    "feature tag may contain only printable ASCII characters";
+                    hint: "found invalid cluster `{}`", char::from(byte);
+                )
+            }
+            Err(InvalidTag::ByteAfterSpace { .. }) => {
                 bail!("spaces may only appear as padding following a feature tag")
             }
-            within_padding |= b' ' == v;
+            Err(_) => bail!("invalid feature tag"),
         }
-
-        Self::new_checked(v.as_bytes()).unwrap()
     }
 }
 

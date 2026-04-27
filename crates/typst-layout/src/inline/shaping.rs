@@ -6,8 +6,13 @@ use std::sync::Arc;
 use az::SaturatingAs;
 use comemo::Tracked;
 use harfrust::{BufferFlags, Feature, ShapePlan, UnicodeBuffer};
-use read_fonts::types::Tag;
-use ttf_parser::gsub::SubstitutionSubtable;
+use read_fonts::TableProvider;
+use read_fonts::tables::gsub::{SingleSubst, SubstitutionSubtables};
+use read_fonts::tables::layout::{
+    ChainedSequenceContext, CoverageTable, SequenceContext,
+};
+use read_fonts::types::{GlyphId, Tag};
+use skrifa::MetadataProvider;
 use typst_library::World;
 use typst_library::engine::Engine;
 use typst_library::foundations::{Regex, Smart, StyleChain};
@@ -601,9 +606,9 @@ impl<'a> ShapedText<'a> {
 
         chain.find_map(|id| {
             let font = world.font(id)?;
-            let ttf = font.ttf();
-            let glyph_id = ttf.glyph_index('-')?;
-            let x_advance = font.to_em(ttf.glyph_hor_advance(glyph_id)?);
+            let glyph_id = font.fontations().charmap().map('-')?;
+            let glyph_id_u16 = u16::try_from(glyph_id.to_u32()).ok()?;
+            let x_advance = font.x_advance(glyph_id_u16)?;
             let size = base.styles.resolve(TextElem::size);
             let (c, text) = if soft { (SHY, SHY_STR) } else { (HYPHEN, HYPHEN_STR) };
 
@@ -617,7 +622,7 @@ impl<'a> ShapedText<'a> {
                 variant: base.variant,
                 glyphs: Glyphs::from_vec(vec![ShapedGlyph {
                     font,
-                    glyph_id: glyph_id.0,
+                    glyph_id: glyph_id_u16,
                     x_advance,
                     x_offset: Em::zero(),
                     y_offset: Em::zero(),
@@ -1155,23 +1160,27 @@ fn determine_shift(
             // OpenType feature instead of synthesizing if possible), we add
             // "subs"/"sups" to the feature list if supported by the font.
             // In case of a problem, we just early exit
-            let gsub = font.ttf().tables().gsub?;
-            let lookups = gsub
-                .features
-                .find(ttf_parser::Tag::from_bytes(
-                    &settings.kind.feature().to_be_bytes(),
-                ))?
-                .lookup_indices;
+            let fontations = font.fontations();
+            let gsub = fontations.gsub().ok()?;
+            let feature_list = gsub.feature_list().ok()?;
+            let feature_data = feature_list.offset_data();
+            let lookup_list = gsub.lookup_list().ok()?;
+            let feature_tag = settings.kind.feature();
+            let feature = feature_list
+                .feature_records()
+                .iter()
+                .find(|r| r.feature_tag() == feature_tag)
+                .and_then(|r| r.feature(feature_data).ok())?;
+            let lookup_indices = feature.lookup_list_indices();
+            let charmap = fontations.charmap();
             text.chars()
                 .all(|c| {
-                    let Some(i) = font.ttf().glyph_index(c) else { return false };
-                    lookups
-                        .into_iter()
-                        .flat_map(|i| gsub.lookups.get(i))
-                        .flat_map(|lookup| {
-                            lookup.subtables.into_iter::<SubstitutionSubtable>()
-                        })
-                        .any(|subtable| subtable.coverage().contains(i))
+                    let Some(gid) = charmap.map(c) else { return false };
+                    lookup_indices
+                        .iter()
+                        .flat_map(|i| lookup_list.lookups().get(i.get() as usize).ok())
+                        .flat_map(|lookup| lookup.subtables().ok())
+                        .any(|subtables| covers_glyph(&subtables, gid))
                 })
                 .then(|| {
                     // If we can use the OpenType feature, we can keep the text
@@ -1322,9 +1331,57 @@ fn calculate_adjustability(ctx: &mut ShapingContext, lang: Lang, region: Option<
 
 /// Difference between non-breaking and normal space.
 fn nbsp_delta(font: &Font) -> Option<Em> {
-    let space = font.ttf().glyph_index(' ')?.0;
-    let nbsp = font.ttf().glyph_index('\u{00A0}')?.0;
+    let charmap = font.fontations().charmap();
+    let space = u16::try_from(charmap.map(' ')?.to_u32()).ok()?;
+    let nbsp = u16::try_from(charmap.map('\u{00A0}')?.to_u32()).ok()?;
     Some(font.x_advance(nbsp)? - font.x_advance(space)?)
+}
+
+/// Check whether any subtable covers the given glyph, mirroring
+/// `ttf_parser::SubstitutionSubtable::coverage().contains(gid)`.
+fn covers_glyph(subtables: &SubstitutionSubtables, gid: GlyphId) -> bool {
+    let covered = |c: Result<CoverageTable, _>| c.is_ok_and(|c| c.get(gid).is_some());
+    let single = |s: SingleSubst| match s {
+        SingleSubst::Format1(f) => covered(f.coverage()),
+        SingleSubst::Format2(f) => covered(f.coverage()),
+    };
+    let context = |c: SequenceContext| match c {
+        // For format 3, only the first input coverage corresponds to the
+        // primary subtable coverage in `ttf_parser`.
+        SequenceContext::Format1(f) => covered(f.coverage()),
+        SequenceContext::Format2(f) => covered(f.coverage()),
+        SequenceContext::Format3(f) => {
+            f.coverages().get(0).is_ok_and(|c| c.get(gid).is_some())
+        }
+    };
+    let chain = |c: ChainedSequenceContext| match c {
+        ChainedSequenceContext::Format1(f) => covered(f.coverage()),
+        ChainedSequenceContext::Format2(f) => covered(f.coverage()),
+        ChainedSequenceContext::Format3(f) => {
+            f.input_coverages().get(0).is_ok_and(|c| c.get(gid).is_some())
+        }
+    };
+    match subtables {
+        SubstitutionSubtables::Single(s) => s.iter().filter_map(Result::ok).any(single),
+        SubstitutionSubtables::Multiple(s) => {
+            s.iter().filter_map(Result::ok).any(|t| covered(t.coverage()))
+        }
+        SubstitutionSubtables::Alternate(s) => {
+            s.iter().filter_map(Result::ok).any(|t| covered(t.coverage()))
+        }
+        SubstitutionSubtables::Ligature(s) => {
+            s.iter().filter_map(Result::ok).any(|t| covered(t.coverage()))
+        }
+        SubstitutionSubtables::Contextual(s) => {
+            s.iter().filter_map(Result::ok).any(context)
+        }
+        SubstitutionSubtables::ChainContextual(s) => {
+            s.iter().filter_map(Result::ok).any(chain)
+        }
+        SubstitutionSubtables::Reverse(s) => {
+            s.iter().filter_map(Result::ok).any(|t| covered(t.coverage()))
+        }
+    }
 }
 
 /// Returns true if all glyphs in `glyphs` have ranges within the range `range`.

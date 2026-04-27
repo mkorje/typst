@@ -149,11 +149,18 @@ pub fn layout_glyph(
 
 /// Whether the given font has the dtls OpenType feature.
 fn has_dtls_feat(font: &Font) -> bool {
-    font.ttf()
-        .tables()
-        .gsub
-        .and_then(|gsub| gsub.features.index(ttf_parser::Tag::from_bytes(b"dtls")))
-        .is_some()
+    use read_fonts::TableProvider;
+    use read_fonts::types::Tag;
+    font.fontations()
+        .gsub()
+        .ok()
+        .and_then(|gsub| gsub.feature_list().ok())
+        .map(|list| {
+            list.feature_records()
+                .iter()
+                .any(|r| r.feature_tag() == Tag::new(b"dtls"))
+        })
+        .unwrap_or(false)
 }
 
 /// The non-dotless version of a dotless character that can be used with the

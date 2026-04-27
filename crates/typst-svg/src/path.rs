@@ -12,6 +12,8 @@ pub struct SvgPathBuilder {
     last_close_point: Point,
     /// The end of the previous draw command, used for relative draw commands.
     last_point: Point,
+    /// Whether any drawing command has been emitted by the outline pen.
+    has_outline: bool,
 }
 
 impl SvgPathBuilder {
@@ -26,6 +28,7 @@ impl SvgPathBuilder {
             scale: Ratio::one(),
             last_close_point: pos,
             last_point: Point::zero(),
+            has_outline: false,
         }
     }
 
@@ -36,6 +39,7 @@ impl SvgPathBuilder {
             scale,
             last_close_point: Point::zero(),
             last_point: Point::zero(),
+            has_outline: false,
         }
     }
 
@@ -46,7 +50,13 @@ impl SvgPathBuilder {
             scale: Ratio::one(),
             last_close_point: Point::zero(),
             last_point: Point::zero(),
+            has_outline: false,
         }
+    }
+
+    /// Whether the outline pen received any drawing commands.
+    pub fn has_outline(&self) -> bool {
+        self.has_outline
     }
 
     /// Finish building the path.
@@ -173,24 +183,39 @@ mod outline {
     use crate::path::SvgPathBuilder;
 
     /// A builder for SVG path. This is used to build the path for a glyph.
-    impl ttf_parser::OutlineBuilder for SvgPathBuilder {
+    impl skrifa::outline::OutlinePen for SvgPathBuilder {
         fn move_to(&mut self, x: f32, y: f32) {
+            self.has_outline = true;
             self.move_to(point(x, y));
         }
 
         fn line_to(&mut self, x: f32, y: f32) {
+            self.has_outline = true;
             self.line_to(point(x, y));
         }
 
         fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+            self.has_outline = true;
             self.quad_to(point(x1, y1), point(x, y));
         }
 
         fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+            self.has_outline = true;
             self.curve_to(point(x1, y1), point(x2, y2), point(x, y));
         }
 
         fn close(&mut self) {
+            self.has_outline = true;
+            // Some glyph paths differ from the previous `ttf_parser`-based
+            // output in that an explicit segment back to the contour's start
+            // is missing before `Z`. The visual result is identical (SVG `Z`
+            // implies that line), but the exact byte representation differs.
+            // Naively emitting `line_to(start)` here makes things worse — the
+            // pattern of when `ttf_parser` did vs. didn't emit that segment
+            // doesn't reduce to `last_point != last_close_point`.
+            // if self.last_point != self.last_close_point {
+            //     self.line_to(self.last_close_point);
+            // }
             self.close();
         }
     }
