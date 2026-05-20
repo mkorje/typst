@@ -1,14 +1,19 @@
-//! Intermediate representation for math.
+//! Shallow intermediate representation for math.
+//!
+//! The math IR is a flat `Vec<MathChild>` produced by the [`Collector`].
+//! Structural children carry unresolved [`Body`] handles (content + style
+//! chain); recursion into bodies happens lazily during layout, mirroring how
+//! flow's collector returns a `Vec<Child>` that nested elements only realize
+//! when laid out.
 
+mod collect;
 mod item;
 mod multiline;
-mod process;
-mod resolve;
 
+pub use self::collect::collect;
 pub use self::item::*;
-pub use self::multiline::AlignedRow;
+pub use self::multiline::{FencedView, MultilineView, split_columns, split_rows};
 
-use self::resolve::MathResolver;
 use crate::diag::SourceResult;
 use crate::engine::Engine;
 use crate::foundations::{Packed, StyleChain};
@@ -16,17 +21,18 @@ use crate::introspection::Locator;
 use crate::math::EquationElem;
 use crate::routines::Arenas;
 
-/// Resolves an equation's body into a [`MathItem`].
+/// Collects an equation's body into a flat sequence of `MathChild`s.
 ///
-/// The returned `MathItem` has the same lifetime as the provided arenas.
-#[typst_macros::time(name = "math ir creation")]
-pub fn resolve_equation<'a>(
+/// This is the entry point that both `typst-layout` and `typst-html` call.
+/// Both then walk the returned children, recursively collecting bodies as
+/// they go.
+#[typst_macros::time(name = "math ir collection")]
+pub fn collect_equation<'a>(
     elem: &'a Packed<EquationElem>,
     engine: &mut Engine,
     locator: Locator<'a>,
     arenas: &'a Arenas,
     styles: StyleChain<'a>,
-) -> SourceResult<MathItem<'a>> {
-    let mut context = MathResolver::new(engine, locator, arenas);
-    context.resolve_into_item(&elem.body, styles)
+) -> SourceResult<Vec<MathChild<'a>>> {
+    collect(&elem.body, styles, engine, locator, arenas)
 }

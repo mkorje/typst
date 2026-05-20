@@ -3,9 +3,10 @@ use typst_library::foundations::{Resolve, StyleChain};
 use typst_library::layout::{
     Abs, AlignElem, Em, FixedAlignment, Frame, InlineItem, Point, Size,
 };
-use typst_library::math::ir::{AlignedRow, MathItem, MultilineItem};
+use typst_library::math::ir::{MathChild, MultilineView};
 use typst_library::math::{EquationElem, LeftRightAlternator, MathSize};
 use typst_library::model::ParElem;
+use typst_library::text::TextElem;
 use unicode_math_class::MathClass;
 
 use super::MathContext;
@@ -16,21 +17,18 @@ const TIGHT_LEADING: Em = Em::new(0.25);
 
 /// A list of math fragments between alignment points and/or linebreaks.
 ///
-/// For multiline equations this represents a distinct "cell", the list of
-/// fragments at a specific row and column. For tables, this represents a
-/// "sub-column", one of the parts that make up a cell in a table since
-/// alignment points can be used to align fragments within a cell for an
-/// individual column.
+/// For multiline equations this represents a distinct "cell"; for tables
+/// it represents a "sub-column" within a table cell.
 pub type MathRun = Vec<MathFragment>;
 
-/// Layout a [`MultilineItem`] into a [`MathRunFrameBuilder`].
-pub fn layout_multiline(
-    item: &MultilineItem,
-    ctx: &mut MathContext,
-    styles: StyleChain,
+/// Layout the rows of a [`MultilineView`] into a [`MathRunFrameBuilder`].
+pub fn layout_multiline<'a>(
+    view: &MultilineView<'a, '_>,
+    ctx: &mut MathContext<'a, '_, '_>,
+    styles: StyleChain<'a>,
 ) -> SourceResult<MathRunFrameBuilder> {
-    let nrows = item.rows.len();
-    let ncols = item.rows.first().map_or(0, |r| r.len());
+    let nrows = view.nrows();
+    let ncols = view.ncols();
 
     if nrows == 0 || ncols == 0 {
         return Ok(MathRunFrameBuilder::default());
@@ -38,7 +36,7 @@ pub fn layout_multiline(
 
     let mut col_widths = vec![Abs::zero(); ncols];
     let mut rows: Vec<Vec<MathRun>> = Vec::with_capacity(nrows);
-    for row in item.rows.iter() {
+    for row in &view.rows {
         let cells = layout_aligned_row(row, ctx, styles)?;
         for (c, cell) in cells.iter().enumerate() {
             col_widths[c].set_max(cell.iter().map(|f| f.width()).sum());
@@ -68,44 +66,39 @@ pub fn layout_multiline(
     ))
 }
 
-/// Layout an [`AlignedRow`].
-pub fn layout_aligned_row(
-    row: &AlignedRow,
-    ctx: &mut MathContext,
-    styles: StyleChain,
+/// Lay out one row of an aligned multiline as a list of cells.
+///
+/// Each cell is a column slice from the [`MultilineView`]. As a special
+/// case, for a (right-col, left-col) pair where the left column begins
+/// with a binary or relation operator, that operator's `lspace` is
+/// appended to the right column — preserving the old multiline visual.
+pub fn layout_aligned_row<'a>(
+    row: &[&[MathChild<'a>]],
+    ctx: &mut MathContext<'a, '_, '_>,
+    styles: StyleChain<'a>,
 ) -> SourceResult<Vec<MathRun>> {
     let mut cells = Vec::with_capacity(row.len());
-    for (c, item) in row.iter().enumerate() {
-        let mut frags = ctx.layout_into_fragments(item, styles)?;
+    for (c, cell_children) in row.iter().enumerate() {
+        let mut frags = ctx.layout_children(cell_children, styles)?;
 
-        // For a (right-aligned, left-aligned) pair, move the lspace of the item
-        // in the left-aligned column to the right-aligned column.
+        // Suppress lspace of an infix-shaped first item in the *next* column
+        // by appending matching space to *this* column.
         if c.is_multiple_of(2)
-            && let Some(next_item) = row.get(c + 1)
-            && let Some(spacing) = alignment_lspace(next_item)
+            && let Some(next_cell) = row.get(c + 1)
+            && let Some(spacing) = alignment_lspace(next_cell, styles)
         {
             frags.push(MathFragment::Space(spacing));
         }
 
         cells.push(frags);
     }
-
     Ok(cells)
 }
 
 /// A single row to be laid out in multiline math.
 pub struct RowLayout {
-    /// The row's content, split by alignment points.
     pub cells: Vec<MathRun>,
-    /// The ascent and descent that the row's final frame should have.
     pub frame_height: (Abs, Abs),
-    /// The ascent and descent that should be used for this row when stacking
-    /// rows together. If not specified,
-    /// [`frame_height`](RowLayout::frame_height) is used instead.
-    ///
-    /// This is used in table layout, where within each column there are rows
-    /// which need to be alignment. But when positioning rows together we need
-    /// to align them based on the sizes of all columns of the table.
     pub row_height: Option<(Abs, Abs)>,
 }
 
@@ -167,12 +160,8 @@ impl MathFragmentsExt for MathRun {
         row_into_line_frame(vec![self], &[], LeftRightAlternator::Right, None)
     }
 
-    /// Convert this run of math fragments into a vector of inline items for
-    /// paragraph layout. Creates multiple fragments when relation or binary
-    /// operators are present to allow for line-breaking opportunities later.
     fn into_par_items(self) -> Vec<InlineItem> {
         let mut items = vec![];
-
         let mut x = Abs::zero();
         let mut ascent = Abs::zero();
         let mut descent = Abs::zero();
@@ -189,8 +178,6 @@ impl MathFragmentsExt for MathRun {
 
         let is_space = |f: &MathFragment| matches!(f, MathFragment::Space(_));
         let is_line_break_opportunity = |class, next_fragment| match class {
-            // Don't split when two relations are in a row or when preceding a
-            // closing parenthesis.
             MathClass::Binary => next_fragment != Some(MathClass::Closing),
             MathClass::Relation => {
                 !matches!(next_fragment, Some(MathClass::Relation | MathClass::Closing))
@@ -216,8 +203,6 @@ impl MathFragmentsExt for MathRun {
             frame.push_frame(pos, fragment.into_frame());
             empty = false;
 
-            // Split our current frame when we encounter a binary operator or
-            // relation so that there is a line-breaking opportunity.
             if is_line_break_opportunity(class, iter.peek().map(|f| f.class())) {
                 let mut frame_prev =
                     std::mem::replace(&mut frame, Frame::soft(Size::zero()));
@@ -241,8 +226,6 @@ impl MathFragmentsExt for MathRun {
             }
         }
 
-        // Don't use `frame.is_empty()` because even an empty frame can
-        // contribute width (if it had hidden content).
         if !empty {
             finalize_frame(&mut frame, x, ascent, descent);
             items.push(InlineItem::Frame(frame));
@@ -255,15 +238,11 @@ impl MathFragmentsExt for MathRun {
 /// How the rows from the [`MathRun`] should be aligned and merged into a [`Frame`].
 #[derive(Default)]
 pub struct MathRunFrameBuilder {
-    /// The size of the resulting frame.
     pub size: Size,
-    /// Each row's frame, and the position where the frame should
-    /// be pushed into the resulting frame.
     pub frames: Vec<(Frame, Point)>,
 }
 
 impl MathRunFrameBuilder {
-    /// Consumes the builder and returns a [`Frame`].
     fn build(self, mut set_baseline: bool) -> Frame {
         let mut frame = Frame::soft(self.size);
         for (sub, pos) in self.frames.into_iter() {
@@ -276,14 +255,10 @@ impl MathRunFrameBuilder {
         frame
     }
 
-    /// Consumes the builder and returns a [`Frame`] with the baseline of the
-    /// first item.
     pub fn build_aligned(self) -> Frame {
         self.build(true)
     }
 
-    /// Consumes the builder and returns a [`Frame`] without a default
-    /// baseline, which must be manually calculated later.
     pub fn build_unaligned(self) -> Frame {
         self.build(false)
     }
@@ -298,7 +273,6 @@ impl From<Frame> for MathRunFrameBuilder {
     }
 }
 
-/// Build a frame from a row's cell fragments positioned at alignment points.
 fn row_into_line_frame(
     cells: Vec<MathRun>,
     points: &[Abs],
@@ -344,7 +318,6 @@ fn row_into_line_frame(
     frame
 }
 
-/// Compute cumulative alignment points from column widths.
 fn cumulative_alignment_points(widths: &[Abs]) -> (Vec<Abs>, Abs) {
     if widths.len() <= 1 {
         return (Vec::new(), widths.first().copied().unwrap_or_default());
@@ -358,16 +331,41 @@ fn cumulative_alignment_points(widths: &[Abs]) -> (Vec<Abs>, Abs) {
     (points, cumulative)
 }
 
-/// Returns the resolved alignment lspace of the first non-tag item in a cell,
-/// if it has `align_form_infix` set.
-fn alignment_lspace(cell: &MathItem) -> Option<Abs> {
-    cell.as_slice()
+/// If the first non-tag child of a cell is a binary/relation glyph with
+/// `lspace`, return that lspace.
+///
+/// The caller uses this to suppress the first-item lspace of a left-
+/// aligned column by appending the matching space to the right-aligned
+/// previous column — preserving the visual `a & = b` -> `a = b`.
+///
+/// Previously this checked an `align_form_infix` flag baked into the IR
+/// during multiline preprocessing; in the shallow IR we compute it inline
+/// from the child's class. The `lspace` itself is still a layout-time
+/// notion (set on the resolved fragment by per-variant layout), so for
+/// the *first* child of a column we only consult the class; the matching
+/// resolved-lspace value is the font's own infix space, which is the
+/// same regardless of which side of the alignment it lands on.
+fn alignment_lspace<'a>(
+    cell: &[MathChild<'a>],
+    styles: StyleChain<'a>,
+) -> Option<Abs> {
+    let first = cell
         .iter()
-        .find(|item| !matches!(item, MathItem::Tag(_)))
-        .and_then(|item| match item {
-            MathItem::Component(comp) if comp.props.align_form_infix => {
-                comp.props.lspace.map(|lspace| lspace.resolve(comp.styles))
-            }
-            _ => None,
-        })
+        .find(|c| !matches!(c, MathChild::Tag(_)))?;
+    match first.class() {
+        MathClass::Binary | MathClass::Relation => {
+            // Use the same default infix spacing the per-variant layout
+            // would have applied. (`typst_library::math::THICK` for
+            // relations, `MEDIUM` for binary — matches the original
+            // spacing table.)
+            let font_size = styles.resolve(TextElem::size);
+            let spacing = match first.class() {
+                MathClass::Relation => typst_library::math::THICK,
+                MathClass::Binary => typst_library::math::MEDIUM,
+                _ => unreachable!(),
+            };
+            Some(spacing.at(font_size))
+        }
+        _ => None,
+    }
 }

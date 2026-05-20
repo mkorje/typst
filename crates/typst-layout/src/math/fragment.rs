@@ -11,15 +11,14 @@ use typst_library::introspection::Tag;
 use typst_library::layout::{
     Abs, Axes, Axis, Corner, Em, Frame, FrameItem, Point, Size, VAlignment,
 };
-use typst_library::math::ir::MathProperties;
-use typst_library::math::{EquationElem, MathSize, families};
+use typst_library::math::{EquationElem, Limits, MathSize, families};
 use typst_library::text::{Font, Glyph, TextElem, TextItem, features, language, variant};
 use typst_library::visualize::{FixedStroke, Paint};
 use typst_syntax::Span;
 use typst_utils::{Get, default_math_class};
 use unicode_math_class::MathClass;
 
-use super::MathContext;
+use super::{MathContext, MathProperties};
 use super::shaping::shape;
 use crate::modifiers::{FrameModifiers, FrameModify};
 

@@ -1,27 +1,27 @@
 use typst_library::diag::SourceResult;
 use typst_library::foundations::{Resolve, StyleChain};
 use typst_library::layout::{Abs, Frame, FrameItem, Point, Size};
-use typst_library::math::ir::{LineItem, MathProperties, Position};
+use typst_library::math::ir::{LineChild, Position};
 use typst_library::text::TextElem;
 use typst_library::visualize::{FixedStroke, Geometry};
 
-use super::MathContext;
+use super::{MathContext, MathProperties};
 use super::fragment::FrameFragment;
 
-/// Lays out a [`LineItem`].
+/// Lays out a [`LineChild`].
 #[typst_macros::time(name = "math line layout", span = props.span)]
-pub fn layout_line(
-    item: &LineItem,
-    ctx: &mut MathContext,
-    styles: StyleChain,
+pub fn layout_line<'a>(
+    item: &LineChild<'a>,
+    ctx: &mut MathContext<'a, '_, '_>,
+    styles: StyleChain<'a>,
     props: &MathProperties,
 ) -> SourceResult<()> {
     let (extra_height, content, line_pos, content_pos, baseline, thickness, line_adjust);
     match item.position {
         Position::Below => {
-            content = ctx.layout_into_fragment(&item.base, styles)?;
+            content = ctx.layout_into_fragment(item.base, styles)?;
 
-            let (font, size) = content.font(ctx, item.base.styles().unwrap_or(styles));
+            let (font, size) = content.font(ctx, item.base.styles);
             let sep = font.math().underbar_extra_descender.at(size);
             thickness = font.math().underbar_rule_thickness.at(size);
             let gap = font.math().underbar_vertical_gap.at(size);
@@ -33,9 +33,9 @@ pub fn layout_line(
             line_adjust = -content.italics_correction();
         }
         Position::Above => {
-            content = ctx.layout_into_fragment(&item.base, styles)?;
+            content = ctx.layout_into_fragment(item.base, styles)?;
 
-            let (font, size) = content.font(ctx, item.base.styles().unwrap_or(styles));
+            let (font, size) = content.font(ctx, item.base.styles);
             let sep = font.math().overbar_extra_ascender.at(size);
             thickness = font.math().overbar_rule_thickness.at(size);
             let gap = font.math().overbar_vertical_gap.at(size);

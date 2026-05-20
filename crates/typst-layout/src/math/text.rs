@@ -3,20 +3,20 @@ use ecow::EcoString;
 use typst_library::diag::SourceResult;
 use typst_library::foundations::StyleChain;
 use typst_library::layout::{Abs, Axis, Size};
-use typst_library::math::ir::{GlyphItem, MathProperties, NumberItem, TextItem};
+use typst_library::math::ir::{GlyphData, NumberData, TextData};
 use typst_library::math::{EquationElem, MathSize, style_dtls, style_flac};
 use typst_library::text::{Font, TextElem};
 use typst_utils::Get;
 use unicode_math_class::MathClass;
 
-use super::MathContext;
+use super::{MathContext, MathProperties};
 use super::fragment::{FrameFragment, GlyphFragment};
 use super::run::MathFragmentsExt;
 
-/// Lays out a [`TextItem`].
+/// Lays out a [`TextData`].
 #[typst_macros::time(name = "math text layout", span = props.span)]
 pub fn layout_text(
-    item: &TextItem,
+    item: &TextData,
     ctx: &mut MathContext,
     styles: StyleChain,
     props: &MathProperties,
@@ -42,10 +42,10 @@ pub fn layout_text(
     Ok(())
 }
 
-/// Lays out a [`NumberItem`].
+/// Lays out a [`NumberData`].
 #[typst_macros::time(name = "math number layout", span = props.span)]
 pub fn layout_number(
-    item: &NumberItem,
+    item: &NumberData,
     ctx: &mut MathContext,
     styles: StyleChain,
     props: &MathProperties,
@@ -68,7 +68,7 @@ pub fn layout_number(
 /// Layout a single character in the math font.
 #[typst_macros::time(name = "math glyph layout", span = props.span)]
 pub fn layout_glyph(
-    item: &GlyphItem,
+    item: &GlyphData,
     ctx: &mut MathContext,
     styles: StyleChain,
     props: &MathProperties,

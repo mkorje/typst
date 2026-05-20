@@ -4,22 +4,22 @@ use typst_library::engine::Engine;
 use typst_library::foundations::{Context, Smart, StyleChain};
 use typst_library::layout::{Abs, Angle, Frame, FrameItem, Point, Rel, Size, Transform};
 use typst_library::math::CancelAngle;
-use typst_library::math::ir::{CancelItem, MathProperties};
+use typst_library::math::ir::CancelChild;
 use typst_library::visualize::{FixedStroke, Geometry};
 use typst_syntax::Span;
 
-use super::MathContext;
+use super::{MathContext, MathProperties};
 use super::fragment::FrameFragment;
 
-/// Lays out a [`CancelItem`].
+/// Lays out a [`CancelChild`].
 #[typst_macros::time(name = "math cancel layout", span = props.span)]
-pub fn layout_cancel(
-    item: &CancelItem,
-    ctx: &mut MathContext,
-    styles: StyleChain,
+pub fn layout_cancel<'a>(
+    item: &CancelChild<'a>,
+    ctx: &mut MathContext<'a, '_, '_>,
+    styles: StyleChain<'a>,
     props: &MathProperties,
 ) -> SourceResult<()> {
-    let body = ctx.layout_into_fragment(&item.base, styles)?;
+    let body = ctx.layout_into_fragment(item.base, styles)?;
 
     // Preserve properties of body.
     let body_text_like = body.is_text_like();

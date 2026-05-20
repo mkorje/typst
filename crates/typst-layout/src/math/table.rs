@@ -1,24 +1,26 @@
 use typst_library::diag::SourceResult;
 use typst_library::foundations::{Resolve, StyleChain};
 use typst_library::layout::{Abs, Em, Frame, FrameItem, Point, Rel, Size};
-use typst_library::math::ir::{AlignedRow, MathProperties, TableItem};
+use typst_library::math::ir::{
+    Body, GlyphData, MathChild, MultilineView, TableChild, collect,
+};
 use typst_library::math::{AugmentOffsets, style_for_denominator};
 use typst_library::text::TextElem;
 use typst_library::visualize::{FillRule, FixedStroke, Geometry, LineCap, Shape};
 use typst_syntax::Span;
 
-use super::MathContext;
+use super::{MathContext, MathProperties};
 use super::fragment::{FrameFragment, GlyphFragment};
-use super::run::{MathRun, RowLayout, layout_aligned_row, measure_row, stack_rows};
+use super::run::{MathRun, RowLayout, measure_row, stack_rows};
 
 const DEFAULT_STROKE_THICKNESS: Em = Em::new(0.05);
 
-/// Layout a [`TableItem`].
+/// Layout a [`TableChild`].
 #[typst_macros::time(name = "math table layout", span = props.span)]
-pub fn layout_table(
-    item: &TableItem,
-    ctx: &mut MathContext,
-    styles: StyleChain,
+pub fn layout_table<'a>(
+    item: &TableChild<'a>,
+    ctx: &mut MathContext<'a, '_, '_>,
+    styles: StyleChain<'a>,
     props: &MathProperties,
 ) -> SourceResult<()> {
     let rows = &item.cells;
@@ -26,7 +28,15 @@ pub fn layout_table(
     let ncols = rows.first().map_or(0, |row| row.len());
 
     if ncols == 0 || nrows == 0 {
-        ctx.push(FrameFragment::new(props, styles, Frame::soft(Size::zero())));
+        let empty = Frame::soft(Size::zero());
+        let wrapped = wrap_with_delimiters(
+            empty,
+            item.open.as_ref(),
+            item.close.as_ref(),
+            styles,
+            ctx,
+        )?;
+        ctx.push(FrameFragment::new(props, styles, wrapped));
         return Ok(());
     }
 
@@ -74,7 +84,7 @@ pub fn layout_table(
             .unwrap_or((Abs::zero(), Abs::zero()));
 
     for (r, row) in rows.iter().enumerate() {
-        for (c, cell) in row.iter().enumerate() {
+        for (c, &cell) in row.iter().enumerate() {
             let cell = layout_cell(cell, ctx, styles)?;
 
             heights[r].0.set_max(cell.height.0.max(ascent));
@@ -183,7 +193,15 @@ pub fn layout_table(
     let height = frame.height();
     frame.set_baseline(height / 2.0 + axis);
 
-    ctx.push(FrameFragment::new(props, styles, frame));
+    // Wrap with the table's own delimiters.
+    let wrapped = wrap_with_delimiters(
+        frame,
+        item.open.as_ref(),
+        item.close.as_ref(),
+        styles,
+        ctx,
+    )?;
+    ctx.push(FrameFragment::new(props, styles, wrapped));
     Ok(())
 }
 
@@ -193,14 +211,89 @@ struct CellLayout {
 }
 
 /// Layout one cell, split at alignment points into sub-columns.
-fn layout_cell(
-    cell: &AlignedRow,
-    ctx: &mut MathContext,
-    styles: StyleChain,
+fn layout_cell<'a>(
+    cell: Body<'a>,
+    ctx: &mut MathContext<'a, '_, '_>,
+    styles: StyleChain<'a>,
 ) -> SourceResult<CellLayout> {
-    let sub_columns = layout_aligned_row(cell, ctx, styles)?;
+    let span = cell.content.span();
+    let loc = ctx.locator.next(&span);
+    let children =
+        collect(cell.content, cell.styles, ctx.engine, loc, ctx.arenas)?;
+
+    // Cells may contain alignment points (`Align`) producing sub-columns;
+    // linebreaks within a cell are warned about + ignored at collect
+    // time so we only consult the first row.
+    let view = MultilineView::new(&children);
+    let row: &[&[MathChild]] = view.rows.first().map(Vec::as_slice).unwrap_or(&[]);
+
+    let mut sub_columns: Vec<MathRun> = Vec::with_capacity(row.len().max(1));
+    if row.is_empty() {
+        sub_columns.push(Vec::new());
+    } else {
+        for col in row {
+            sub_columns.push(ctx.layout_children(col, cell.styles)?);
+        }
+    }
+
     let height = measure_row(&sub_columns);
+    let _ = styles;
     Ok(CellLayout { sub_columns, height })
+}
+
+/// Wrap a body frame with the table's pre-built delimiter glyphs.
+fn wrap_with_delimiters<'a>(
+    body: Frame,
+    open: Option<&GlyphData>,
+    close: Option<&GlyphData>,
+    styles: StyleChain<'a>,
+    ctx: &mut MathContext<'a, '_, '_>,
+) -> SourceResult<Frame> {
+    if open.is_none() && close.is_none() {
+        return Ok(body);
+    }
+
+    let body_height = body.height();
+    let mut layout_delim = |g: &GlyphData| -> SourceResult<Frame> {
+        g.set_stretch_relative_to(body_height, typst_library::layout::Axis::Y);
+        let child = MathChild::Glyph(g.clone());
+        let frag = ctx
+            .layout_children(std::slice::from_ref(&child), styles)?
+            .into_iter()
+            .next()
+            .expect("delimiter glyph layout should yield a fragment");
+        Ok(frag.into_frame())
+    };
+
+    let open_frame = open.map(&mut layout_delim).transpose()?;
+    let close_frame = close.map(&mut layout_delim).transpose()?;
+
+    let ow = open_frame.as_ref().map_or(Abs::zero(), |f| f.width());
+    let cw = close_frame.as_ref().map_or(Abs::zero(), |f| f.width());
+    let bw = body.width();
+    let bh = body.height();
+    let h = bh
+        .max(open_frame.as_ref().map_or(Abs::zero(), |f| f.height()))
+        .max(close_frame.as_ref().map_or(Abs::zero(), |f| f.height()));
+
+    let mut frame = Frame::soft(Size::new(ow + bw + cw, h));
+    frame.set_baseline(body.baseline() + (h - bh) / 2.0);
+
+    let by = (h - bh) / 2.0;
+    let mut x = Abs::zero();
+    if let Some(f) = open_frame {
+        let y = (h - f.height()) / 2.0;
+        frame.push_frame(Point::new(x, y), f);
+        x += ow;
+    }
+    frame.push_frame(Point::new(x, by), body);
+    x += bw;
+    if let Some(f) = close_frame {
+        let y = (h - f.height()) / 2.0;
+        frame.push_frame(Point::new(x, y), f);
+    }
+
+    Ok(frame)
 }
 
 /// Compute max sub-column widths across a table column.

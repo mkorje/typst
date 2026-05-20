@@ -3,30 +3,35 @@ use typst_library::foundations::StyleChain;
 use typst_library::layout::{
     Abs, Axis, Corners, Frame, FrameItem, Point, Rel, Sides, Size,
 };
-use typst_library::math::ir::{MathProperties, RadicalItem};
+use typst_library::math::ir::{MathChild, RootChild};
 use typst_library::math::{EquationElem, MathSize};
 use typst_library::text::TextElem;
 use typst_library::visualize::{FixedStroke, Geometry};
 
-use super::MathContext;
+use super::{MathContext, MathProperties};
 use super::fragment::FrameFragment;
 use crate::shapes::styled_rect;
 
-/// Lays out a [`RadicalItem`].
+/// Lays out a [`RootChild`].
 ///
 /// TeXbook page 443, page 360
 /// See also: <https://www.w3.org/TR/mathml-core/#radicals-msqrt-mroot>
 #[typst_macros::time(name = "math radical layout", span = props.span)]
-pub fn layout_radical(
-    item: &RadicalItem,
-    ctx: &mut MathContext,
-    styles: StyleChain,
+pub fn layout_radical<'a>(
+    item: &RootChild<'a>,
+    ctx: &mut MathContext<'a, '_, '_>,
+    styles: StyleChain<'a>,
     props: &MathProperties,
 ) -> SourceResult<()> {
-    let radicand = ctx.layout_into_fragment(&item.radicand, styles)?.into_frame();
+    let radicand = ctx.layout_into_fragment(item.radicand, styles)?.into_frame();
+    let sqrt_child = MathChild::Glyph(item.sqrt.clone());
+    let MathChild::Glyph(ref sqrt_data) = sqrt_child else { unreachable!() };
     let target = {
-        let sqrt = ctx.layout_into_fragment(&item.sqrt, styles)?;
-        let styles = item.sqrt.styles().unwrap_or(styles);
+        let sqrt = ctx
+            .layout_children(std::slice::from_ref(&sqrt_child), styles)?
+            .into_iter()
+            .next()
+            .expect("sqrt glyph layout should yield a fragment");
         let (font, size) = sqrt.font(ctx, styles);
         let thickness = font.math().radical_rule_thickness.at(size);
         let gap = match styles.get(EquationElem::size) {
@@ -38,9 +43,13 @@ pub fn layout_radical(
     };
 
     // Layout root symbol.
-    item.sqrt.set_stretch_relative_to(target, Axis::Y);
-    let sqrt = ctx.layout_into_fragment(&item.sqrt, styles)?;
-    let sqrt_styles = item.sqrt.styles().unwrap_or(styles);
+    sqrt_data.set_stretch_relative_to(target, Axis::Y);
+    let sqrt = ctx
+        .layout_children(std::slice::from_ref(&sqrt_child), styles)?
+        .into_iter()
+        .next()
+        .expect("sqrt glyph layout should yield a fragment");
+    let sqrt_styles = styles;
 
     let (font, size) = sqrt.font(ctx, sqrt_styles);
     let thickness = font.math().radical_rule_thickness.at(size);
@@ -65,7 +74,6 @@ pub fn layout_radical(
     // Layout the index.
     let index = item
         .index
-        .as_ref()
         .map(|index| ctx.layout_into_fragment(index, styles))
         .transpose()?
         .map(|frag| frag.into_frame());

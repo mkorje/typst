@@ -2,29 +2,29 @@ use typst_library::diag::SourceResult;
 use typst_library::foundations::{Resolve, StyleChain};
 use typst_library::layout::{Abs, Axis, Frame, FrameItem, Point, Size};
 use typst_library::math::MathSize;
-use typst_library::math::ir::{FractionItem, MathProperties, SkewedFractionItem};
+use typst_library::math::ir::{FracChild, FracStyleKind, MathChild, SkewedFracChild};
 use typst_library::text::TextElem;
 use typst_library::visualize::{FixedStroke, Geometry};
 
-use super::MathContext;
+use super::{MathContext, MathProperties};
 use super::fragment::FrameFragment;
 
-/// Lays out a [`FractionItem`].
+/// Lays out a [`FracChild`].
 #[typst_macros::time(name = "math fraction layout", span = props.span)]
-pub fn layout_fraction(
-    item: &FractionItem,
-    ctx: &mut MathContext,
-    styles: StyleChain,
+pub fn layout_fraction<'a>(
+    item: &FracChild<'a>,
+    ctx: &mut MathContext<'a, '_, '_>,
+    styles: StyleChain<'a>,
     props: &MathProperties,
 ) -> SourceResult<()> {
-    let num = ctx.layout_into_fragment(&item.numerator, styles)?.into_frame();
-    let denom = ctx.layout_into_fragment(&item.denominator, styles)?.into_frame();
+    let num = ctx.layout_into_fragment(item.num, styles)?.into_frame();
+    let denom = ctx.layout_into_fragment(item.denom, styles)?.into_frame();
 
     let constants = ctx.font().math();
     let size = styles.resolve(TextElem::size);
     let math_size = props.size;
 
-    let frame = if item.line {
+    let frame = if matches!(item.style, FracStyleKind::Vertical) {
         let axis = constants.axis_height.at(size);
         let thickness = constants.fraction_rule_thickness.at(size);
         let shift_up = match math_size {
@@ -123,10 +123,10 @@ pub fn layout_fraction(
 
 /// Lay out a skewed fraction.
 #[typst_macros::time(name = "math skewed fraction layout", span = props.span)]
-pub fn layout_skewed_fraction(
-    item: &SkewedFractionItem,
-    ctx: &mut MathContext,
-    styles: StyleChain,
+pub fn layout_skewed_fraction<'a>(
+    item: &SkewedFracChild<'a>,
+    ctx: &mut MathContext<'a, '_, '_>,
+    styles: StyleChain<'a>,
     props: &MathProperties,
 ) -> SourceResult<()> {
     // Font-derived constants
@@ -136,9 +136,9 @@ pub fn layout_skewed_fraction(
     let hgap = constants.skewed_fraction_horizontal_gap.at(size);
     let axis = constants.axis_height.at(size);
 
-    let num_frame = ctx.layout_into_fragment(&item.numerator, styles)?.into_frame();
+    let num_frame = ctx.layout_into_fragment(item.num, styles)?.into_frame();
     let num_size = num_frame.size();
-    let denom_frame = ctx.layout_into_fragment(&item.denominator, styles)?.into_frame();
+    let denom_frame = ctx.layout_into_fragment(item.denom, styles)?.into_frame();
     let denom_size = denom_frame.size();
 
     // Height of the fraction frame
@@ -147,7 +147,12 @@ pub fn layout_skewed_fraction(
 
     // Build the slash glyph to calculate its size
     item.slash.set_stretch_relative_to(fraction_height, Axis::Y);
-    let slash_frag = ctx.layout_into_fragment(&item.slash, styles)?;
+    let slash_child = MathChild::Glyph(item.slash.clone());
+    let slash_frag = ctx
+        .layout_children(std::slice::from_ref(&slash_child), styles)?
+        .into_iter()
+        .next()
+        .expect("slash glyph layout should yield a fragment");
     let slash_frame = slash_frag.into_frame();
 
     // Adjust the fraction height if the slash overflows

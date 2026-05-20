@@ -10,6 +10,7 @@ mod lr;
 mod matrix;
 mod op;
 mod root;
+pub mod rules;
 mod style;
 mod underover;
 

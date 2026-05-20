@@ -104,6 +104,7 @@ pub fn register(rules: &mut NativeRuleMap) {
 
     // Math.
     rules.register(Paged, EQUATION_RULE);
+    typst_library::math::rules::register(rules, Paged);
 
     // PDF.
     rules.register(Paged, ATTACH_RULE);

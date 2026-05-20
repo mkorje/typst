@@ -9,11 +9,13 @@ use typst_library::diag::SourceResult;
 use typst_library::foundations::StyleChain;
 use typst_library::layout::{Abs, Axis, Corner, Frame, Point, Size};
 use typst_library::math::EquationElem;
-use typst_library::math::ir::{MathProperties, PRIME_CHAR, PrimesItem, ScriptsItem};
+use typst_library::math::ir::{AttachChild, MathChild, PrimesData};
 use typst_library::text::Font;
 
-use super::MathContext;
+use super::{MathContext, MathProperties};
 use super::fragment::{FrameFragment, GlyphFragment, MathFragment};
+
+const PRIME_CHAR: char = '\u{2032}';
 
 macro_rules! measure {
     ($e: ident, $attr: ident) => {
@@ -21,50 +23,49 @@ macro_rules! measure {
     };
 }
 
-/// Lays out a [`ScriptsItem`].
+/// Lays out an [`AttachChild`].
 #[typst_macros::time(name = "math scripts layout", span = props.span)]
-pub fn layout_scripts(
-    item: &ScriptsItem,
-    ctx: &mut MathContext,
-    styles: StyleChain,
+pub fn layout_scripts<'a>(
+    item: &AttachChild<'a>,
+    ctx: &mut MathContext<'a, '_, '_>,
+    styles: StyleChain<'a>,
     props: &MathProperties,
 ) -> SourceResult<()> {
     macro_rules! layout {
         ($content:ident) => {
             item.$content
-                .as_ref()
-                .map(|script| ctx.layout_into_fragment(&script, styles))
+                .map(|script| ctx.layout_into_fragment(script, styles))
                 .transpose()?
         };
     }
 
     // Layout the top and bottom attachments early so we can measure their
     // widths, in order to calculate what the stretch size is relative to.
-    let t = layout!(top);
-    let b = layout!(bottom);
+    let t = layout!(t);
+    let b = layout!(b);
     let relative_to_width = measure!(t, width).max(measure!(b, width));
-    item.base.set_stretch_relative_to(relative_to_width, Axis::X);
+    set_base_stretch_relative_to(&item.base, relative_to_width, Axis::X);
 
-    let base = ctx.layout_into_fragment(&item.base, styles)?;
+    let base = ctx.layout_children_as_fragment(&item.base, styles)?;
 
     let fragments = [
-        layout!(top_left),
+        layout!(tl),
         t,
-        layout!(top_right),
-        layout!(bottom_left),
+        layout!(tr),
+        layout!(bl),
         b,
-        layout!(bottom_right),
+        layout!(br),
     ];
 
-    layout_attachments(ctx, props, item.base.styles().unwrap_or(styles), base, fragments)
+    layout_attachments(ctx, props, styles, base, fragments)
 }
 
-/// Lays out a [`PrimesItem`].
+/// Lays out a [`PrimesData`].
 #[typst_macros::time(name = "math primes layout", span = props.span)]
-pub fn layout_primes(
-    item: &PrimesItem,
-    ctx: &mut MathContext,
-    styles: StyleChain,
+pub fn layout_primes<'a>(
+    item: &PrimesData,
+    ctx: &mut MathContext<'a, '_, '_>,
+    styles: StyleChain<'a>,
     props: &MathProperties,
 ) -> SourceResult<()> {
     let Some(prime) = GlyphFragment::new_char(ctx, styles, PRIME_CHAR, props.span) else {
@@ -384,6 +385,19 @@ fn compute_script_shifts(
 /// a negative value means shifting the script closer to the base. Requires the
 /// distance from the base's baseline to the script's baseline, as well as the
 /// script's corner (tl, tr, bl, br).
+/// Push `relative_to` into any stretchable glyph in the base sequence.
+///
+/// Mirrors the old IR's `item.base.set_stretch_relative_to(...)` call —
+/// only stretch info that's already present gets its `relative_to`
+/// filled, so non-stretchy base glyphs are unaffected.
+fn set_base_stretch_relative_to(base: &[MathChild], relative_to: Abs, axis: Axis) {
+    for child in base {
+        if let Some(g) = child.stretch_target() {
+            g.set_stretch_relative_to(relative_to, axis);
+        }
+    }
+}
+
 fn math_kern(base: &MathFragment, script: &MathFragment, shift: Abs, pos: Corner) -> Abs {
     // This process is described under the MathKernInfo table in the OpenType
     // MATH spec.

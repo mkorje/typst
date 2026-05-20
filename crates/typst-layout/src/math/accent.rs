@@ -1,36 +1,40 @@
 use typst_library::diag::SourceResult;
 use typst_library::foundations::StyleChain;
 use typst_library::layout::{Abs, Axis, Frame, Point, Size};
-use typst_library::math::ir::{AccentItem, MathProperties, Position};
+use typst_library::math::ir::{AccentChild, MathChild, Position};
 
-use super::MathContext;
+use super::{MathContext, MathProperties};
 use super::fragment::FrameFragment;
 
-/// Lays out an [`AccentItem`].
+/// Lays out an [`AccentChild`].
 #[typst_macros::time(name = "math accent layout", span = props.span)]
-pub fn layout_accent(
-    item: &AccentItem,
-    ctx: &mut MathContext,
-    styles: StyleChain,
+pub fn layout_accent<'a>(
+    item: &AccentChild<'a>,
+    ctx: &mut MathContext<'a, '_, '_>,
+    styles: StyleChain<'a>,
     props: &MathProperties,
 ) -> SourceResult<()> {
     let top_accent = item.position == Position::Above;
 
-    let base = ctx.layout_into_fragment(&item.base, styles)?;
-    let (font, size) = base.font(ctx, item.base.styles().unwrap_or(styles));
+    let base = ctx.layout_into_fragment(item.base, styles)?;
+    let (font, size) = base.font(ctx, item.base.styles);
     let base_attach = base.accent_attach();
 
     // Try to replace the accent glyph with its flattened variant.
     let flattened_base_height = font.math().flattened_accent_base_height.at(size);
-    let accent = &item.accent;
+    let accent_child = MathChild::Glyph(item.accent.clone());
+    let MathChild::Glyph(ref accent_data) = accent_child else { unreachable!() };
     if top_accent && base.ascent() > flattened_base_height {
-        accent.set_flac();
+        accent_data.set_flac();
     }
+    accent_data.set_stretch_relative_to(base.width(), Axis::X);
+    accent_data.set_stretch_font_size(size, Axis::X);
 
-    accent.set_stretch_relative_to(base.width(), Axis::X);
-    accent.set_stretch_font_size(size, Axis::X);
-
-    let accent = ctx.layout_into_fragment(accent, styles)?;
+    let accent = ctx
+        .layout_children(std::slice::from_ref(&accent_child), styles)?
+        .into_iter()
+        .next()
+        .expect("glyph layout should yield a fragment");
     let accent_attach = accent.accent_attach().0;
     let accent = accent.into_frame();
 

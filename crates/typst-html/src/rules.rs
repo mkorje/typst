@@ -15,7 +15,7 @@ use typst_library::introspection::{
 use typst_library::layout::resolve::{Cell, CellGrid, Entry, Header};
 use typst_library::layout::{BlockElem, HElem, OuterVAlignment, Sizing};
 use typst_library::math::EquationElem;
-use typst_library::math::ir::resolve_equation;
+use typst_library::math::ir::collect_equation;
 use typst_library::model::{
     Attribution, BibliographyElem, CiteElem, CiteGroup, CslIndentElem, CslLightElem,
     Destination, DirectLinkElem, DividerElem, EarlyLinkResolver, EmphElem, EnumElem,
@@ -84,6 +84,7 @@ pub fn register(rules: &mut NativeRuleMap) {
 
     // Math.
     rules.register(Html, EQUATION_RULE);
+    typst_library::math::rules::register(rules, Html);
 
     // For the HTML target, `html.frame` is a primitive. In the laid-out target,
     // it should be a no-op so that nested frames don't break (things like `show
@@ -820,7 +821,7 @@ const IMAGE_RULE: ShowFn<ImageElem> = |elem, engine, styles| {
 
 const EQUATION_RULE: ShowFn<EquationElem> = |elem, engine, styles| {
     let arenas = Arenas::default();
-    let item = resolve_equation(
+    let children = collect_equation(
         elem,
         engine,
         Locator::synthesize(elem.location().unwrap()),
@@ -829,7 +830,10 @@ const EQUATION_RULE: ShowFn<EquationElem> = |elem, engine, styles| {
     )?;
 
     let block = elem.block.get(styles);
-    let body = convert_math_to_nodes(item, engine, styles, block)?;
+    // `convert_math_to_nodes` now walks a flat `Vec<MathChild>` instead of a
+    // recursive `MathItem`. Bodies on each child are collected lazily inside
+    // the converter when it recurses.
+    let body = convert_math_to_nodes(&children, &arenas, engine, styles, block)?;
     let math = HtmlElem::new(tag::mathml::math)
         .with_body(Some(Content::sequence(body)))
         .with_optional_attr(attr::mathml::display, block.then_some("block"))

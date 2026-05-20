@@ -48,7 +48,11 @@ pub struct AttachElem {
     pub br: Option<Content>,
 }
 
-/// Grouped primes.
+// Attachment merging is *not* done via `Synthesize` here. Doing so would
+// require inspecting `Content` (downcasting `self.base` to `AttachElem`),
+// which is what we're trying to avoid. Instead, the merge happens inside
+// the IR collector, operating on collected `MathChild::Attach` values —
+// see `merge_nested_attachments` in `math::ir::collect`.
 ///
 /// ```example
 /// $ a'''_b = a^'''_b $
