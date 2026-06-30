@@ -266,6 +266,11 @@ f23f7a0a0411586163a27c7aff1cb297 footnote-in-columns
 cfaa9e455bd7617f4bb5a28d6b9e6823 footnote-in-place
 bb9f1e98ebd41b9583dff1e84c84c972 footnote-in-table
 1ce4f3ec1d3b83b44bac1b97571d063d footnote-invariant
+e983be7548abdcb1f72a19cf3da2b263 footnote-invariant-orphan-1
+ad367a007559762e7945d19e817ed66c footnote-invariant-orphan-2
+eb59770ce584063e1c6ac4ad9eae81dc footnote-invariant-sticky-1
+ec54175219f50164fed8300379349e6b footnote-invariant-sticky-2
+e0c0dd1943d4b57810f53e04c0fc3974 footnote-invariant-sticky-3
 7ad83c6abcda332ba994963414d487ba footnote-multiple-in-one-line
 a252091f292aed3987302683064498e7 footnote-nested
 502f6c04e65896e5cbc1498b596ffacf footnote-nested-break-across-pages

@@ -223,6 +223,44 @@ A
 
 A #footnote(lines(6, "1"))
 
+--- footnote-invariant-orphan-1 paged ---
+#set page(height: 2cm)
+Foot #footnote[foot] \ foot
+
+--- footnote-invariant-orphan-2 paged ---
+#set page(height: 4cm)
+Foots
+
+Foots
+
+Foots
+
+Foot #footnote[foot] \ foot
+
+--- footnote-invariant-sticky-1 paged ---
+#set page(height: 70pt)
+
+== Ipsum
+#lorem(4)#footnote[#lorem(4)] #lorem(1)
+
+--- footnote-invariant-sticky-2 paged ---
+#set page(height: 5cm)
+#box(height: 0cm)[a]
+
+= a #footnote[abc]
+
+= b #footnote[dominoes]
+Foot #footnote[foot] \ foot
+
+--- footnote-invariant-sticky-3 paged ---
+#set page(height: 6cm)
+#box(height: 0cm)[a]
+
+= a #footnote[abc]
+
+= b #footnote[dominoes]
+#block(breakable: false, height: 3cm, fill: red, width: 100%)
+
 --- footnote-ref paged ---
 // Test references to footnotes.
 A footnote #footnote[Hi]<fn> \
