@@ -45,6 +45,15 @@ A
 == A
 #lines(1)#footnote[#lines(2)]
 
+--- flow-heading-no-orphan-with-float paged ---
+// Ensure a float before a heading doesn't prevent the heading from migrating
+// to the next page together with its content. The float stays on this page, so
+// it must not make the heading look like it is at the top of the page.
+#set page(height: 90pt)
+#place(top, float: true, rect(height: 40pt, width: 100%))
+== Heading
+#lines(3)
+
 --- flow-widow-forced paged ---
 // Ensure that a widow is allowed when the three lines don't all fit.
 #set page(height: 50pt)

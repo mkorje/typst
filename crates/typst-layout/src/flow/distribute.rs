@@ -1,12 +1,12 @@
-use typst_library::introspection::Tag;
+use typst_library::introspection::{Location, Tag};
 use typst_library::layout::{
     Abs, Axes, FixedAlignment, Fr, Frame, FrameItem, Point, Region, Regions, Rel, Size,
 };
 use typst_utils::Numeric;
 
 use super::{
-    Child, Composer, FlowResult, LineChild, MultiChild, MultiSpill, PlacedChild,
-    SingleChild, Stop, Work,
+    Child, Composer, FlowResult, FootnoteOptions, LineChild, MultiChild, MultiSpill,
+    PlacedChild, SingleChild, Stop, Work,
 };
 
 /// Distributes as many children as fit from `composer.work` into the first
@@ -47,13 +47,21 @@ struct Distributor<'a, 'b, 'x, 'y, 'z> {
     /// and may migrate with the attached frame. This is `None` while we aren't
     /// processing sticky blocks. On the first sticky block, this will become
     /// `Some(true)` if migrating sticky blocks as usual would make a
-    /// difference - this is given by `regions.may_progress()`. Otherwise, it
-    /// is set to `Some(false)`, which is usually the case when the first
-    /// sticky block in the group is at the very top of the page (then,
-    /// migrating it would just lead us back to the top of the page, leading
-    /// to an infinite loop). In that case, all sticky blocks of the group are
-    /// also disabled, until this is reset to `None` on the first non-sticky
-    /// frame we find.
+    /// difference - this is given by `regions.may_progress()`, after adding
+    /// back the space reserved by footnotes that would migrate along with the
+    /// group (so they don't make it look further down the page than it is;
+    /// insertions that stay, like floats, are left out). Otherwise, it is set
+    /// to `Some(false)`, which is usually the case when the first sticky block
+    /// in the group is at the very top of the page (then, migrating it would
+    /// just lead us back to the top of the page, leading to an infinite loop).
+    /// In that case, all sticky blocks of the group are also disabled, until
+    /// this is reset to `None` on the first non-sticky frame we find.
+    ///
+    /// This caches a `may_progress()` result across the group, but it can't go
+    /// stale: a footnote insertion triggers `Stop::Relayout`, which restarts
+    /// distribution from scratch (a fresh `Distributor` with `stickable: None`)
+    /// against the updated `column_insertions`, so the check is recomputed with
+    /// the correct reserved space.
     ///
     /// While this behavior of disabling stickiness of sticky blocks at the
     /// very top of the page may seem non-ideal, it is only problematic (that
@@ -88,8 +96,13 @@ enum Item<'a, 'b> {
     Tag(&'a Tag),
     /// Absolute spacing and its weakness level.
     Abs(Abs, u8),
-    /// Fractional spacing or a fractional block.
-    Fr(Fr, u8, Option<&'b SingleChild<'a>>),
+    /// Fractional spacing, or a fractional block together with the footnote
+    /// marker locations found in the frame it was laid out into. We keep only
+    /// the marker locations, not the frame itself: the frame is re-laid out at
+    /// its final fractional size during finalization, and its markers are all we
+    /// need afterwards to know which of its footnotes stay in this region (see
+    /// [`Self::carried_footnote_height`]).
+    Fr(Fr, u8, Option<(&'b SingleChild<'a>, Vec<Location>)>),
     /// A frame for a laid out line or block.
     Frame(Frame, Axes<FixedAlignment>),
     /// A frame for an absolutely (not floatingly) placed child.
@@ -294,14 +307,24 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         // following lines grouped by widow/orphan prevention, does not fit into
         // the current region, but does fit into the next region, finish the
         // region.
-        if !self.regions.size.y.fits(line.need)
-            && self
+        //
+        // The next region's available space is discounted by the footnotes that
+        // would migrate together with these lines, as those would be reserved
+        // again in the next region. Without this, a line carrying a footnote
+        // whose group can never fit alongside it would migrate forever: the
+        // next region looks roomy until the footnote follows along and shrinks
+        // it again. We only compute this when the lines don't already fit, as
+        // it requires scanning the placed frames for footnote markers.
+        if !self.regions.size.y.fits(line.need) {
+            let carried = self.carried_footnote_height();
+            if self
                 .regions
                 .iter()
                 .nth(1)
-                .is_some_and(|region| region.y.fits(line.need))
-        {
-            return Err(Stop::Finish(false));
+                .is_some_and(|region| (region.y - carried).fits(line.need))
+            {
+                return Err(Stop::Finish(false));
+            }
         }
 
         // If this line anchors a widow/orphan group and we've already placed
@@ -339,6 +362,46 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         }
     }
 
+    /// The height reserved by footnotes that would migrate to the next region
+    /// along with the not-yet-placed content (see
+    /// [`Composer::migrating_footnote_height`]). Footnotes whose marker is in
+    /// already-placed content stay behind and are excluded.
+    ///
+    /// This must pass every already-placed item that can hold a footnote marker,
+    /// so that such footnotes are recognized as staying rather than migrating.
+    /// That means the frame-bearing items (`Frame` and `Placed`), the marker
+    /// locations kept for a fractional block (whose frame isn't retained), and
+    /// flushed `Tag`s (a marker committed from `Composer::footnotes`'s tag search
+    /// lives there, not in a frame). `Abs` and fractional *spacing* carry no
+    /// markers. Equivalently, this covers exactly what `finalize` pushes into the
+    /// region frame, which is what [`Self::prune_orphaned_footnotes`] scans after
+    /// the fact.
+    fn carried_footnote_height(&self) -> Abs {
+        // Lazy passes rather than one combined scan on purpose:
+        // `migrating_footnote_height` early-returns when there are no anchored
+        // footnotes (the common case) without consuming any iterator, so nothing
+        // is scanned then. Collecting the items into vecs up front would defeat
+        // that fast path.
+        let frames = self.items.iter().filter_map(|item| match item {
+            Item::Frame(frame, _) | Item::Placed(frame, _) => Some(frame),
+            _ => None,
+        });
+        let tags = self.items.iter().filter_map(|item| match item {
+            Item::Tag(tag) => Some(*tag),
+            _ => None,
+        });
+        // Fractional blocks don't retain their frame, only its markers.
+        let fr_markers = self
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Fr(_, _, Some((_, markers))) => Some(markers),
+                _ => None,
+            })
+            .flatten();
+        self.composer.migrating_footnote_height(frames, tags, fr_markers)
+    }
+
     /// Processes an unbreakable block.
     fn single(&mut self, single: &'b SingleChild<'a>) -> FlowResult<()> {
         // Lay out the block.
@@ -349,10 +412,17 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
 
         // Handle fractionally sized blocks.
         if let Some(fr) = single.fr {
-            self.composer
-                .footnotes(&self.regions, &frame, Abs::zero(), false, true)?;
+            self.composer.footnotes(
+                &self.regions,
+                &frame,
+                Abs::zero(),
+                FootnoteOptions { breakable: false, migratable: true, prunable: true },
+            )?;
             self.flush_tags();
-            self.items.push(Item::Fr(fr, 0, Some(single)));
+            // Keep only the block's footnote markers; the frame is re-laid out
+            // at its final fractional size during finalization.
+            let markers = self.composer.footnote_markers(&frame);
+            self.items.push(Item::Fr(fr, 0, Some((single, markers))));
             return Ok(());
         }
 
@@ -447,10 +517,22 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
             // Note that, since the whole region is checked, this ensures sticky
             // blocks at the top of a block - but not necessarily of the page -
             // can still be migrated.
-            if self.sticky.is_none()
-                && *self.stickable.get_or_insert_with(|| self.regions.may_progress())
-            {
-                self.sticky = Some(self.snapshot());
+            if self.sticky.is_none() {
+                if self.stickable.is_none() {
+                    // Migrating this group only helps if it isn't already at the
+                    // top of the region's flow. A footnote belonging to the
+                    // sticky content is reserved before the content's position is
+                    // settled, shrinking the region; we add that space back so it
+                    // doesn't make the block look further down than it is.
+                    // Insertions that stay on this page, like floats, are left
+                    // out, as migrating wouldn't move them.
+                    let mut regions = self.regions;
+                    regions.size.y += self.carried_footnote_height();
+                    self.stickable = Some(regions.may_progress());
+                }
+                if self.stickable == Some(true) {
+                    self.sticky = Some(self.snapshot());
+                }
             }
         }
 
@@ -465,8 +547,7 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
             &self.regions,
             &frame,
             frame.height(),
-            breakable,
-            true,
+            FootnoteOptions { breakable, migratable: true, prunable: true },
         )?;
 
         if !sticky && !frame.is_empty() {
@@ -498,8 +579,12 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
             self.regions.size.y -= weak_spacing;
         } else {
             let frame = placed.layout(self.composer.engine, self.regions.base())?;
-            self.composer
-                .footnotes(&self.regions, &frame, Abs::zero(), true, true)?;
+            self.composer.footnotes(
+                &self.regions,
+                &frame,
+                Abs::zero(),
+                FootnoteOptions { breakable: true, migratable: true, prunable: true },
+            )?;
             self.flush_tags();
             self.items.push(Item::Placed(frame, placed));
         }
@@ -585,7 +670,7 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         let mut fr_frames = vec![];
         if has_fr_child {
             for item in &self.items {
-                let Item::Fr(v, _, Some(single)) = item else { continue };
+                let Item::Fr(v, _, Some((single, _))) = item else { continue };
                 let length = v.share(frs, fr_space);
                 let pod = Region::new(Size::new(region.size.x, length), region.expand);
                 let frame = single.layout(self.composer.engine, pod)?;
@@ -622,7 +707,7 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
                 }
                 Item::Fr(v, _, single) => {
                     let length = v.share(frs, fr_space);
-                    if let Some(single) = single {
+                    if let Some((single, _)) = single {
                         let frame = fr_frames.next().unwrap();
                         let x = single.align.x.position(size.x - frame.width());
                         let pos = Point::new(x, offset);

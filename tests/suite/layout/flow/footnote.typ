@@ -261,6 +261,59 @@ Foot #footnote[foot] \ foot
 = b #footnote[dominoes]
 #block(breakable: false, height: 3cm, fill: red, width: 100%)
 
+--- footnote-invariant-nested-1 paged ---
+#set page(height: 2.2cm)
+Foot #footnote[outer #footnote[inner]] \ foot
+
+--- footnote-invariant-nested-2 paged ---
+#set page(height: 6cm)
+#box(height: 0cm)[a]
+
+= a #footnote[outer #footnote[inner]]
+
+#block(breakable: false, height: 3cm, fill: red, width: 100%)
+
+--- footnote-invariant-orphan-fr paged ---
+// A fractional block's footnote stays on its page, so it must not be counted
+// as migrating when deciding whether the following paragraph's orphan group
+// can move to the next page. Otherwise the next region looks too small and the
+// group is wrongly split instead of moved (its first line orphaned here).
+#set page(width: 200pt, height: 55pt, margin: 5pt)
+#block(height: 1fr, fill: aqua)[X #footnote[note]]
+Body text here wrapping onto two separate lines for orphan prevention to act on
+
+--- footnote-prune-keeps-spill paged ---
+// When an in-flow footnote is pruned because its content migrated (here the
+// sticky heading), an unrelated footnote committed afterwards must keep its
+// spill. The float's long footnote spills across pages; dropping its
+// continuation would lose footnote content (and break PDF tagging).
+#set page(width: 200pt, height: 100pt, margin: 5pt)
+= H #footnote[h]
+#place(bottom, float: true, rect(width: 100%, fill: aqua)[#footnote[#lorem(45)]])
+#block(breakable: false, height: 70pt, fill: yellow)
+
+--- footnote-prune-drops-queued paged ---
+// When a footnote spills and a later footnote in the same migrating frame is
+// queued behind that spill, pruning the spilled footnote must also drop the
+// queued one --- otherwise it is laid out on the next column before its
+// migrated marker. Here the sticky heading migrates carrying both its
+// footnotes, so the second one must travel with it rather than being stranded.
+#set page(width: 200pt, height: 90pt, margin: 5pt)
+#box(height: 0pt)[x]
+= H #footnote[#lorem(80)] #footnote[second]
+#block(breakable: false, height: 60pt, fill: yellow)
+
+--- footnote-prune-drops-queued-no-spill paged ---
+// A queued footnote must be dropped with its migrated anchor even when the
+// anchor's footnote did not spill. Here the first footnote fits (no spill) but
+// reserves enough that the second doesn't fit and is queued. When the sticky
+// heading migrates, the second must travel with it, not be stranded a page
+// ahead of its marker (which also cascades the first footnote).
+#set page(width: 200pt, height: 85pt, margin: 5pt)
+#box(height: 0pt)[x]
+= H #footnote[#lorem(14)] #footnote[second]
+#block(breakable: false, height: 55pt, fill: yellow)
+
 --- footnote-ref paged ---
 // Test references to footnotes.
 A footnote #footnote[Hi]<fn> \

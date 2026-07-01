@@ -1,5 +1,6 @@
 use std::num::NonZeroUsize;
 
+use rustc_hash::FxHashSet;
 use typst_library::diag::SourceResult;
 use typst_library::engine::Engine;
 use typst_library::foundations::{Content, NativeElement, Packed, Resolve, Smart};
@@ -69,12 +70,47 @@ pub struct Composer<'a, 'b, 'x, 'y> {
     page_base: Size,
     page_insertions: Insertions<'a, 'b>,
     column_insertions: Insertions<'a, 'b>,
-    // These are here because they have to survive relayout (we could lose the
-    // footnotes otherwise). For floats, we revisit them anyway, so it's okay to
-    // use `work.floats` directly. This is not super clean; probably there's a
-    // better way.
+    // The footnote spill and queue live on the composer (not `work`) because
+    // they must survive the relayouts a footnote triggers within a column;
+    // otherwise we'd lose the footnotes. Floats don't need this since we revisit
+    // `work.floats` anyway.
+    //
+    // They are, however, only provisional: an anchored in-flow note reserved
+    // here is committed only once `column` confirms, via
+    // `prune_orphaned_footnotes`, that its marker survived in the distributed
+    // frame. If the marker's content migrated out of the column instead, the
+    // reservation is undone so the note follows its marker to the next region.
+    //
+    // Continuation frames of a spilled footnote entry, carried across regions.
     footnote_spill: Option<std::vec::IntoIter<Frame>>,
-    footnote_queue: Vec<Packed<FootnoteElem>>,
+    // Footnotes deferred to the next region (they didn't fit, or sit behind a
+    // spill), each paired with its anchor: the in-flow marker it is tied to, or
+    // `None` if not anchored to the distributed flow (matching
+    // `FootnoteSlot::anchor`). The anchor lets `prune_orphaned_footnotes` drop
+    // queued notes whose marker migrated out of the column rather than promoting
+    // them, which would lay them out before their redistributed marker.
+    footnote_queue: Vec<(Option<Location>, Packed<FootnoteElem>)>,
+}
+
+/// Controls how [`Composer::footnotes`] handles the footnotes it finds in a
+/// frame. Grouped into a struct so the three flags are self-documenting at call
+/// sites (they are otherwise easy to transpose).
+#[derive(Clone, Copy)]
+pub struct FootnoteOptions {
+    /// Whether the element that produced the frame is breakable. If not, the
+    /// frame is treated as atomic.
+    pub breakable: bool,
+    /// Whether footnote migration should be possible (at least for the first
+    /// footnote found in the frame, as it is forbidden from the second onwards).
+    /// Usually `true` within the distributor and `false` elsewhere, as only the
+    /// distributor can handle the [`Stop::Finish`] a migration request returns.
+    pub migratable: bool,
+    /// Whether the footnotes belong to in-flow content whose marker is part of
+    /// the distributed frame. If so, they are anchored to their marker and may
+    /// be pruned later (see [`Composer::prune_orphaned_footnotes`]) should that
+    /// content migrate to the next region. `true` for the distributor's in-flow
+    /// frames and `false` for floats, whose markers don't live in the flow.
+    pub prunable: bool,
 }
 
 impl<'a, 'b> Composer<'a, 'b, '_, '_> {
@@ -201,7 +237,13 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
         };
         drop(checkpoint);
 
-        self.work.footnotes.extend(self.footnote_queue.drain(..));
+        // Drop footnotes whose marker migrated out of this column, so their
+        // entry isn't stranded on a page before its reference.
+        self.prune_orphaned_footnotes(&inner);
+
+        self.work
+            .footnotes
+            .extend(self.footnote_queue.drain(..).map(|(_, elem)| elem));
         if let Some(spill) = self.footnote_spill.take() {
             self.work.footnote_spill = Some(spill);
         }
@@ -235,7 +277,7 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
     fn column_contents(&mut self, regions: Regions) -> FlowResult<Frame> {
         // Process pending footnotes.
         for note in std::mem::take(&mut self.work.footnotes) {
-            self.footnote(note, &mut regions.clone(), Abs::zero(), false)?;
+            self.footnote(note, &mut regions.clone(), Abs::zero(), false, None)?;
         }
 
         // Process pending floats.
@@ -316,8 +358,14 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
             return Ok(());
         }
 
-        // Handle footnotes in the float.
-        self.footnotes(regions, &frame, need, false, migratable)?;
+        // Handle footnotes in the float. They are not prunable because their
+        // markers live inside the float, not in the distributed flow frame.
+        self.footnotes(
+            regions,
+            &frame,
+            need,
+            FootnoteOptions { breakable: false, migratable, prunable: false },
+        )?;
 
         // Determine the float's vertical alignment. We can unwrap the inner
         // `Option` because `Custom(None)` is checked for during collection.
@@ -346,22 +394,15 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
     }
 
     /// Lays out footnotes in the `frame` if this is the root flow and there are
-    /// any. The value of `breakable` indicates whether the element that
-    /// produced the frame is breakable. If not, the frame is treated as atomic.
-    ///
-    /// The value of `migratable` indicates whether footnote migration should be
-    /// possible (at least for the first footnote found in the frame, as it is
-    /// forbidden for the second footnote onwards). It is usually `true` within
-    /// the distributor and `false` elsewhere, as the distributor can handle
-    /// [`Stop::Finish`] which is returned when migration is requested.
+    /// any. See [`FootnoteOptions`] for the meaning of `options`.
     pub fn footnotes(
         &mut self,
         regions: &Regions,
         frame: &Frame,
         flow_need: Abs,
-        breakable: bool,
-        migratable: bool,
+        options: FootnoteOptions,
     ) -> FlowResult<()> {
+        let FootnoteOptions { breakable, migratable, prunable } = options;
         // Footnotes are only supported at the root level.
         if self.config.mode != FlowMode::Root {
             return Ok(());
@@ -393,8 +434,12 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
             // the marker. For an unbreakable frame, it's the full height.
             let flow_need = if breakable { y } else { flow_need };
 
+            // An in-flow footnote is anchored to its own marker; floats and the
+            // like aren't anchored to the distributed frame at all.
+            let anchor = if prunable { elem.location() } else { None };
+
             // Process the footnote.
-            match self.footnote(elem, &mut regions, flow_need, migratable) {
+            match self.footnote(elem, &mut regions, flow_need, migratable, anchor) {
                 // The footnote was already processed or queued.
                 Ok(()) => {}
                 // First handle more footnotes before relayouting.
@@ -421,12 +466,18 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
     }
 
     /// Handles a single footnote.
+    ///
+    /// `anchor` is the in-flow marker location this footnote is tied to (its
+    /// own for an in-flow footnote, its in-flow ancestor's for a nested one),
+    /// or `None` if it isn't anchored to the distributed frame and must never
+    /// be pruned.
     fn footnote(
         &mut self,
         elem: Packed<FootnoteElem>,
         regions: &mut Regions,
         flow_need: Abs,
         migratable: bool,
+        anchor: Option<Location>,
     ) -> FlowResult<()> {
         // Ignore reference footnotes and already processed ones.
         let loc = elem.location().unwrap();
@@ -438,7 +489,7 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
         // well. We don't want to disrupt the order.
         let area = &mut self.column_insertions;
         if self.footnote_spill.is_some() || !self.footnote_queue.is_empty() {
-            self.footnote_queue.push(elem);
+            self.footnote_queue.push((anchor, elem));
             return Ok(());
         }
 
@@ -504,7 +555,7 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
             if migratable && regions.may_progress() {
                 return Err(Stop::Finish(false));
             } else if regions.may_progress() || !flow_need.is_zero() {
-                self.footnote_queue.push(elem);
+                self.footnote_queue.push((anchor, elem));
                 return Ok(());
             }
         }
@@ -515,8 +566,11 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
             regions.size.y -= separator_need;
         }
 
-        // Save the footnote's frame.
-        area.push_footnote(self.config, first);
+        // Save the footnote's frame. We remember its own location (to drop its
+        // skip if pruned) and its anchor marker so that, if the content holding
+        // the anchor later migrates to the next region, we can detect that the
+        // entry was stranded here and lay it out again next to its marker.
+        area.push_footnote(self.config, first, Some(loc), anchor);
         area.skips.push(loc);
         regions.size.y -= note_need;
 
@@ -525,9 +579,12 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
             self.footnote_spill = Some(iter);
         }
 
-        // Lay out nested footnotes.
+        // Lay out nested footnotes. A nested footnote's marker lives inside
+        // this footnote's entry, not in the distributed flow frame, so it
+        // inherits this footnote's anchor: it shares its parent's fate and is
+        // pruned together with it if that in-flow marker migrates.
         for (_, note) in nested {
-            match self.footnote(note, regions, flow_need, migratable) {
+            match self.footnote(note, regions, flow_need, migratable, anchor) {
                 // This footnote was already processed or queued.
                 Ok(_) => {}
                 // Footnotes always request a relayout when processed for the
@@ -559,9 +616,10 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
         let separator = layout_footnote_separator(self.engine, self.config, base)?;
         area.push_footnote_separator(self.config, separator);
 
-        // Save the footnote's frame.
+        // Save the footnote's frame. A spill continuation's marker lives on an
+        // earlier page, so it carries no skip and must never be pruned.
         let frame = iter.next().unwrap();
-        area.push_footnote(self.config, frame);
+        area.push_footnote(self.config, frame, None, None);
 
         // Save the spill.
         if !iter.as_slice().is_empty() {
@@ -569,6 +627,107 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
         }
 
         Ok(())
+    }
+
+    /// Removes committed in-flow footnotes whose marker is no longer present in
+    /// the distributed `inner` frame.
+    ///
+    /// A footnote's entry is reserved in the column's bottom insertion area as
+    /// soon as its marker is laid out, and that reservation survives the
+    /// relayouts triggered by the footnote itself. However, the content holding
+    /// the marker may still migrate to the next region afterwards --- e.g. when
+    /// a sticky block or orphan prevention moves it, possibly because the
+    /// reserved footnote space is what reduced the room left for it. When that
+    /// happens, the entry would be stranded on a page before its reference. We
+    /// detect those footnotes by checking whether their marker survived in the
+    /// distributed frame and, if not, drop them (along with their skip and any
+    /// spill) so they are laid out again next to their migrated marker on the
+    /// next page.
+    fn prune_orphaned_footnotes(&mut self, inner: &Frame) {
+        // Nothing to do unless there are prunable (anchored) footnotes, whether
+        // committed or merely queued.
+        let has_committed =
+            self.column_insertions.footnotes.iter().any(|s| s.anchor.is_some());
+        let has_queued = self.footnote_queue.iter().any(|(anchor, _)| anchor.is_some());
+        if !has_committed && !has_queued {
+            return;
+        }
+
+        // Collect the marker locations that survived in the distributed frame.
+        let mut markers = FxHashSet::default();
+        collect_footnote_markers(inner, &mut markers);
+
+        // Drop queued footnotes whose anchor migrated out of the column. They
+        // were only deferred (didn't fit, or sit behind a spill), so promoting
+        // them would lay them out before their marker is redistributed --- and
+        // with `anchor: None` they could then never be pruned again. Dropping
+        // them lets them be re-encountered, in order and re-anchored, when their
+        // content is redistributed. Queued notes with no anchor (floats, notes
+        // carried from earlier pages) or whose marker stayed are kept.
+        self.footnote_queue.retain(|(anchor, _)| match anchor {
+            Some(a) => markers.contains(a),
+            None => true,
+        });
+
+        if !has_committed {
+            return;
+        }
+
+        let config = self.config;
+        let area = &mut self.column_insertions;
+
+        // The spill, if any, belongs to the last committed footnote, since once
+        // a spill exists later footnotes are queued rather than committed. We
+        // remember whether that particular footnote is being pruned, so we only
+        // drop the spill then --- it might instead belong to a kept footnote
+        // (e.g. a float's long footnote committed after a pruned in-flow one).
+        let spill_pruned = area
+            .footnotes
+            .last()
+            .is_some_and(|slot| matches!(slot.anchor, Some(a) if !markers.contains(&a)));
+
+        // We reclaim each pruned footnote's reserved *height* below, but
+        // deliberately not its contribution to `width`. That width is a
+        // monotonic max whose only reader is `distribute`'s `finalize`
+        // (`used.x.set_max(insertion_width())`), which already ran to build
+        // `inner` before this after-the-fact pass, and `column_insertions` is
+        // reset for the next column. So a now-too-wide `width` is never observed
+        // again; recomputing it here would be dead code.
+        let mut pruned = false;
+        let mut kept = Vec::with_capacity(area.footnotes.len());
+        for slot in std::mem::take(&mut area.footnotes) {
+            match slot.anchor {
+                Some(anchor) if !markers.contains(&anchor) => {
+                    // The anchor migrated away: reclaim the reserved space, drop
+                    // the footnote's skip so it is processed again next region,
+                    // and forget the entry.
+                    area.bottom_size -= Insertions::footnote_height(config, &slot.frame);
+                    if let Some(skip) = slot.skip {
+                        area.skips.retain(|&l| l != skip);
+                    }
+                    pruned = true;
+                }
+                _ => kept.push(slot),
+            }
+        }
+        area.footnotes = kept;
+
+        if !pruned {
+            return;
+        }
+
+        // If no footnotes remain, the separator is no longer needed.
+        if area.footnotes.is_empty()
+            && let Some(separator) = area.footnote_separator.take()
+        {
+            area.bottom_size -= Insertions::separator_height(config, &separator);
+        }
+
+        // If the spill's footnote was pruned, the footnote will be laid out from
+        // scratch next to its migrated marker, so discard the now-stale spill.
+        if spill_pruned {
+            self.footnote_spill = None;
+        }
     }
 
     /// Checks whether an insertion was already processed and doesn't need to be
@@ -582,6 +741,104 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
     /// The amount of width needed by insertions.
     pub fn insertion_width(&self) -> Abs {
         self.column_insertions.width.max(self.page_insertions.width)
+    }
+
+    /// The footnote marker locations present in `frame`.
+    ///
+    /// Lets a caller keep just the markers of a placed frame it no longer needs
+    /// to retain (see `Item::Fr`), so they can later be fed to
+    /// [`Self::migrating_footnote_height`] as already-placed markers.
+    pub fn footnote_markers(&self, frame: &Frame) -> Vec<Location> {
+        let mut markers = FxHashSet::default();
+        collect_footnote_markers(frame, &mut markers);
+        markers.into_iter().collect()
+    }
+
+    /// The height reserved by footnotes that would migrate to the next region
+    /// along with content whose markers haven't been placed yet.
+    ///
+    /// `placed_frames` are the frames already distributed into the current
+    /// region, `placed_tags` the tags already flushed there, and
+    /// `placed_markers` marker locations already collected from placed content
+    /// whose frame the caller didn't retain (fractional blocks). A footnote
+    /// marker may live in any of them. A committed footnote stays here if its
+    /// marker is among them, and migrates otherwise (its marker is in content
+    /// that would move to the next region). Only the migrating footnotes — plus
+    /// the separator they'd need — will be reserved again in the next region.
+    ///
+    /// This is used both to discount the next region's space when predicting
+    /// whether moving content there would actually give it more room (orphan
+    /// prevention), and to add that space back when checking whether a sticky
+    /// block is effectively at the top of the region (sticky migration).
+    /// Without it, content carrying a footnote whose group can never fit
+    /// alongside it would migrate forever, since the next region looks roomier
+    /// than it really is once the footnote follows along.
+    pub fn migrating_footnote_height<'f, 't, 'l>(
+        &self,
+        placed_frames: impl IntoIterator<Item = &'f Frame>,
+        placed_tags: impl IntoIterator<Item = &'t Tag>,
+        placed_markers: impl IntoIterator<Item = &'l Location>,
+    ) -> Abs {
+        let area = &self.column_insertions;
+
+        // Fast path: no anchored footnotes means nothing migrates with content.
+        if area.footnotes.iter().all(|slot| slot.anchor.is_none()) {
+            return Abs::zero();
+        }
+
+        // Markers present in the already-placed content; their footnotes stay.
+        // A marker usually sits inside a frame (the footnote renders an inline
+        // number, which lands in a line frame), but it can also have been flushed
+        // as a bare tag: when a footnote renders no inline marker — an unresolved
+        // reference on an early introspection pass, or a user `show footnote:
+        // none`-style rule — its introspection tags aren't absorbed into a
+        // paragraph and reach the flow as a standalone tag, which `footnotes`
+        // still commits. It may also have been pre-collected from a placed frame
+        // the caller didn't retain (a fractional block).
+        let mut markers = FxHashSet::default();
+        for frame in placed_frames {
+            collect_footnote_markers(frame, &mut markers);
+        }
+        for tag in placed_tags {
+            if let Tag::Start(elem, _) = tag
+                && let Some(note) = elem.to_packed::<FootnoteElem>()
+                && let Some(loc) = note.location()
+            {
+                markers.insert(loc);
+            }
+        }
+        markers.extend(placed_markers);
+
+        // This deliberately measures only what each footnote reserves *in the
+        // current region* --- for a spilled note, its committed first frame, not
+        // the continuation frames waiting in `footnote_spill`. Those belong to a
+        // later region, so counting them here would overshoot: the sticky use in
+        // `distribute` adds this back to `regions.size.y` to see if migrating
+        // helps, and an inflated value flips `may_progress` on and migrates
+        // forever. `footnote-prune-drops-queued` (a sticky heading carrying a
+        // spilling footnote) is the regression guard for exactly this.
+        let mut total = Abs::zero();
+        let mut any = false;
+        for slot in &area.footnotes {
+            if let Some(anchor) = slot.anchor
+                && !markers.contains(&anchor)
+            {
+                total += Insertions::footnote_height(self.config, &slot.frame);
+                any = true;
+            }
+        }
+
+        // The migrating footnotes need a separator on the next region too. When
+        // there are migrating footnotes there is always a separator (it is
+        // pushed with the first committed footnote), so `map_or`'s zero branch
+        // is unreachable here.
+        if any {
+            total += area.footnote_separator.as_ref().map_or(Abs::zero(), |sep| {
+                Insertions::separator_height(self.config, sep)
+            });
+        }
+
+        total
     }
 }
 
@@ -633,12 +890,29 @@ fn layout_footnote(
 struct Insertions<'a, 'b> {
     top_floats: Vec<(&'b PlacedChild<'a>, Frame)>,
     bottom_floats: Vec<(&'b PlacedChild<'a>, Frame)>,
-    footnotes: Vec<Frame>,
+    footnotes: Vec<FootnoteSlot>,
     footnote_separator: Option<Frame>,
     top_size: Abs,
     bottom_size: Abs,
     width: Abs,
     skips: Vec<Location>,
+}
+
+/// A footnote entry frame placed in the bottom insertion area.
+struct FootnoteSlot {
+    /// The laid out footnote entry frame.
+    frame: Frame,
+    /// This footnote's own marker location, used to drop its skip entry when it
+    /// is pruned. `None` for spill continuations, which register no skip.
+    skip: Option<Location>,
+    /// The in-flow marker that anchors this footnote: its own marker for a
+    /// top-level in-flow footnote, or its in-flow ancestor's marker for a
+    /// nested one (so a nested note is pruned together with its parent). If
+    /// that marker migrates away from the column, the footnote is pruned.
+    /// `None` for footnotes not anchored to the distributed frame (spill
+    /// continuations, footnotes queued from earlier pages, and floats), which
+    /// must never be pruned.
+    anchor: Option<Location>,
 }
 
 impl<'a, 'b> Insertions<'a, 'b> {
@@ -663,17 +937,43 @@ impl<'a, 'b> Insertions<'a, 'b> {
         }
     }
 
+    /// The height a footnote entry frame reserves in the bottom area: its own
+    /// height plus the gap that precedes it.
+    ///
+    /// Single source of truth for that arithmetic: [`Self::push_footnote`] adds
+    /// it, [`Composer::prune_orphaned_footnotes`] subtracts it when undoing a
+    /// reservation, and [`Composer::migrating_footnote_height`] re-derives it
+    /// when accounting for notes that would migrate. These reserve/unreserve/
+    /// predict paths must agree, so they all go through here rather than
+    /// repeating `gap + frame.height()`.
+    fn footnote_height(config: &Config, frame: &Frame) -> Abs {
+        config.footnote.gap + frame.height()
+    }
+
+    /// The height the footnote separator reserves in the bottom area: its own
+    /// height plus the clearance that precedes it. Single source of truth,
+    /// mirroring [`Self::footnote_height`].
+    fn separator_height(config: &Config, frame: &Frame) -> Abs {
+        config.footnote.clearance + frame.height()
+    }
+
     /// Add a footnote to the bottom area.
-    fn push_footnote(&mut self, config: &Config, frame: Frame) {
+    fn push_footnote(
+        &mut self,
+        config: &Config,
+        frame: Frame,
+        skip: Option<Location>,
+        anchor: Option<Location>,
+    ) {
         self.width.set_max(frame.width());
-        self.bottom_size += config.footnote.gap + frame.height();
-        self.footnotes.push(frame);
+        self.bottom_size += Self::footnote_height(config, &frame);
+        self.footnotes.push(FootnoteSlot { frame, skip, anchor });
     }
 
     /// Add a footnote separator to the bottom area.
     fn push_footnote_separator(&mut self, config: &Config, frame: Frame) {
         self.width.set_max(frame.width());
-        self.bottom_size += config.footnote.clearance + frame.height();
+        self.bottom_size += Self::separator_height(config, &frame);
         self.footnote_separator = Some(frame);
     }
 
@@ -746,11 +1046,11 @@ impl<'a, 'b> Insertions<'a, 'b> {
             output.push_frame(Point::with_y(y), frame);
         }
 
-        for frame in self.footnotes {
+        for slot in self.footnotes {
             offset_bottom += config.footnote.gap;
             let y = offset_bottom;
-            offset_bottom += frame.height();
-            output.push_frame(Point::with_y(y), frame);
+            offset_bottom += slot.frame.height();
+            output.push_frame(Point::with_y(y), slot.frame);
         }
 
         output
@@ -922,6 +1222,19 @@ fn layout_line_number(
     frame.translate(Point::with_y(-frame.baseline()));
 
     Ok(frame)
+}
+
+/// Collects into `markers` the locations of all footnote markers present in
+/// `frame`. Shared by [`Composer::prune_orphaned_footnotes`] and
+/// [`Composer::migrating_footnote_height`], which must agree on how footnote
+/// markers are identified for pruning and migration accounting to stay
+/// consistent.
+fn collect_footnote_markers(frame: &Frame, markers: &mut FxHashSet<Location>) {
+    for (_, elem) in find_in_frame::<FootnoteElem>(frame) {
+        if let Some(loc) = elem.location() {
+            markers.insert(loc);
+        }
+    }
 }
 
 /// Collect all matching elements and their vertical positions in the frame.

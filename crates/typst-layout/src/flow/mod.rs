@@ -35,7 +35,7 @@ use self::block::{layout_multi_block, layout_single_block};
 use self::collect::{
     Child, LineChild, MultiChild, MultiSpill, PlacedChild, SingleChild, collect,
 };
-use self::compose::{Composer, compose};
+use self::compose::{Composer, FootnoteOptions, compose};
 use self::distribute::distribute;
 
 /// Lays out content into a single region, producing a single frame.
