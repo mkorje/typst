@@ -1,3 +1,5 @@
+use std::convert::Infallible;
+
 use ecow::EcoVec;
 use typst_library::diag::{SourceDiagnostic, SourceResult};
 use typst_library::introspection::Tag;
@@ -14,16 +16,22 @@ use super::{Child, LineChild, MultiChild, MultiSpill, PlacedChild, SingleChild, 
 
 /// The result type for internal distributor control flow.
 ///
-/// The `Err(_)` variant incorporate control flow events for finishing and
-/// relayouting regions.
-type FlowResult<T> = Result<T, Stop>;
+/// The `Err(_)` variant incorporates control flow events for finishing or
+/// relayouting regions, reaching a simulation target, and fatal errors.
+type FlowResult<P> = Result<(), Stop<P>>;
 
 /// A control flow event during distribution.
-enum Stop {
+///
+/// The type parameter `P` controls the [`TargetReached`](Self::TargetReached)
+/// variant. When `P = Infallible`, the variant is empty.
+enum Stop<P> {
     /// Indicates that the current subregion should be finished.
     Finish(Finish),
     /// Indicates that the given scope should be relayouted.
     Relayout(PlacementScope),
+    /// Indicates that distribution reached non-empty in-flow content at or
+    /// after its target child.
+    TargetReached(P),
     /// A fatal error.
     Error(EcoVec<SourceDiagnostic>),
 }
@@ -31,32 +39,129 @@ enum Stop {
 /// The reason why the current region should finish.
 enum Finish {
     /// A lack of space.
-    Soft,
+    Soft(Breakpoint),
     /// An explicit break.
     Forced,
 }
 
-impl From<EcoVec<SourceDiagnostic>> for Stop {
+/// How precisely the child that stopped distribution can be identified.
+#[derive(Clone, Copy)]
+enum Breakpoint {
+    /// The current work head is the child that stopped distribution.
+    Child,
+    /// The stopping point cannot be reproduced safely.
+    Unknown,
+}
+
+/// An optional target that stops distribution once it or a following child
+/// produces non-empty in-flow content.
+struct DistributionTarget<'a, 'b, P>(Option<(TargetState<'a, 'b>, P)>);
+
+/// Progress towards a distribution target.
+enum TargetState<'a, 'b> {
+    /// The child that stopped distribution in the source region.
+    Child(&'b Child<'a>),
+    /// The target child was empty, so the next non-empty in-flow frame is the
+    /// content to which the sticky suffix attaches.
+    Following,
+}
+
+impl<'a, 'b> DistributionTarget<'a, 'b, ()> {
+    /// Stop after reaching non-empty content at or after the target child.
+    fn new(target: &'b Child<'a>) -> Self {
+        Self(Some((TargetState::Child(target), ())))
+    }
+}
+
+impl DistributionTarget<'_, '_, Infallible> {
+    /// Do not stop at a target child.
+    const NONE: Self = Self(None);
+}
+
+impl<'a, 'b, P> DistributionTarget<'a, 'b, P> {
+    /// Advance the target after processing its child.
+    fn advance(&mut self, child: &'b Child<'a>) {
+        let Some((target, reached)) = self.0.take() else {
+            return;
+        };
+
+        let target = match target {
+            TargetState::Child(target) if std::ptr::eq(target, child) => {
+                TargetState::Following
+            }
+            target => target,
+        };
+        self.0 = Some((target, reached));
+    }
+
+    /// Return the completion token if the work head satisfies the target.
+    fn take_reached(&mut self, head: Option<&'b Child<'a>>) -> Option<P> {
+        let (target, reached) = self.0.take()?;
+        match target {
+            TargetState::Child(target)
+                if head.is_some_and(|head| std::ptr::eq(target, head)) =>
+            {
+                Some(reached)
+            }
+            TargetState::Following => Some(reached),
+            target @ TargetState::Child(..) => {
+                self.0 = Some((target, reached));
+                None
+            }
+        }
+    }
+
+    /// Stop if a non-empty in-flow frame satisfies the target.
+    fn stop_if_reached(
+        &mut self,
+        head: Option<&'b Child<'a>>,
+        frame: &Frame,
+        sticky: bool,
+        fits: bool,
+    ) -> FlowResult<P> {
+        if frame.is_empty() {
+            return Ok(());
+        }
+
+        let Some(reached) = self.take_reached(head) else {
+            return Ok(());
+        };
+
+        // An overflowing sticky target is still part of the suffix whose
+        // migration is being considered. It cannot by itself demonstrate that
+        // migration helps, unlike an attached non-sticky target that the real
+        // terminal region would accept through its normal overflow path.
+        if sticky && !fits {
+            return Err(Stop::Finish(Finish::Soft(Breakpoint::Child)));
+        }
+
+        Err(Stop::TargetReached(reached))
+    }
+}
+
+impl<P> From<EcoVec<SourceDiagnostic>> for Stop<P> {
     fn from(error: EcoVec<SourceDiagnostic>) -> Self {
         Self::Error(error)
     }
 }
 
-impl From<FootnoteStop> for Stop {
+impl<P> From<FootnoteStop> for Stop<P> {
     fn from(stop: FootnoteStop) -> Self {
         match stop {
             FootnoteStop::Relayout(()) => Self::Relayout(PlacementScope::Column),
-            FootnoteStop::MigrateOrigin(()) => Self::Finish(Finish::Soft),
+            FootnoteStop::MigrateOrigin(()) => {
+                Self::Finish(Finish::Soft(Breakpoint::Child))
+            }
             FootnoteStop::Error(error) => Self::Error(error),
         }
     }
 }
 
-impl From<FloatStop> for Stop {
+impl<P> From<FloatStop> for Stop<P> {
     fn from(stop: FloatStop) -> Self {
         match stop {
             FloatStop::Relayout(scope) => Self::Relayout(scope),
-            FloatStop::MigrateOrigin(()) => Self::Finish(Finish::Soft),
+            FloatStop::MigrateOrigin(()) => Self::Finish(Finish::Soft(Breakpoint::Child)),
             FloatStop::Error(error) => Self::Error(error),
         }
     }
@@ -70,36 +175,53 @@ pub fn distribute(
     regions: Regions,
     balancing_target: Option<Abs>,
 ) -> RelayoutResult<(Frame, Abs)> {
-    let mut distributor = Distributor {
+    let mut distributor = Distributor::<Infallible>::new(
         composer,
         regions,
-        items: vec![],
-        used: Size::zero(),
-        target: balancing_target,
-        sticky: None,
-        stickable: None,
-    };
+        balancing_target,
+        DistributionTarget::NONE,
+    );
     let init = distributor.snapshot();
-    let forced = match distributor.run() {
-        Ok(()) => distributor.composer.work.done(),
-        Err(Stop::Finish(finish)) => matches!(finish, Finish::Forced),
+    let (forced, breakpoint) = match distributor.run() {
+        Ok(()) => (distributor.composer.work.done(), Breakpoint::Unknown),
+        Err(Stop::Finish(Finish::Soft(breakpoint))) => (false, breakpoint),
+        Err(Stop::Finish(Finish::Forced)) => (true, Breakpoint::Unknown),
         Err(Stop::Relayout(scope)) => {
             return Err(RelayoutStop::Relayout(scope));
         }
+        Err(Stop::TargetReached(never)) => match never {},
         Err(Stop::Error(error)) => {
             return Err(RelayoutStop::Error(error));
         }
     };
     let region = Region::new(regions.size, regions.expand);
     distributor
-        .finalize(region, init, forced)
+        .finalize(region, init, forced, breakpoint)
         .map_err(RelayoutStop::Error)
+}
+
+/// Distribute until the target child or, if it is empty, a following child
+/// produces non-empty in-flow content.
+pub(super) fn distribute_until<'a, 'b>(
+    composer: &mut Composer<'a, 'b, '_, '_>,
+    regions: Regions,
+    target: &'b Child<'a>,
+) -> RelayoutResult<bool> {
+    let mut distributor =
+        Distributor::<()>::new(composer, regions, None, DistributionTarget::new(target));
+
+    match distributor.run() {
+        Err(Stop::TargetReached(())) => Ok(true),
+        Ok(()) | Err(Stop::Finish(_)) => Ok(false),
+        Err(Stop::Relayout(scope)) => Err(RelayoutStop::Relayout(scope)),
+        Err(Stop::Error(error)) => Err(RelayoutStop::Error(error)),
+    }
 }
 
 /// State for distribution.
 ///
 /// See [Composer] regarding lifetimes.
-struct Distributor<'a, 'b, 'x, 'y, 'z> {
+struct Distributor<'a, 'b, 'x, 'y, 'z, P> {
     /// The composer that is used to handle insertions.
     composer: &'z mut Composer<'a, 'b, 'x, 'y>,
     /// Regions which are continuously shrunk as new items are added.
@@ -109,7 +231,7 @@ struct Distributor<'a, 'b, 'x, 'y, 'z> {
     /// Size used by laid out items.
     used: Size,
     /// The target height for column balancing.
-    target: Option<Abs>,
+    balancing_target: Option<Abs>,
     /// A snapshot which can be restored to migrate a suffix of sticky blocks to
     /// the next region.
     sticky: Option<DistributionSnapshot<'a, 'b>>,
@@ -133,6 +255,8 @@ struct Distributor<'a, 'b, 'x, 'y, 'z> {
     /// blocks are supposed to always be in the same page as the subsequent
     /// frame, but that is impossible in that case, which is thus pathological.
     stickable: Option<bool>,
+    /// The target that can stop distribution early.
+    target: DistributionTarget<'a, 'b, P>,
 }
 
 /// A snapshot of the distribution state.
@@ -174,18 +298,38 @@ impl Item<'_, '_> {
     }
 }
 
-impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
+impl<'a, 'b, 'x, 'y, 'z, P> Distributor<'a, 'b, 'x, 'y, 'z, P> {
+    /// Create a distributor, optionally stopping at a target child.
+    fn new(
+        composer: &'z mut Composer<'a, 'b, 'x, 'y>,
+        regions: Regions<'z>,
+        balancing_target: Option<Abs>,
+        target: DistributionTarget<'a, 'b, P>,
+    ) -> Self {
+        Self {
+            composer,
+            regions,
+            items: vec![],
+            used: Size::zero(),
+            balancing_target,
+            sticky: None,
+            stickable: None,
+            target,
+        }
+    }
+
     /// Distributes content into the region.
-    fn run(&mut self) -> FlowResult<()> {
+    fn run(&mut self) -> FlowResult<P> {
         // First, handle spill of a breakable block.
         if let Some(spill) = self.composer.work.spill.take() {
             self.multi_spill(spill)?;
         }
 
-        // If spill are taken care of, process children until no space is left
-        // or no children are left.
+        // After handling any spill, process children until no space or no
+        // children are left.
         while let Some(child) = self.composer.work.head() {
             self.child(child)?;
+            self.target.advance(child);
             self.composer.work.advance();
         }
 
@@ -198,8 +342,10 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
     /// - Returns `Err(Stop::Finish)` if a region break should be triggered.
     /// - Returns `Err(Stop::Relayout(_))` if the region needs to be relayouted
     ///   due to an insertion (float/footnote).
+    /// - Returns `Err(Stop::TargetReached(_))` if a simulation reached its
+    ///   target.
     /// - Returns `Err(Stop::Error(_))` if there was a fatal error.
-    fn child(&mut self, child: &'b Child<'a>) -> FlowResult<()> {
+    fn child(&mut self, child: &'b Child<'a>) -> FlowResult<P> {
         match child {
             Child::Tag(tag) => self.tag(tag),
             Child::Rel(amount, weakness) => self.rel(*amount, *weakness),
@@ -353,18 +499,18 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
     pub fn fits(&self, amount: Abs) -> bool {
         self.regions.size.y.fits(amount)
             && self
-                .target
+                .balancing_target
                 // Add elements as long as the balancing target is not reached. By not including
                 // the amount itself here, we avoid protruding items to cumulate in the last column.
                 .is_none_or(|target| target.fits(self.used.y))
     }
 
     /// Processes a line of a paragraph.
-    fn line(&mut self, line: &'b LineChild) -> FlowResult<()> {
+    fn line(&mut self, line: &'b LineChild) -> FlowResult<P> {
         // If the line doesn't fit and a followup region may improve things,
         // finish the region.
         if !self.fits(line.frame.height()) && self.regions.may_progress() {
-            return Err(Stop::Finish(Finish::Soft));
+            return Err(Stop::Finish(Finish::Soft(Breakpoint::Child)));
         }
 
         // If the line's need, which includes its own height and that of
@@ -378,14 +524,14 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
                 .nth(1)
                 .is_some_and(|region| region.y.fits(line.need))
         {
-            return Err(Stop::Finish(Finish::Soft));
+            return Err(Stop::Finish(Finish::Soft(Breakpoint::Child)));
         }
 
         self.frame(line.frame.clone(), line.align, false, false)
     }
 
     /// Processes an unbreakable block.
-    fn single(&mut self, single: &'b SingleChild<'a>) -> FlowResult<()> {
+    fn single(&mut self, single: &'b SingleChild<'a>) -> FlowResult<P> {
         // Lay out the block.
         let frame = single.layout(
             self.composer.engine,
@@ -401,6 +547,12 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
                 false,
                 Migration::ALLOW,
             )?;
+            self.target.stop_if_reached(
+                self.composer.work.head(),
+                &frame,
+                single.sticky,
+                true,
+            )?;
             self.flush_tags();
             self.items.push(Item::Fr(fr, 0, Some(single)));
             return Ok(());
@@ -409,18 +561,18 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         // If the block doesn't fit and a followup region may improve things,
         // finish the region.
         if !self.fits(frame.height()) && self.regions.may_progress() {
-            return Err(Stop::Finish(Finish::Soft));
+            return Err(Stop::Finish(Finish::Soft(Breakpoint::Child)));
         }
 
         self.frame(frame, single.align, single.sticky, false)
     }
 
     /// Processes a breakable block.
-    fn multi(&mut self, multi: &'b MultiChild<'a>) -> FlowResult<()> {
+    fn multi(&mut self, multi: &'b MultiChild<'a>) -> FlowResult<P> {
         let mut pod = self.regions;
 
         // For column balancing, reduce the region size for layout.
-        if let Some(lim) = self.target {
+        if let Some(lim) = self.balancing_target {
             let remaining = lim - self.used.y;
             pod.size.y.set_min(remaining);
         }
@@ -428,7 +580,7 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         // Skip directly if the region is already (over)full. `line` and
         // `single` implicitly do this through their `fits` checks.
         if pod.is_full() {
-            return Err(Stop::Finish(Finish::Soft));
+            return Err(Stop::Finish(Finish::Soft(Breakpoint::Child)));
         }
 
         // Lay out the block.
@@ -440,7 +592,7 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
             // If the first frame is empty, but there are non-empty frames in
             // the spill, the whole child should be put in the next region to
             // avoid any invisible orphans at the end of this region.
-            return Err(Stop::Finish(Finish::Soft));
+            return Err(Stop::Finish(Finish::Soft(Breakpoint::Child)));
         }
 
         self.frame(frame, multi.align, multi.sticky, true)?;
@@ -450,18 +602,18 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         if let Some(spill) = spill {
             self.composer.work.spill = Some(spill);
             self.composer.work.advance();
-            return Err(Stop::Finish(Finish::Soft));
+            return Err(Stop::Finish(Finish::Soft(Breakpoint::Unknown)));
         }
 
         Ok(())
     }
 
     /// Processes spillover from a breakable block.
-    fn multi_spill(&mut self, spill: MultiSpill<'a, 'b>) -> FlowResult<()> {
+    fn multi_spill(&mut self, spill: MultiSpill<'a, 'b>) -> FlowResult<P> {
         let mut pod = self.regions;
 
         // For column balancing, reduce the region size for layout.
-        if let Some(lim) = self.target {
+        if let Some(lim) = self.balancing_target {
             let remaining = lim - self.used.y;
             pod.size.y.set_min(remaining);
         }
@@ -469,7 +621,7 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         // Skip directly if the region is already (over)full.
         if pod.is_full() {
             self.composer.work.spill = Some(spill);
-            return Err(Stop::Finish(Finish::Soft));
+            return Err(Stop::Finish(Finish::Soft(Breakpoint::Unknown)));
         }
 
         // Lay out the spilled remains.
@@ -481,7 +633,7 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         // region.
         if let Some(spill) = spill {
             self.composer.work.spill = Some(spill);
-            return Err(Stop::Finish(Finish::Soft));
+            return Err(Stop::Finish(Finish::Soft(Breakpoint::Unknown)));
         }
 
         Ok(())
@@ -494,7 +646,9 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         align: Axes<FixedAlignment>,
         sticky: bool,
         breakable: bool,
-    ) -> FlowResult<()> {
+    ) -> FlowResult<P> {
+        let fits = self.fits(frame.height());
+
         // If the frame is sticky and we haven't remembered a preceding sticky
         // element, make a checkpoint which we can restore should we end on
         // this sticky element.
@@ -532,6 +686,8 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
             breakable,
             Migration::ALLOW,
         )?;
+        self.target
+            .stop_if_reached(self.composer.work.head(), &frame, sticky, fits)?;
 
         if !sticky && !frame.is_empty() {
             // If the frame isn't sticky, we can forget a previous snapshot. We
@@ -550,7 +706,7 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
     }
 
     /// Processes an absolutely or floatingly placed child.
-    fn placed(&mut self, placed: &'b PlacedChild<'a>) -> FlowResult<()> {
+    fn placed(&mut self, placed: &'b PlacedChild<'a>) -> FlowResult<P> {
         if placed.float {
             // If the element is floatingly placed, let the composer handle it.
             // It might require relayout because the area available for
@@ -582,17 +738,17 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
     }
 
     /// Processes a float flush.
-    fn flush(&mut self) -> FlowResult<()> {
+    fn flush(&mut self) -> FlowResult<P> {
         // If there are still pending floats, finish the region instead of
         // adding more content to it.
         if !self.composer.work.floats.is_empty() {
-            return Err(Stop::Finish(Finish::Soft));
+            return Err(Stop::Finish(Finish::Soft(Breakpoint::Child)));
         }
         Ok(())
     }
 
     /// Processes a column break.
-    fn break_(&mut self, weak: bool) -> FlowResult<()> {
+    fn break_(&mut self, weak: bool) -> FlowResult<P> {
         // If there is a region to break into, break into it.
         if (!weak || !self.items.is_empty())
             && (!self.regions.backlog.is_empty() || self.regions.last.is_some())
@@ -611,6 +767,7 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         region: Region,
         init: DistributionSnapshot<'a, 'b>,
         forced: bool,
+        breakpoint: Breakpoint,
     ) -> SourceResult<(Frame, Abs)> {
         if forced {
             // If this is the very end of the flow, flush pending tags.
@@ -621,8 +778,13 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         } else {
             // If we ended on a sticky block, but are not yet at the end of
             // the flow, restore the saved checkpoint to move the sticky
-            // suffix to the next region.
-            if let Some(snapshot) = self.sticky.take() {
+            // suffix to the next region. Only do so if the suffix and the child
+            // that stopped distribution fit there, or if a later region may
+            // improve the fit. Otherwise, moving the suffix cannot improve the
+            // layout.
+            if let Some(snapshot) = self.sticky.take()
+                && self.should_restore_sticky(&snapshot, breakpoint)?
+            {
                 self.restore(snapshot);
             }
         }
@@ -744,6 +906,42 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
             items: self.items.len(),
             used: self.used,
         }
+    }
+
+    /// Whether restoring a sticky suffix can improve the layout.
+    fn should_restore_sticky(
+        &mut self,
+        snapshot: &DistributionSnapshot<'a, 'b>,
+        breakpoint: Breakpoint,
+    ) -> SourceResult<bool> {
+        if !self.regions.may_break() {
+            return Ok(false);
+        }
+
+        if matches!(breakpoint, Breakpoint::Unknown) {
+            return Ok(true);
+        }
+
+        let Some(target) = self.composer.work.head() else {
+            return Ok(true);
+        };
+
+        let mut destination = self.regions;
+        destination.next();
+
+        // A failed simulation only rules out migration to the immediate
+        // destination. If a later region may improve the fit, retain the
+        // conservative behavior so the sticky suffix can migrate through the
+        // immediate region.
+        if destination.may_progress() {
+            return Ok(true);
+        }
+
+        self.composer.simulate_sticky_migration(
+            snapshot.work.clone(),
+            target,
+            destination,
+        )
     }
 
     /// Restore a snapshot of the work and items.

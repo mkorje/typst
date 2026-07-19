@@ -200,6 +200,290 @@ E
 #block[F]
 #block[G]
 
+--- block-sticky-grid-many paged ---
+// Ensure that sticky blocks are not moved when moving can't improve their fit.
+#set page(height: 45pt, width: 4cm, margin: 10pt)
+#grid(columns: 1)[
+  #set block(spacing: 0pt)
+  #set block(height: 10pt, width: 100%)
+  #set block(sticky: true, breakable: false)
+  #block(fill: aqua)
+  #block(fill: green)
+  #block(fill: blue)
+  #block(fill: red)
+]
+
+--- block-sticky-full-region-breakable-child paged ---
+// Ensure that a sticky block migrates when a breakable child is reached after
+// the current region has been filled exactly.
+#set page(height: 30pt, margin: 0pt)
+#set block(width: 100%, spacing: 0pt, breakable: false)
+
+#block(height: 20pt, fill: red)
+#block(height: 10pt, fill: green, sticky: true)
+#block(height: 10pt, fill: blue, breakable: true)
+
+--- block-sticky-current-insertion paged ---
+// Ensure that insertions finalized with the current region are not reserved
+// again when deciding whether a sticky block fits in the next region.
+#set page(height: 100pt, margin: 0pt)
+#set block(width: 100%, spacing: 0pt)
+
+#place(bottom, float: true, clearance: 0pt, block(height: 80pt, fill: red))
+#block(height: 10pt, fill: green, breakable: false, sticky: true)
+#block(height: 15pt, fill: blue, breakable: false)
+
+--- block-sticky-later-region paged ---
+// Ensure that a sticky block migrates through a short column when it can fit
+// together with its child on a later, full-height page.
+#set page(height: 100pt, width: 100pt, margin: 0pt, columns: 2)
+#set block(width: 100%, spacing: 0pt, breakable: false)
+
+#place(
+  bottom,
+  float: true,
+  scope: "parent",
+  clearance: 0pt,
+  block(height: 70pt, fill: red),
+)
+#block(height: 20pt, fill: aqua)
+#block(height: 10pt, fill: green, sticky: true)
+#block(height: 40pt, fill: blue)
+
+--- block-sticky-queued-destination-insertion paged ---
+// Ensure that a queued insertion shortening the immediate destination does not
+// prevent a sticky block from migrating with its child to a later full region.
+#set page(height: 100pt, width: 100pt, margin: 0pt)
+#set block(width: 100%, spacing: 0pt, breakable: false)
+
+#block(height: 60pt, fill: aqua)
+#place(top, float: true, clearance: 0pt, block(height: 70pt, fill: red))
+#block(height: 20pt, fill: green, sticky: true)[#metadata(none) <sticky>]
+#block(height: 30pt, fill: blue)[#metadata(none) <child>]
+
+#context {
+  test(
+    (locate(<sticky>).page(), locate(<child>).page()),
+    (3, 3),
+  )
+}
+
+--- block-sticky-empty-breakpoint-child paged ---
+// Ensure that an empty child at the breakpoint does not detach a sticky block
+// from the next non-empty child.
+#set page(height: 30pt, margin: 0pt)
+#set block(width: 100%, spacing: 0pt, breakable: false)
+
+#block(height: 20pt, fill: red)
+#block(height: 10pt, fill: green, sticky: true)
+#block(height: 10pt)
+#block(height: 10pt, fill: blue)
+
+--- block-sticky-simulation-finite-fallback paged ---
+// Ensure that simulating a spilling breakable block does not expose an
+// artificial infinite region to nested layout callbacks.
+#set page(height: 30pt, margin: 0pt)
+#set block(width: 100%, spacing: 0pt, breakable: false)
+
+#block(height: 20pt, fill: red)
+#block(height: 10pt, fill: green, sticky: true)
+#block(breakable: true)[
+  #block(height: 25pt, fill: blue)
+  #layout(size => {
+    assert(size.height < 100pt)
+    []
+  })
+]
+
+--- block-sticky-finite-terminal-region paged ---
+// Ensure that a finite final region retains its normal overflow behavior when
+// deciding whether a sticky block can migrate with its attached child.
+#set page(height: 30pt, width: 100pt, margin: 0pt)
+#set block(width: 100%, spacing: 0pt, breakable: false)
+
+#block(height: 60pt, breakable: true)[
+  #block(height: 20pt)
+  #block(height: 10pt, sticky: true)[#metadata(none) <finite-sticky>]
+  #block(height: 25pt)[#metadata(none) <finite-child>]
+]
+
+#context {
+  test(
+    (locate(<finite-sticky>).page(), locate(<finite-child>).page()),
+    (2, 2),
+  )
+}
+
+--- block-sticky-pending-footnote-spill paged ---
+// Ensure that sticky migration simulation carries a pending multi-region
+// footnote spill, so later footnotes remain queued behind it.
+#set page(height: 100pt, width: 100pt, margin: 0pt)
+#set block(width: 100%, spacing: 0pt, breakable: false)
+#set footnote.entry(separator: none, clearance: 0pt, gap: 0pt, indent: 0pt)
+#show footnote.entry: it => it.note.body
+
+#block(height: 0pt)[
+  #footnote[
+    #block(height: 80pt)
+    #block(height: 80pt)
+    #block(height: 30pt)
+  ]
+]
+#block(height: 5pt, fill: aqua)
+#block(height: 10pt, fill: green, sticky: true)[
+  #metadata(none) <spill-sticky>
+]
+#block(height: 10pt, fill: blue)[
+  #metadata(none) <spill-target>
+  #footnote[#block(height: 90pt)]
+]
+
+#context {
+  test(
+    (locate(<spill-sticky>).page(), locate(<spill-target>).page()),
+    (2, 2),
+  )
+}
+
+--- block-sticky-pending-footnote-queue paged ---
+// Ensure that sticky migration simulation carries a pending footnote queue,
+// so later footnotes remain queued behind it.
+#set page(height: 100pt, width: 100pt, margin: 0pt)
+#set block(width: 100%, spacing: 0pt, breakable: false)
+#set footnote.entry(separator: none, clearance: 0pt, gap: 0pt, indent: 0pt)
+#show footnote.entry: it => it.note.body
+
+#block(height: 85pt, fill: aqua)
+#block(height: 0pt, breakable: true)[
+  #footnote[
+    #block(height: 80pt)
+    #block(height: 80pt)
+    #block(height: 30pt)
+  ]
+]
+#block(height: 10pt, fill: green, sticky: true)[
+  #metadata(none) <queue-sticky>
+]
+#block(height: 10pt, fill: blue)[
+  #metadata(none) <queue-target>
+  #footnote[#block(height: 90pt)]
+]
+
+#context {
+  test(
+    (locate(<queue-sticky>).page(), locate(<queue-target>).page()),
+    (2, 2),
+  )
+}
+
+--- block-sticky-empty-breakpoint-fr paged ---
+// Ensure that a fractional block satisfies the distribution target after an
+// empty breakpoint child, allowing the sticky block to migrate with it.
+#set page(height: 30pt, margin: 0pt)
+#set block(width: 100%, spacing: 0pt, breakable: false)
+
+#block(height: 20pt, fill: red)
+#block(height: 10pt, fill: green, sticky: true)[#metadata(none) <sticky>]
+#block(height: 10pt)
+#block(height: 1fr, fill: blue)[#metadata(none) <following>]
+
+#context test(locate(<sticky>).page(), locate(<following>).page())
+
+--- block-sticky-fr-footnote-migration paged ---
+// Ensure that footnote migration from a fractional block retains a precise
+// breakpoint, so a sticky block stays put when migrating cannot help it fit.
+#set page(height: 30pt, width: 100pt, margin: 0pt)
+#set text(size: 5pt)
+#set block(width: 100%, spacing: 0pt, breakable: false)
+
+#block(height: 1pt, fill: red)
+#block(height: 29pt, fill: green, sticky: true)[#metadata(none) <fr-sticky>]
+#block(height: 1fr, fill: blue)[
+  X#metadata(none) <fr-following>
+  #footnote(block(height: 10pt)[N])
+]
+
+#context {
+  test(
+    (locate(<fr-sticky>).page(), locate(<fr-following>).page()),
+    (1, 2),
+  )
+}
+
+--- block-sticky-float-footnote-migration paged ---
+// Ensure that footnote migration from a float retains a precise breakpoint,
+// so a sticky block stays put when migrating cannot help it fit.
+#set page(height: 30pt, width: 100pt, margin: 0pt)
+#set text(size: 5pt)
+#set block(width: 100%, spacing: 0pt, breakable: false)
+
+#block(height: 1pt, fill: red)
+#block(height: 29pt, fill: green, sticky: true)[#metadata(none) <float-sticky>]
+// The float itself fits in the exhausted region, so its footnote is what
+// requests migration of the origin.
+#place(
+  top,
+  float: true,
+  clearance: 0pt,
+  block(height: 0pt)[
+    #metadata(none) <float-origin>
+    #footnote(block(height: 10pt)[N])
+  ],
+)
+#block(height: 1pt, fill: blue)[#metadata(none) <float-following>]
+
+#context {
+  test(
+    (
+      locate(<float-sticky>).page(),
+      locate(<float-origin>).page(),
+      locate(<float-following>).page(),
+    ),
+    (1, 2, 2),
+  )
+}
+
+--- block-sticky-place-flush paged ---
+// Ensure that a float flush, which produces no in-flow frame, does not detach a
+// sticky block from its following in-flow child while a queued float is flushed.
+#set page(height: 100pt, width: 100pt, margin: 0pt)
+#set block(width: 100%, spacing: 0pt, breakable: false)
+
+#block(height: 60pt, fill: aqua)
+#place(
+  top,
+  float: true,
+  clearance: 0pt,
+  block(height: 70pt, fill: red)[#metadata(none) <flushed-float>],
+)
+#block(height: 20pt, fill: green, sticky: true)[#metadata(none) <flush-sticky>]
+#place.flush()
+#block(height: 30pt, fill: blue)[#metadata(none) <flush-following>]
+
+#context {
+  test(
+    (
+      locate(<flushed-float>).page(),
+      locate(<flush-sticky>).page(),
+      locate(<flush-following>).page(),
+    ),
+    (2, 3, 3),
+  )
+}
+
+--- block-sticky-relative-child-need paged ---
+// Ensure that a relative child is measured against the region it would migrate
+// to, rather than against its enclosing block's full height.
+#set page(height: 30pt, margin: 0pt)
+#set block(width: 100%, spacing: 0pt, breakable: false)
+
+#block(height: 10pt, fill: red)
+#block(height: 50pt, breakable: true, fill: fuchsia)[
+  #block(height: 0pt, fill: green)
+  #block(height: 10pt, sticky: true, fill: blue)
+  #block(height: 50%, fill: red)
+]
+
 --- block-sticky-colbreak paged ---
 A
 #block(sticky: true)[B]
