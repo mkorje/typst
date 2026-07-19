@@ -200,6 +200,19 @@ E
 #block[F]
 #block[G]
 
+--- block-sticky-grid-many paged ---
+// Ensure that sticky blocks are not moved when moving can't improve their fit.
+#set page(height: 45pt, width: 4cm, margin: 10pt)
+#grid(columns: 1)[
+  #set block(spacing: 0pt)
+  #set block(height: 10pt, width: 100%)
+  #set block(sticky: true, breakable: false)
+  #block(fill: aqua)
+  #block(fill: green)
+  #block(fill: blue)
+  #block(fill: red)
+]
+
 --- block-sticky-colbreak paged ---
 A
 #block(sticky: true)[B]

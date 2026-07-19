@@ -744,6 +744,11 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
     pub fn insertion_width(&self) -> Abs {
         self.column_insertions.width.max(self.page_insertions.width)
     }
+
+    /// The amount of height occupied by insertions in the current column.
+    pub fn insertion_height(&self) -> Abs {
+        self.column_insertions.height()
+    }
 }
 
 /// Lay out the footnote separator, typically a line.

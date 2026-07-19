@@ -28,7 +28,10 @@ enum Stop {
 /// The reason why the current region should finish.
 enum Finish {
     /// Finish due to lack of space or pending work.
-    Soft,
+    Soft {
+        /// The height required by the child that did not fit, if known.
+        need: Option<Abs>,
+    },
     /// Finish due to an explicit break.
     Forced,
 }
@@ -43,7 +46,7 @@ impl From<FootnoteStop> for Stop {
     fn from(stop: FootnoteStop) -> Self {
         match stop {
             FootnoteStop::Relayout(()) => Self::Relayout(PlacementScope::Column),
-            FootnoteStop::MigrateOrigin(()) => Self::Finish(Finish::Soft),
+            FootnoteStop::MigrateOrigin(()) => Self::Finish(Finish::Soft { need: None }),
             FootnoteStop::Error(error) => Self::Error(error),
         }
     }
@@ -53,7 +56,7 @@ impl From<FloatStop> for Stop {
     fn from(stop: FloatStop) -> Self {
         match stop {
             FloatStop::Relayout(scope) => Self::Relayout(scope),
-            FloatStop::MigrateOrigin(()) => Self::Finish(Finish::Soft),
+            FloatStop::MigrateOrigin(()) => Self::Finish(Finish::Soft { need: None }),
             FloatStop::Error(error) => Self::Error(error),
         }
     }
@@ -77,9 +80,10 @@ pub fn distribute(
         stickable: None,
     };
     let init = distributor.snapshot();
-    let forced = match distributor.run() {
-        Ok(()) => distributor.composer.work.done(),
-        Err(Stop::Finish(finish)) => matches!(finish, Finish::Forced),
+    let (forced, stop_need) = match distributor.run() {
+        Ok(()) => (distributor.composer.work.done(), None),
+        Err(Stop::Finish(Finish::Soft { need })) => (false, need),
+        Err(Stop::Finish(Finish::Forced)) => (true, None),
         Err(Stop::Relayout(scope)) => {
             return Err(RelayoutStop::Relayout(scope));
         }
@@ -89,7 +93,7 @@ pub fn distribute(
     };
     let region = Region::new(regions.size, regions.expand);
     distributor
-        .finalize(region, init, forced)
+        .finalize(region, init, forced, stop_need)
         .map_err(RelayoutStop::Error)
 }
 
@@ -361,7 +365,8 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         // If the line doesn't fit and a followup region may improve things,
         // finish the region.
         if !self.fits(line.frame.height()) && self.regions.may_progress() {
-            return Err(Stop::Finish(Finish::Soft));
+            let need = line.frame.height().max(line.need);
+            return Err(Stop::Finish(Finish::Soft { need: Some(need) }));
         }
 
         // If the line's need, which includes its own height and that of
@@ -375,7 +380,7 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
                 .nth(1)
                 .is_some_and(|region| region.y.fits(line.need))
         {
-            return Err(Stop::Finish(Finish::Soft));
+            return Err(Stop::Finish(Finish::Soft { need: Some(line.need) }));
         }
 
         self.frame(line.frame.clone(), line.align, false, false)
@@ -406,7 +411,7 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         // If the block doesn't fit and a followup region may improve things,
         // finish the region.
         if !self.fits(frame.height()) && self.regions.may_progress() {
-            return Err(Stop::Finish(Finish::Soft));
+            return Err(Stop::Finish(Finish::Soft { need: Some(frame.height()) }));
         }
 
         self.frame(frame, single.align, single.sticky, false)
@@ -425,7 +430,7 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         // Skip directly if the region is already (over)full. `line` and
         // `single` implicitly do this through their `fits` checks.
         if pod.is_full() {
-            return Err(Stop::Finish(Finish::Soft));
+            return Err(Stop::Finish(Finish::Soft { need: None }));
         }
 
         // Lay out the block.
@@ -437,7 +442,7 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
             // If the first frame is empty, but there are non-empty frames in
             // the spill, the whole child should be put in the next region to
             // avoid any invisible orphans at the end of this region.
-            return Err(Stop::Finish(Finish::Soft));
+            return Err(Stop::Finish(Finish::Soft { need: Some(frame.height()) }));
         }
 
         self.frame(frame, multi.align, multi.sticky, true)?;
@@ -447,7 +452,7 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         if let Some(spill) = spill {
             self.composer.work.spill = Some(spill);
             self.composer.work.advance();
-            return Err(Stop::Finish(Finish::Soft));
+            return Err(Stop::Finish(Finish::Soft { need: None }));
         }
 
         Ok(())
@@ -466,7 +471,7 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         // Skip directly if the region is already (over)full.
         if pod.is_full() {
             self.composer.work.spill = Some(spill);
-            return Err(Stop::Finish(Finish::Soft));
+            return Err(Stop::Finish(Finish::Soft { need: None }));
         }
 
         // Lay out the spilled remains.
@@ -478,7 +483,7 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         // region.
         if let Some(spill) = spill {
             self.composer.work.spill = Some(spill);
-            return Err(Stop::Finish(Finish::Soft));
+            return Err(Stop::Finish(Finish::Soft { need: None }));
         }
 
         Ok(())
@@ -522,13 +527,19 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         // preceding sticky blocks attached to it need to migrate to the next
         // region together. Resetting the sticky state first would then strand
         // those sticky blocks in this region.
-        self.composer.footnotes(
+        match self.composer.footnotes(
             &self.regions,
             &frame,
             frame.height(),
             breakable,
             Migration::ALLOW,
-        )?;
+        ) {
+            Ok(()) => {}
+            Err(FootnoteStop::MigrateOrigin(())) => {
+                return Err(Stop::Finish(Finish::Soft { need: Some(frame.height()) }));
+            }
+            Err(stop) => return Err(stop.into()),
+        }
 
         if !sticky && !frame.is_empty() {
             // If the frame isn't sticky, we can forget a previous snapshot. We
@@ -583,7 +594,7 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         // If there are still pending floats, finish the region instead of
         // adding more content to it.
         if !self.composer.work.floats.is_empty() {
-            return Err(Stop::Finish(Finish::Soft));
+            return Err(Stop::Finish(Finish::Soft { need: None }));
         }
         Ok(())
     }
@@ -608,6 +619,7 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         region: Region,
         init: DistributionSnapshot<'a, 'b>,
         forced: bool,
+        stop_need: Option<Abs>,
     ) -> SourceResult<(Frame, Abs)> {
         if forced {
             // If this is the very end of the flow, flush pending tags.
@@ -618,8 +630,12 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         } else {
             // If we ended on a sticky block, but are not yet at the end of
             // the flow, restore the saved checkpoint to move the sticky
-            // suffix to the next region.
-            if let Some(snapshot) = self.sticky.take() {
+            // suffix to the next region. Only do so if the suffix and the child
+            // that stopped distribution fit in the next region; otherwise,
+            // moving the suffix cannot improve the layout.
+            if let Some(snapshot) = self.sticky.take()
+                && self.should_restore_sticky(&snapshot, stop_need)
+            {
                 self.restore(snapshot);
             }
         }
@@ -741,6 +757,23 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
             items: self.items.len(),
             used: self.used,
         }
+    }
+
+    /// Whether restoring a sticky suffix can improve the layout.
+    fn should_restore_sticky(
+        &self,
+        snapshot: &DistributionSnapshot<'a, 'b>,
+        stop_need: Option<Abs>,
+    ) -> bool {
+        self.regions
+            .iter()
+            .nth(1)
+            .zip(stop_need)
+            .is_some_and(|(next, stop_need)| {
+                let sticky_need = self.used.y - snapshot.used.y;
+                let available = next.y - self.composer.insertion_height();
+                available.fits(sticky_need + stop_need)
+            })
     }
 
     /// Restore a snapshot of the work and items.

@@ -62,6 +62,7 @@ f98a3722ee4445ff9af65fd87a79385d block-sticky
 698fe05f2e4327ac8c45118f79d746b1 block-sticky-alone
 6141b30d35a16f508ef1572fd8a05e50 block-sticky-breakable
 d79d2be2d52ae40c7e51df655c2dfcf4 block-sticky-colbreak
+7d50393df5abfa1067c28d11d15f0ffc block-sticky-grid-many
 ee64bf3aa4adc633f4435cb2a142cc5d block-sticky-many
 53f3077ff3d1349081281932240e05b1 box
 52ae12c54f6e8f1cbe6b8a89ea2609d6 box-clip-outset
