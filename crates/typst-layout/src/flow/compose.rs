@@ -80,6 +80,36 @@ pub(super) type FootnoteStop<M = ()> = InsertionStop<(), M>;
 /// A control flow event during float handling.
 pub(super) type FloatStop<M = ()> = InsertionStop<PlacementScope, M>;
 
+impl<M> From<FootnoteStop<M>> for FloatStop<M> {
+    fn from(stop: FootnoteStop<M>) -> Self {
+        match stop {
+            FootnoteStop::Relayout(()) => Self::Relayout(PlacementScope::Column),
+            FootnoteStop::MigrateOrigin(migration) => Self::MigrateOrigin(migration),
+            FootnoteStop::Error(error) => Self::Error(error),
+        }
+    }
+}
+
+impl From<FootnoteStop<Infallible>> for RelayoutStop {
+    fn from(stop: FootnoteStop<Infallible>) -> Self {
+        match stop {
+            FootnoteStop::Relayout(()) => Self::Relayout(PlacementScope::Column),
+            FootnoteStop::MigrateOrigin(never) => match never {},
+            FootnoteStop::Error(error) => Self::Error(error),
+        }
+    }
+}
+
+impl From<FloatStop<Infallible>> for RelayoutStop {
+    fn from(stop: FloatStop<Infallible>) -> Self {
+        match stop {
+            FloatStop::Relayout(scope) => Self::Relayout(scope),
+            FloatStop::MigrateOrigin(never) => match never {},
+            FloatStop::Error(error) => Self::Error(error),
+        }
+    }
+}
+
 /// Whether a footnote's origin frame may migrate to the next region.
 #[derive(Clone, Copy)]
 pub(super) struct Migration<M>(Option<M>);
@@ -355,35 +385,12 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
     ) -> RelayoutResult<(Frame, Abs)> {
         // Process pending footnotes.
         for note in std::mem::take(&mut self.work.footnotes) {
-            match self.footnote(
-                note,
-                &mut regions.clone(),
-                Abs::zero(),
-                Migration::FORBID,
-            ) {
-                Ok(()) => {}
-                Err(FootnoteStop::Relayout(())) => {
-                    return Err(RelayoutStop::Relayout(PlacementScope::Column));
-                }
-                Err(FootnoteStop::MigrateOrigin(never)) => match never {},
-                Err(FootnoteStop::Error(error)) => {
-                    return Err(RelayoutStop::Error(error));
-                }
-            }
+            self.footnote(note, &mut regions.clone(), Abs::zero(), Migration::FORBID)?;
         }
 
         // Process pending floats.
         for placed in std::mem::take(&mut self.work.floats) {
-            match self.float(placed, &regions, false, Migration::FORBID) {
-                Ok(()) => {}
-                Err(FloatStop::Relayout(scope)) => {
-                    return Err(RelayoutStop::Relayout(scope));
-                }
-                Err(FloatStop::MigrateOrigin(never)) => match never {},
-                Err(FloatStop::Error(error)) => {
-                    return Err(RelayoutStop::Error(error));
-                }
-            }
+            self.float(placed, &regions, false, Migration::FORBID)?;
         }
 
         distribute(self, regions, balancing_target)
@@ -460,18 +467,7 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
         }
 
         // Handle footnotes in the float.
-        match self.footnotes(regions, &frame, need, false, migration) {
-            Ok(()) => {}
-            Err(FootnoteStop::Relayout(())) => {
-                return Err(FloatStop::Relayout(PlacementScope::Column));
-            }
-            Err(FootnoteStop::MigrateOrigin(m)) => {
-                return Err(FloatStop::MigrateOrigin(m));
-            }
-            Err(FootnoteStop::Error(error)) => {
-                return Err(FloatStop::Error(error));
-            }
-        }
+        self.footnotes(regions, &frame, need, false, migration)?;
 
         // Determine the float's vertical alignment. We can unwrap the inner
         // `Option` because `Custom(None)` is checked for during collection.
