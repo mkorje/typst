@@ -116,9 +116,71 @@ impl<'a> Engine<'a> {
         output
     }
 
+    /// Runs `f` as a speculative layout: a throwaway computation used to look
+    /// ahead without committing to it.
+    ///
+    /// The speculation runs on a child engine with an isolated [`Sink`], so its
+    /// diagnostics are discarded rather than leaking into the real output. The
+    /// returned [`Speculation`] reports observations about what the computation
+    /// depended on, which the caller uses to decide whether its result can be
+    /// trusted.
+    ///
+    /// Those observations are gathered from introspections recorded into the
+    /// isolated sink. Memoized computations replay their recorded
+    /// introspections into the sink on a cache hit, so the sink stays accurate
+    /// through them — but a caller-side cache that returns a result *without*
+    /// invoking the memoized computation would hide its introspection, and `f`
+    /// must avoid such a cache.
+    pub fn speculate<T>(
+        &mut self,
+        f: impl FnOnce(&mut Engine) -> SourceResult<T>,
+    ) -> SourceResult<(T, Speculation)> {
+        let Engine {
+            world, library, introspector, traced, ref route, ..
+        } = *self;
+        let mut sink = Sink::new();
+        let output = {
+            let mut engine = Engine {
+                world,
+                library,
+                introspector,
+                traced,
+                sink: sink.track_mut(),
+                route: route.clone(),
+            };
+            f(&mut engine)?
+        };
+
+        // A speculation observes the introspector at the content's real
+        // location. Page-dependent introspection is therefore only valid at the
+        // real placement and cannot be trusted for a hypothetical one.
+        let page_dependent =
+            sink.introspections().iter().any(|intro| intro.is_page_dependent());
+
+        Ok((output, Speculation { page_dependent }))
+    }
+
     /// Create a struct that implements [`crate::foundations::BindingGuard`].
     pub fn binding_guard(&'_ mut self, span: Span) -> NormalBindingGuard<'_, 'a> {
         NormalBindingGuard { engine: self, span }
+    }
+}
+
+/// Observations gathered while running a [speculative layout](Engine::speculate)
+/// that determine whether its result can be trusted.
+pub struct Speculation {
+    /// Whether the speculation observed page-dependent introspection.
+    page_dependent: bool,
+}
+
+impl Speculation {
+    /// Whether the speculation's result depends on the physical page of
+    /// source-bound content.
+    ///
+    /// When this holds, the result was computed at the content's real page and
+    /// is not valid for a hypothetical placement on another page.
+    pub fn is_page_dependent(&self) -> bool {
+        self.page_dependent
     }
 }
 

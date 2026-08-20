@@ -808,6 +808,10 @@ impl Introspect for CounterAtIntrospection {
         Ok(state)
     }
 
+    fn is_page_dependent(&self) -> bool {
+        self.0.is_page()
+    }
+
     fn diagnose(&self, history: &History<Self::Output>) -> SourceDiagnostic {
         format_convergence_warning(&self.0, self.2, history)
     }
@@ -849,6 +853,10 @@ impl Introspect for CounterBothIntrospection {
         Ok(CounterState(smallvec![at_state.first(), final_state.first()]))
     }
 
+    fn is_page_dependent(&self) -> bool {
+        self.0.is_page()
+    }
+
     fn diagnose(&self, history: &History<Self::Output>) -> SourceDiagnostic {
         format_convergence_warning(&self.0, self.2, history)
     }
@@ -879,6 +887,10 @@ impl Introspect for CounterFinalIntrospection {
             state.step(NonZeroUsize::ONE, delta as u64);
         }
         Ok(state)
+    }
+
+    fn is_page_dependent(&self) -> bool {
+        self.0.is_page()
     }
 
     fn diagnose(&self, history: &History<Self::Output>) -> SourceDiagnostic {

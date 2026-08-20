@@ -134,6 +134,12 @@ pub trait Introspect: Debug + PartialEq + Hash + Send + Sync + Sized + 'static {
         introspector: Tracked<dyn Introspector + '_>,
     ) -> Self::Output;
 
+    /// Whether the output can change when the same logical location moves to
+    /// another page.
+    fn is_page_dependent(&self) -> bool {
+        false
+    }
+
     /// Produces a diagnostic for non-convergence given the history of its
     /// output values.
     fn diagnose(&self, history: &History<Self::Output>) -> SourceDiagnostic;
@@ -153,6 +159,12 @@ impl Introspection {
     {
         Self(Arc::new(inner))
     }
+
+    /// Whether this introspection can change when the same logical location
+    /// moves to another page.
+    pub fn is_page_dependent(&self) -> bool {
+        self.0.is_page_dependent()
+    }
 }
 
 impl PartialEq for Introspection {
@@ -167,6 +179,7 @@ trait Bounds: Debug + Send + Sync + Any + 'static {
         world: Tracked<dyn World + '_>,
         introspectors: [&dyn Introspector; INSTANCES],
     ) -> Option<SourceDiagnostic>;
+    fn is_page_dependent(&self) -> bool;
     fn dyn_eq(&self, other: &Introspection) -> bool;
     fn dyn_hash(&self, state: &mut dyn Hasher);
 }
@@ -184,6 +197,10 @@ where
             self.introspect(engine, introspector)
         });
         (!history.converged()).then(|| self.diagnose(&history))
+    }
+
+    fn is_page_dependent(&self) -> bool {
+        Introspect::is_page_dependent(self)
     }
 
     fn dyn_eq(&self, other: &Introspection) -> bool {

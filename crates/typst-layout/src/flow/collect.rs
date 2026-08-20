@@ -388,8 +388,13 @@ pub struct SingleChild<'a> {
 
 impl SingleChild<'_> {
     /// Build the child's frame given the region's base size.
-    pub fn layout(&self, engine: &mut Engine, region: Region) -> SourceResult<Frame> {
-        self.cell.get_or_init(region, |mut region| {
+    pub fn layout(
+        &self,
+        engine: &mut Engine,
+        region: Region,
+        cache: CacheMode,
+    ) -> SourceResult<Frame> {
+        self.cell.get_or_init(region, cache, |mut region| {
             // Vertical expansion is only kept if this block is the only child.
             region.expand.y &= self.alone;
             layout_single_impl(
@@ -458,8 +463,9 @@ impl<'a> MultiChild<'a> {
         &'b self,
         engine: &mut Engine,
         regions: Regions,
+        cache: CacheMode,
     ) -> SourceResult<(Frame, Option<MultiSpill<'a, 'b>>)> {
-        let fragment = self.layout_full(engine, regions)?;
+        let fragment = self.layout_full(engine, regions, cache)?;
         let exist_non_empty_frame = fragment.iter().any(|f| !f.is_empty());
 
         // Extract the first frame.
@@ -488,8 +494,9 @@ impl<'a> MultiChild<'a> {
         &self,
         engine: &mut Engine,
         regions: Regions,
+        cache: CacheMode,
     ) -> SourceResult<Fragment> {
-        self.cell.get_or_init(regions, |mut regions| {
+        self.cell.get_or_init(regions, cache, |mut regions| {
             // Vertical expansion is only kept if this block is the only child.
             regions.expand.y &= self.alone;
             layout_multi_impl(
@@ -557,6 +564,7 @@ impl MultiSpill<'_, '_> {
         mut self,
         engine: &mut Engine,
         regions: Regions,
+        cache: CacheMode,
     ) -> SourceResult<(Frame, Option<Self>)> {
         // The first region becomes unchangeable and committed to our backlog.
         self.backlog.push(regions.size.y);
@@ -585,7 +593,7 @@ impl MultiSpill<'_, '_> {
         // Extract the not-yet-processed frames.
         let mut frames = self
             .multi
-            .layout_full(engine, pod)?
+            .layout_full(engine, pod, cache)?
             .into_iter()
             .skip(self.backlog.len());
 
@@ -635,8 +643,13 @@ pub struct PlacedChild<'a> {
 
 impl PlacedChild<'_> {
     /// Build the child's frame given the region's base size.
-    pub fn layout(&self, engine: &mut Engine, base: Size) -> SourceResult<Frame> {
-        self.cell.get_or_init(base, |base| {
+    pub fn layout(
+        &self,
+        engine: &mut Engine,
+        base: Size,
+        cache: CacheMode,
+    ) -> SourceResult<Frame> {
+        self.cell.get_or_init(base, cache, |base| {
             let align = self.alignment.unwrap_or_else(|| Alignment::CENTER);
             let aligned = AlignElem::alignment.set(align).wrap();
             let styles = self.styles.chain(&aligned);
@@ -671,10 +684,26 @@ impl PlacedChild<'_> {
 /// Wraps a parameterized computation and caches its latest output.
 ///
 /// - When the computation is performed multiple times consecutively with the
-///   same argument, reuses the cache.
+///   same argument, reuses the cache unless explicitly bypassed.
 /// - When the argument changes, the new output is cached.
 #[derive(Clone)]
 struct CachedCell<T>(RefCell<Option<(u128, T)>>);
+
+/// Whether a flow child's local layout cache ([`CachedCell`]) may be used.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum CacheMode {
+    /// Reuse and update the cache normally.
+    Reuse,
+    /// Compute without reading or updating the cache.
+    ///
+    /// Used for speculative layouts. The [`CachedCell`] fast path sits in front
+    /// of the comemo-memoized layout and, unlike comemo, does not replay
+    /// recorded introspections on a hit. A hit would thus return the right frame
+    /// while hiding the introspection that [`Engine::speculate`] relies on to
+    /// detect page-dependence. Bypassing defers to comemo, which surfaces that
+    /// introspection into the isolated sink whether it recomputes or replays.
+    Bypass,
+}
 
 impl<T> CachedCell<T> {
     /// Create an empty cached cell.
@@ -682,13 +711,17 @@ impl<T> CachedCell<T> {
         Self(RefCell::new(None))
     }
 
-    /// Perform the computation `f` with caching.
-    fn get_or_init<F, I>(&self, input: I, f: F) -> T
+    /// Perform the computation `f` according to the cache mode.
+    fn get_or_init<F, I>(&self, input: I, cache: CacheMode, f: F) -> T
     where
         I: Hash,
         T: Clone,
         F: FnOnce(I) -> T,
     {
+        if cache == CacheMode::Bypass {
+            return f(input);
+        }
+
         let input_hash = typst_utils::hash128(&input);
 
         let mut slot = self.0.borrow_mut();

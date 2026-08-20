@@ -183,6 +183,10 @@ impl Introspect for PositionIntrospection {
         }
     }
 
+    fn is_page_dependent(&self) -> bool {
+        true
+    }
+
     fn diagnose(&self, history: &History<Self::Output>) -> SourceDiagnostic {
         format_convergence_warning(
             self.0,
@@ -219,6 +223,10 @@ impl Introspect for PageIntrospection {
         introspector.page(self.0).unwrap_or(NonZeroUsize::ONE)
     }
 
+    fn is_page_dependent(&self) -> bool {
+        true
+    }
+
     fn diagnose(&self, history: &History<Self::Output>) -> SourceDiagnostic {
         format_convergence_warning(
             self.0,
@@ -244,6 +252,10 @@ impl Introspect for PageNumberingIntrospection {
         introspector: Tracked<dyn Introspector + '_>,
     ) -> Self::Output {
         introspector.page_numbering(self.0).cloned()
+    }
+
+    fn is_page_dependent(&self) -> bool {
+        true
     }
 
     fn diagnose(&self, history: &History<Self::Output>) -> SourceDiagnostic {
@@ -275,6 +287,10 @@ impl Introspect for PageSupplementIntrospection {
         // Maybe returns `None` here instead of empty content if no supplement
         // was specified?
         introspector.page_supplement(self.0).cloned().unwrap_or_default()
+    }
+
+    fn is_page_dependent(&self) -> bool {
+        true
     }
 
     fn diagnose(&self, history: &History<Self::Output>) -> SourceDiagnostic {

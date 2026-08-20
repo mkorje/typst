@@ -536,6 +536,7 @@ impl<'a, 'b, 'x, 'y, 'z, P> Distributor<'a, 'b, 'x, 'y, 'z, P> {
         let frame = single.layout(
             self.composer.engine,
             Region::new(self.regions.base(), self.regions.expand),
+            self.composer.child_cache(),
         )?;
 
         // Handle fractionally sized blocks.
@@ -584,7 +585,8 @@ impl<'a, 'b, 'x, 'y, 'z, P> Distributor<'a, 'b, 'x, 'y, 'z, P> {
         }
 
         // Lay out the block.
-        let (frame, spill) = multi.layout(self.composer.engine, pod)?;
+        let (frame, spill) =
+            multi.layout(self.composer.engine, pod, self.composer.child_cache())?;
         if frame.is_empty()
             && spill.as_ref().is_some_and(|s| s.exist_non_empty_frame)
             && self.regions.may_progress()
@@ -626,7 +628,8 @@ impl<'a, 'b, 'x, 'y, 'z, P> Distributor<'a, 'b, 'x, 'y, 'z, P> {
 
         // Lay out the spilled remains.
         let align = spill.align();
-        let (frame, spill) = spill.layout(self.composer.engine, pod)?;
+        let (frame, spill) =
+            spill.layout(self.composer.engine, pod, self.composer.child_cache())?;
         self.frame(frame, align, false, true)?;
 
         // If there's still more, save it into the `spill` and finish the
@@ -723,7 +726,11 @@ impl<'a, 'b, 'x, 'y, 'z, P> Distributor<'a, 'b, 'x, 'y, 'z, P> {
             )?;
             self.use_height(weak_spacing);
         } else {
-            let frame = placed.layout(self.composer.engine, self.regions.base())?;
+            let frame = placed.layout(
+                self.composer.engine,
+                self.regions.base(),
+                self.composer.child_cache(),
+            )?;
             self.composer.footnotes(
                 &self.regions,
                 &frame,
@@ -817,7 +824,11 @@ impl<'a, 'b, 'x, 'y, 'z, P> Distributor<'a, 'b, 'x, 'y, 'z, P> {
                 let Item::Fr(v, _, Some(single)) = item else { continue };
                 let length = v.share(frs, fr_space);
                 let pod = Region::new(Size::new(region.size.x, length), region.expand);
-                let frame = single.layout(self.composer.engine, pod)?;
+                let frame = single.layout(
+                    self.composer.engine,
+                    pod,
+                    self.composer.child_cache(),
+                )?;
                 self.used.x.set_max(frame.width());
                 fr_frames.push(frame);
             }
@@ -908,20 +919,31 @@ impl<'a, 'b, 'x, 'y, 'z, P> Distributor<'a, 'b, 'x, 'y, 'z, P> {
         }
     }
 
-    /// Whether restoring a sticky suffix can improve the layout.
+    /// Whether restoring a sticky suffix to migrate it to the next region can
+    /// improve the layout.
+    ///
+    /// Migrating is the conservative default; it is only skipped when a
+    /// speculative layout of the destination can be *trusted* to show that
+    /// migration does not help. Any case the speculation cannot decide keeps
+    /// the migration.
     fn should_restore_sticky(
         &mut self,
         snapshot: &DistributionSnapshot<'a, 'b>,
         breakpoint: Breakpoint,
     ) -> SourceResult<bool> {
+        // There is no later region to migrate the suffix into.
         if !self.regions.may_break() {
             return Ok(false);
         }
 
-        if matches!(breakpoint, Breakpoint::Unknown) {
+        // Only a precisely identified stopping child can be reproduced by the
+        // speculation; without one, migrate conservatively.
+        let Breakpoint::Child = breakpoint else {
             return Ok(true);
-        }
+        };
 
+        // The flow is exhausted, so there is no attached content whose fit the
+        // speculation could evaluate.
         let Some(target) = self.composer.work.head() else {
             return Ok(true);
         };
@@ -929,10 +951,9 @@ impl<'a, 'b, 'x, 'y, 'z, P> Distributor<'a, 'b, 'x, 'y, 'z, P> {
         let mut destination = self.regions;
         destination.next();
 
-        // A failed simulation only rules out migration to the immediate
-        // destination. If a later region may improve the fit, retain the
-        // conservative behavior so the sticky suffix can migrate through the
-        // immediate region.
+        // A failed speculation only rules out migration to the immediate
+        // destination. If a later region may improve the fit, migrate so the
+        // sticky suffix can pass through the immediate region.
         if destination.may_progress() {
             return Ok(true);
         }

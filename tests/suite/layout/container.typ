@@ -223,6 +223,29 @@ E
 #block(height: 10pt, fill: green, sticky: true)
 #block(height: 10pt, fill: blue, breakable: true)
 
+--- block-sticky-contextual-simulation paged ---
+// Ensure that a destination simulation cannot reject sticky migration based on
+// contextual layout that still observes the sticky block's source location.
+#set page(height: 30pt, width: 100pt, margin: 0pt)
+// Using unbreakable blocks also exercises the full-region child layout cache.
+#set block(width: 100%, spacing: 0pt, breakable: false)
+
+#block(height: 10pt, fill: red)
+#block(sticky: true, fill: green)[
+  #metadata(none) <contextual-sticky>
+  #context block(
+    height: if counter(page).get().first() == 1 { 20pt } else { 10pt },
+  )
+]
+#block(height: 15pt, fill: blue)[#metadata(none) <contextual-child>]
+
+#context {
+  test(
+    (locate(<contextual-sticky>).page(), locate(<contextual-child>).page()),
+    (2, 2),
+  )
+}
+
 --- block-sticky-current-insertion paged ---
 // Ensure that insertions finalized with the current region are not reserved
 // again when deciding whether a sticky block fits in the next region.

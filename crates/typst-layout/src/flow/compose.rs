@@ -21,7 +21,7 @@ use typst_syntax::Span;
 use typst_utils::{NonZeroExt, Numeric};
 
 use super::distribute::{distribute, distribute_until};
-use super::{Child, Config, FlowMode, LineNumberConfig, PlacedChild, Work};
+use super::{CacheMode, Child, Config, FlowMode, LineNumberConfig, PlacedChild, Work};
 
 /// The result type for page composition.
 type PageResult<T> = Result<T, PageStop>;
@@ -175,6 +175,12 @@ pub struct Composer<'a, 'b, 'x, 'y> {
     page_insertions: Insertions<'a, 'b>,
     column_insertions: Insertions<'a, 'b>,
     column_balancing_height: Option<Abs>,
+    /// Whether this composer is running a speculative layout.
+    ///
+    /// A speculation shares its children — and thus their per-child layout
+    /// caches — with the real composer (see [`Work`]), so its child layouts must
+    /// bypass that cache; see [`CacheMode::Bypass`] for why.
+    speculative: bool,
     // These are here because they have to survive relayout (we could lose the
     // footnotes otherwise). For floats, we revisit them anyway, so it's okay to
     // use `work.floats` directly. This is not super clean; probably there's a
@@ -201,9 +207,19 @@ impl<'a, 'b, 'x, 'y> Composer<'a, 'b, 'x, 'y> {
             page_insertions: Insertions::default(),
             column_insertions: Insertions::default(),
             column_balancing_height: None,
+            speculative: false,
             footnote_spill: None,
             footnote_queue: vec![],
         }
+    }
+
+    /// The cache mode for laying out this composer's children: [`Bypass`] during
+    /// a speculation (see [`Composer::speculative`]), [`Reuse`] otherwise.
+    ///
+    /// [`Bypass`]: CacheMode::Bypass
+    /// [`Reuse`]: CacheMode::Reuse
+    pub(super) fn child_cache(&self) -> CacheMode {
+        if self.speculative { CacheMode::Bypass } else { CacheMode::Reuse }
     }
 }
 
@@ -417,14 +433,23 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
         Ok(())
     }
 
-    /// Simulate restoring a sticky suffix to determine whether it may fit with
-    /// its attached content in the destination region or a later region with
-    /// more space.
+    /// Whether a sticky suffix should migrate to the destination region,
+    /// decided by speculatively laying that region out with the suffix and its
+    /// attached content restored.
     ///
-    /// The simulation owns isolated work and insertion state, so none of its
-    /// layout decisions are committed to the real composer. A parent-scoped
-    /// relayout cannot be reproduced in this isolated column and is therefore
-    /// treated conservatively as a possible improvement.
+    /// Migration is the conservative default; the speculation may only *veto*
+    /// it (by returning `false`) when its result can be trusted: it laid the
+    /// destination out to completion, the attached content still did not fit,
+    /// and no later region could improve the fit. Every inconclusive outcome
+    /// keeps the migration so that the outer convergence loop settles it
+    /// instead:
+    ///
+    /// - A parent-scoped relayout cannot be reproduced in this isolated column.
+    /// - Page-dependent introspection observes the suffix's source page rather
+    ///   than the hypothetical destination page (see [`Engine::speculate`]).
+    ///
+    /// The speculation owns isolated work and insertion state, so none of its
+    /// layout decisions are committed to the real composer.
     pub(super) fn simulate_sticky_migration(
         &mut self,
         mut work: Work<'a, 'b>,
@@ -440,9 +465,21 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
         destination.last = destination.last.map(|_| destination.full);
 
         let column = (self.column + 1) % self.config.columns.count;
-        // A same-page destination that reaches exact simulation is the final
-        // column, for which normal composition has no balancing target. If the
-        // column wrapped instead, the new page starts without balancing state.
+
+        // A destination only reaches exact simulation when it is terminal (see
+        // the caller's `may_progress` check). For column layout that means the
+        // destination is either the final column of a page (`count - 1`) or the
+        // first column of a wrapped page (`0`) — never a middle column. This is
+        // what lets the simulation below run without a column-balancing target:
+        // the final column has none in normal composition either, and a wrapped
+        // page has not established a balancing height yet. Guard the invariant so
+        // it fails loudly if `should_restore_sticky` ever simulates a middle
+        // column (e.g. if its `may_progress` early-out is relaxed).
+        debug_assert!(
+            column == 0 || column == self.config.columns.count - 1,
+            "sticky migration simulated a middle column ({column}); it would need \
+             a column-balancing target that the simulation does not apply",
+        );
 
         // Column insertion geometry is finalized before the destination. Page
         // insertion geometry remains for a same-page destination, but its
@@ -466,27 +503,42 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
             self.page_base
         };
 
-        let mut composer =
-            Composer::new(&mut *self.engine, &mut work, self.config, column, page_base);
+        // Lay out the destination speculatively so that its diagnostics are
+        // discarded and its page-dependence is observed.
+        let config = self.config;
+        let (fits, speculation) = self.engine.speculate(move |engine| {
+            let mut composer =
+                Composer::new(engine, &mut work, config, column, page_base);
+            composer.speculative = true;
 
-        let checkpoint = composer.start_column(destination)?;
+            let checkpoint = composer.start_column(destination)?;
 
-        loop {
-            let pod = composer.available_column_region(destination);
-            // Queued insertions may have shortened only this destination on a
-            // previous simulated pass. A failed simulation then does not rule
-            // out useful migration to a later full region.
-            let may_progress = pod.may_progress();
+            loop {
+                let pod = composer.available_column_region(destination);
+                // Queued insertions may have shortened only this destination on
+                // a previous simulated pass. A failed fit then does not rule
+                // out useful migration to a later full region.
+                let may_progress = pod.may_progress();
 
-            match composer.column_contents_until(pod, target) {
-                Ok(fits) => return Ok(fits || may_progress),
-                Err(RelayoutStop::Relayout(PlacementScope::Column)) => {
-                    *composer.work = checkpoint.clone();
+                match composer.column_contents_until(pod, target) {
+                    Ok(fits) => break Ok(fits || may_progress),
+                    Err(RelayoutStop::Relayout(PlacementScope::Column)) => {
+                        *composer.work = checkpoint.clone();
+                    }
+                    // Inconclusive: a parent relayout cannot be reproduced in
+                    // this isolated column, so do not let it veto migration.
+                    Err(RelayoutStop::Relayout(PlacementScope::Parent)) => {
+                        break Ok(true);
+                    }
+                    Err(RelayoutStop::Error(error)) => break Err(error),
                 }
-                Err(RelayoutStop::Relayout(PlacementScope::Parent)) => return Ok(true),
-                Err(RelayoutStop::Error(error)) => return Err(error),
             }
-        }
+        })?;
+
+        // Logical counters, which footnotes routinely use, remain valid when
+        // content moves. Only physical page state is source-bound, and a
+        // speculation that observed it cannot be trusted to veto migration.
+        Ok(fits || speculation.is_page_dependent())
     }
 
     /// Lay out column contents until reaching non-empty content at or after the
@@ -544,7 +596,7 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
         };
 
         // Lay out the placed element.
-        let frame = placed.layout(self.engine, base)?;
+        let frame = placed.layout(self.engine, base, self.child_cache())?;
 
         // Determine the remaining space in the scope. This is exact for column
         // placement, but only an approximation for page placement.

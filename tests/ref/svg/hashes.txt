@@ -62,6 +62,7 @@ f98a3722ee4445ff9af65fd87a79385d block-sticky
 698fe05f2e4327ac8c45118f79d746b1 block-sticky-alone
 6141b30d35a16f508ef1572fd8a05e50 block-sticky-breakable
 d79d2be2d52ae40c7e51df655c2dfcf4 block-sticky-colbreak
+5dc4489a1b8a6cf96e57d2e6cfc05e70 block-sticky-contextual-simulation
 0793fb964cd8a7071eec6132c4a000da block-sticky-current-insertion
 9a179c872aad76fb8279ceef64d69703 block-sticky-empty-breakpoint-child
 9a179c872aad76fb8279ceef64d69703 block-sticky-empty-breakpoint-fr
