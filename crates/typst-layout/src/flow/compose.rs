@@ -20,8 +20,8 @@ use typst_library::pdf::ArtifactKind;
 use typst_syntax::Span;
 use typst_utils::{NonZeroExt, Numeric};
 
-use super::distribute::distribute;
-use super::{Config, FlowMode, LineNumberConfig, PlacedChild, Work};
+use super::distribute::{distribute, distribute_until};
+use super::{Child, Config, FlowMode, LineNumberConfig, PlacedChild, Work};
 
 /// The result type for page composition.
 type PageResult<T> = Result<T, PageStop>;
@@ -300,22 +300,11 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
     /// - `0`: The laid out frame.
     /// - `1`: The height actually used by the inner contents (used for column balancing logic).
     fn column(&mut self, locator: Locator, regions: Regions) -> PageResult<(Frame, Abs)> {
-        // Reset column insertion when starting a new column.
-        self.column_insertions = Insertions::default();
-
-        // Process footnote spill.
-        if let Some(spill) = self.work.footnote_spill.take() {
-            self.footnote_spill(spill, regions.base())?;
-        }
-
         // This loop can restart column layout when requested to do so by a
         // `RelayoutStop`. This happens when there is a column-scoped float.
-        let checkpoint = self.work.clone();
+        let checkpoint = self.start_column(regions)?;
         let (inner, used_height) = loop {
-            // Shrink the available space by the space used by column
-            // insertions.
-            let mut pod = regions;
-            pod.size.y -= self.column_insertions.height();
+            let pod = self.available_column_region(regions);
 
             // For column balancing, only consider space taken by floats, not footnotes
             let float_height = self.column_insertions.float_height();
@@ -366,6 +355,24 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
         Ok((output, used_height))
     }
 
+    /// Initialize state shared by all layout passes for a column and return the
+    /// work checkpoint to restore before each relayout.
+    fn start_column(&mut self, regions: Regions) -> SourceResult<Work<'a, 'b>> {
+        self.column_insertions = Insertions::default();
+
+        if let Some(spill) = self.work.footnote_spill.take() {
+            self.footnote_spill(spill, regions.base())?;
+        }
+
+        Ok(self.work.clone())
+    }
+
+    /// Return the region available to content during a column layout pass.
+    fn available_column_region<'r>(&self, mut regions: Regions<'r>) -> Regions<'r> {
+        regions.size.y -= self.column_insertions.height();
+        regions
+    }
+
     /// Lay out the inner contents of a column.
     ///
     /// Pending floats and footnotes are also laid out at this step. For those,
@@ -379,6 +386,12 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
         regions: Regions,
         balancing_target: Option<Abs>,
     ) -> RelayoutResult<(Frame, Abs)> {
+        self.prepare_column_contents(regions)?;
+        distribute(self, regions, balancing_target)
+    }
+
+    /// Process insertions that were queued before starting a column.
+    fn prepare_column_contents(&mut self, regions: Regions) -> RelayoutResult<()> {
         // Process pending footnotes.
         for note in std::mem::take(&mut self.work.footnotes) {
             self.footnote(note, &mut regions.clone(), Abs::zero(), Migration::FORBID)?;
@@ -389,7 +402,123 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
             self.float(placed, &regions, false, Migration::FORBID)?;
         }
 
-        distribute(self, regions, balancing_target)
+        Ok(())
+    }
+
+    /// Whether a suffix of sticky blocks should migrate to the next region,
+    /// decided by simulating the layout of that region with the suffix and its
+    /// attached content restored.
+    ///
+    /// Migration is the conservative default; the simulation may only *veto*
+    /// it (by returning `false`) when its result can be trusted: it laid the
+    /// next region out to completion, the attached content still did not fit,
+    /// and no later region could improve the fit. Every inconclusive outcome
+    /// keeps the migration so that the outer convergence loop settles it
+    /// instead:
+    ///
+    /// - A parent-scoped relayout cannot be reproduced in this isolated column.
+    /// - Page-dependent introspection observes the suffix's source page rather
+    ///   than the hypothetical next page.
+    ///
+    /// The simulation owns isolated work and insertion state, so none of its
+    /// layout decisions are committed to the real composer.
+    pub(super) fn simulate_sticky_migration(
+        &mut self,
+        mut work: Work<'a, 'b>,
+        target: &'b Child<'a>,
+        mut regions: Regions,
+    ) -> SourceResult<bool> {
+        // The caller only runs the simulation once the next region cannot
+        // progress: its backlog is empty and any repeating fallback has this
+        // same height. Keep that fallback because breakable children may lay
+        // out supplied regions eagerly. A final region must remain final so
+        // that its normal overflow behavior is preserved.
+        regions.backlog = &[];
+        regions.last = regions.last.map(|_| regions.full);
+
+        let column = (self.column + 1) % self.config.columns.count;
+
+        // The next region is only simulated when it is the final region (see
+        // the caller's `may_progress` check). For column layout that means it
+        // is either the final column of a page (`count - 1`) or the first
+        // column of a wrapped page (`0`) — never a middle column. This is what
+        // lets the simulation below run without a column-balancing target: the
+        // final column has none in normal composition either, and a wrapped
+        // page has not established a balancing height yet. Guard the invariant
+        // so it fails loudly if `should_restore_sticky` ever simulates a middle
+        // column (e.g. if its `may_progress` early-out is relaxed).
+        debug_assert!(
+            column == 0 || column == self.config.columns.count - 1,
+            "sticky migration simulated a middle column ({column}); it would need \
+             a column-balancing target that the simulation does not apply",
+        );
+
+        // Column insertion geometry is finalized before the next region. Page
+        // insertion geometry remains when the next region is on the same page,
+        // but its height is already reflected in `regions`. The simulated
+        // composer starts with empty insertion areas, so preserve both sets of
+        // processed locations through `work.skips`.
+        work.extend_skips(&self.page_insertions.skips);
+        work.extend_skips(&self.column_insertions.skips);
+
+        // Pending footnotes are transferred to work when the current column is
+        // finalized. Mirror that transfer before starting the simulated next
+        // region so spill frames and queued entries retain their order.
+        work.footnotes.extend(self.footnote_queue.iter().cloned());
+        if let Some(spill) = self.footnote_spill.clone() {
+            work.footnote_spill = Some(spill);
+        }
+
+        let page_base = if column == 0 {
+            Size::new(self.page_base.x, regions.full)
+        } else {
+            self.page_base
+        };
+
+        let mut composer = Composer {
+            engine: self.engine,
+            config: self.config,
+            page_base,
+            column,
+            page_insertions: Insertions::default(),
+            column_insertions: Insertions::default(),
+            column_balancing_height: None,
+            work: &mut work,
+            footnote_spill: None,
+            footnote_queue: vec![],
+        };
+
+        let checkpoint = composer.start_column(regions)?;
+
+        loop {
+            let pod = composer.available_column_region(regions);
+            // Queued insertions may have shortened only this region on a
+            // previous simulated pass. A failed simulation then does not rule
+            // out useful migration to a later full region.
+            let may_progress = pod.may_progress();
+
+            match composer.column_contents_until(pod, target) {
+                Ok(fits) => return Ok(fits || may_progress),
+                Err(RelayoutStop::Relayout(PlacementScope::Column)) => {
+                    *composer.work = checkpoint.clone();
+                }
+                // Inconclusive: a parent relayout cannot be reproduced in
+                // this isolated column, so do not let it veto migration.
+                Err(RelayoutStop::Relayout(PlacementScope::Parent)) => return Ok(true),
+                Err(RelayoutStop::Error(error)) => return Err(error),
+            }
+        }
+    }
+
+    /// Lay out column contents until reaching non-empty content at or after the
+    /// target child.
+    fn column_contents_until(
+        &mut self,
+        regions: Regions,
+        target: &'b Child<'a>,
+    ) -> RelayoutResult<bool> {
+        self.prepare_column_contents(regions)?;
+        distribute_until(self, regions, target)
     }
 
     /// Lays out an item with floating placement.
