@@ -1,6 +1,4 @@
-use std::cell::{LazyCell, RefCell};
-use std::fmt::{self, Debug, Formatter};
-use std::hash::Hash;
+use std::cell::LazyCell;
 
 use bumpalo::Bump;
 use bumpalo::boxed::Box as BumpBox;
@@ -260,7 +258,6 @@ impl<'a> Collector<'a, '_, '_> {
                 elem,
                 styles,
                 locator,
-                cell: CachedCell::new(),
             })));
         } else {
             self.output.push(Child::Multi(self.boxed(MultiChild {
@@ -270,7 +267,6 @@ impl<'a> Collector<'a, '_, '_> {
                 elem,
                 styles,
                 locator,
-                cell: CachedCell::new(),
             })));
         }
 
@@ -327,7 +323,6 @@ impl<'a> Collector<'a, '_, '_> {
             styles,
             locator,
             alignment,
-            cell: CachedCell::new(),
         })));
 
         Ok(())
@@ -383,28 +378,25 @@ pub struct SingleChild<'a> {
     elem: &'a Packed<BlockElem>,
     styles: StyleChain<'a>,
     locator: Locator<'a>,
-    cell: CachedCell<SourceResult<Frame>>,
 }
 
 impl SingleChild<'_> {
     /// Build the child's frame given the region's base size.
-    pub fn layout(&self, engine: &mut Engine, region: Region) -> SourceResult<Frame> {
-        self.cell.get_or_init(region, |mut region| {
-            // Vertical expansion is only kept if this block is the only child.
-            region.expand.y &= self.alone;
-            layout_single_impl(
-                engine.world,
-                engine.library,
-                engine.introspector.into_raw(),
-                engine.traced,
-                TrackedMut::reborrow_mut(&mut engine.sink),
-                engine.route.track(),
-                self.elem,
-                self.locator.track(),
-                self.styles,
-                region,
-            )
-        })
+    pub fn layout(&self, engine: &mut Engine, mut region: Region) -> SourceResult<Frame> {
+        // Vertical expansion is only kept if this block is the only child.
+        region.expand.y &= self.alone;
+        layout_single_impl(
+            engine.world,
+            engine.library,
+            engine.introspector.into_raw(),
+            engine.traced,
+            TrackedMut::reborrow_mut(&mut engine.sink),
+            engine.route.track(),
+            self.elem,
+            self.locator.track(),
+            self.styles,
+            region,
+        )
     }
 }
 
@@ -449,7 +441,6 @@ pub struct MultiChild<'a> {
     elem: &'a Packed<BlockElem>,
     styles: StyleChain<'a>,
     locator: Locator<'a>,
-    cell: CachedCell<SourceResult<Fragment>>,
 }
 
 impl<'a> MultiChild<'a> {
@@ -487,24 +478,22 @@ impl<'a> MultiChild<'a> {
     fn layout_full(
         &self,
         engine: &mut Engine,
-        regions: Regions,
+        mut regions: Regions,
     ) -> SourceResult<Fragment> {
-        self.cell.get_or_init(regions, |mut regions| {
-            // Vertical expansion is only kept if this block is the only child.
-            regions.expand.y &= self.alone;
-            layout_multi_impl(
-                engine.world,
-                engine.library,
-                engine.introspector.into_raw(),
-                engine.traced,
-                TrackedMut::reborrow_mut(&mut engine.sink),
-                engine.route.track(),
-                self.elem,
-                self.locator.track(),
-                self.styles,
-                regions,
-            )
-        })
+        // Vertical expansion is only kept if this block is the only child.
+        regions.expand.y &= self.alone;
+        layout_multi_impl(
+            engine.world,
+            engine.library,
+            engine.introspector.into_raw(),
+            engine.traced,
+            TrackedMut::reborrow_mut(&mut engine.sink),
+            engine.route.track(),
+            self.elem,
+            self.locator.track(),
+            self.styles,
+            regions,
+        )
     }
 }
 
@@ -630,88 +619,37 @@ pub struct PlacedChild<'a> {
     styles: StyleChain<'a>,
     locator: Locator<'a>,
     alignment: Smart<Alignment>,
-    cell: CachedCell<SourceResult<Frame>>,
 }
 
 impl PlacedChild<'_> {
     /// Build the child's frame given the region's base size.
     pub fn layout(&self, engine: &mut Engine, base: Size) -> SourceResult<Frame> {
-        self.cell.get_or_init(base, |base| {
-            let align = self.alignment.unwrap_or_else(|| Alignment::CENTER);
-            let aligned = AlignElem::alignment.set(align).wrap();
-            let styles = self.styles.chain(&aligned);
+        let align = self.alignment.unwrap_or_else(|| Alignment::CENTER);
+        let aligned = AlignElem::alignment.set(align).wrap();
+        let styles = self.styles.chain(&aligned);
 
-            let mut frame = layout_and_modify(styles, |styles| {
-                crate::layout_frame(
-                    engine,
-                    &self.elem.body,
-                    self.locator.relayout(),
-                    styles,
-                    Region::new(base, Axes::splat(false)),
-                )
-            })?;
+        let mut frame = layout_and_modify(styles, |styles| {
+            crate::layout_frame(
+                engine,
+                &self.elem.body,
+                self.locator.relayout(),
+                styles,
+                Region::new(base, Axes::splat(false)),
+            )
+        })?;
 
-            if self.float {
-                frame.set_parent(FrameParent::new(
-                    self.elem.location().unwrap(),
-                    Inherit::Yes,
-                ));
-            }
+        if self.float {
+            frame.set_parent(FrameParent::new(
+                self.elem.location().unwrap(),
+                Inherit::Yes,
+            ));
+        }
 
-            Ok(frame)
-        })
+        Ok(frame)
     }
 
     /// The element's location.
     pub fn location(&self) -> Location {
         self.elem.location().unwrap()
-    }
-}
-
-/// Wraps a parameterized computation and caches its latest output.
-///
-/// - When the computation is performed multiple times consecutively with the
-///   same argument, reuses the cache.
-/// - When the argument changes, the new output is cached.
-#[derive(Clone)]
-struct CachedCell<T>(RefCell<Option<(u128, T)>>);
-
-impl<T> CachedCell<T> {
-    /// Create an empty cached cell.
-    fn new() -> Self {
-        Self(RefCell::new(None))
-    }
-
-    /// Perform the computation `f` with caching.
-    fn get_or_init<F, I>(&self, input: I, f: F) -> T
-    where
-        I: Hash,
-        T: Clone,
-        F: FnOnce(I) -> T,
-    {
-        let input_hash = typst_utils::hash128(&input);
-
-        let mut slot = self.0.borrow_mut();
-        if let Some((hash, output)) = &*slot
-            && *hash == input_hash
-        {
-            return output.clone();
-        }
-
-        let output = f(input);
-        *slot = Some((input_hash, output.clone()));
-        output
-    }
-}
-
-impl<T> Default for CachedCell<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<T> Debug for CachedCell<T> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.pad("CachedCell(..)")
     }
 }
