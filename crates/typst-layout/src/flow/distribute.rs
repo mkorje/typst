@@ -903,7 +903,8 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
             return Ok(true);
         }
 
-        // TODO: simulate migrating to the next region.
-        Ok(true)
+        // Simulate!
+        self.composer
+            .simulate_sticky_migration(snapshot.work.clone(), target, regions)
     }
 }
