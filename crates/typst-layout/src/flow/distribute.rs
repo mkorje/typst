@@ -221,16 +221,16 @@ struct Distributor<'a, 'b, 'x, 'y, 'z> {
     /// and may migrate with the attached frame. This is `None` while we aren't
     /// processing sticky blocks. On the first sticky block, this will become
     /// `Some(true)` if migrating sticky blocks as usual would make a
-    /// difference - if content was already placed in this region, this is given
-    /// by `regions.may_progress()`, but at the very top of the region it
-    /// instead requires a following region to be strictly taller, since
-    /// migrating would otherwise just leave this region empty. Otherwise, it
-    /// is set to `Some(false)`, which is usually the case when the first
-    /// sticky block in the group is at the very top of the page (then,
-    /// migrating it would just lead us back to the top of the page, leading
-    /// to an infinite loop). In that case, all sticky blocks of the group are
-    /// also disabled, until this is reset to `None` on the first non-sticky
-    /// frame we find.
+    /// difference - if content was already placed in this region, this is
+    /// given by `regions.may_progress()`, but without placed content it instead
+    /// requires a following region to be strictly taller than this region's
+    /// effective capacity. Migrating would otherwise just leave this region
+    /// empty. Otherwise, it is set to `Some(false)`, which is usually the case
+    /// when the first sticky block in the group is at the very top of the page
+    /// (then, migrating it would just lead us back to the top of the page,
+    /// leading to an infinite loop). In that case, all sticky blocks of the
+    /// group are also disabled, until this is reset to `None` on the first
+    /// non-sticky frame we find.
     ///
     /// While this behavior of disabling stickiness of sticky blocks at the
     /// very top of the page may seem non-ideal, it is only problematic (that
@@ -266,6 +266,15 @@ enum Item<'a, 'b> {
 }
 
 impl Item<'_, '_> {
+    /// Whether this item leaves actual content in the current region.
+    fn is_content(&self) -> bool {
+        match self {
+            Self::Fr(_, _, child) => child.is_some(),
+            Self::Frame(frame, _) | Self::Placed(frame, _) => !frame.is_empty(),
+            Self::Tag(_) | Self::Abs(..) => false,
+        }
+    }
+
     /// Whether this item should be migrated to the next region if the region
     /// consists solely of such items.
     fn migratable(&self) -> bool {
@@ -648,9 +657,10 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         // together with the "attached" block can't improve the lack of space,
         // then we don't do so, and stickiness is disabled (at least, for this
         // region). Otherwise, migration is allowed. When content was already
-        // placed in this region, this is `regions.may_progress()`. When we're
-        // still at the start of the region, migrating would leave it empty, so
-        // it only helps if a following region is strictly taller.
+        // placed in this region, this is `regions.may_progress()`. When no
+        // content was placed, migrating would leave it empty, so it only helps
+        // if a following region is strictly taller than the current region's
+        // effective capacity, including any column balancing limit.
         //
         // Note that, since the whole region is checked, this ensures sticky
         // blocks at the top of a block - but not necessarily of the page - can
@@ -658,12 +668,15 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         if sticky
             && self.sticky.is_none()
             && *self.stickable.get_or_insert_with(|| {
-                if self.used.y.is_zero() {
-                    let current = self.regions.size.y;
+                if self.items.iter().any(Item::is_content) {
+                    self.regions.may_progress()
+                } else {
+                    let mut current = self.regions.size.y;
+                    if let Some(target) = self.balancing_target {
+                        current.set_min(target - self.used.y);
+                    }
                     self.regions.backlog.iter().any(|&height| height > current)
                         || self.regions.last.is_some_and(|height| height > current)
-                } else {
-                    self.regions.may_progress()
                 }
             })
         {
@@ -939,8 +952,16 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
             return Ok(true);
         }
 
-        // Simulate!
-        self.composer
-            .simulate_sticky_migration(snapshot.work.clone(), target, regions)
+        // Simulate! An error reached only through this hypothetical layout
+        // isn't a real compilation error, so conservatively reject migration.
+        // If actual layout also reaches it, it will be reported there.
+        match self.composer.simulate_sticky_migration(
+            snapshot.work.clone(),
+            target,
+            regions,
+        ) {
+            Ok(migrate) => Ok(migrate),
+            Err(_) => Ok(false),
+        }
     }
 }

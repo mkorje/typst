@@ -210,6 +210,40 @@ B
 #set columns(balanced: true)
 #lorem(68) // just enough text to trigger a widow if not balanced correctly
 
+--- columns-balanced-sticky-after-zero-height-content paged empty ---
+// A non-empty zero-height block must count as placed content when deciding
+// whether restoring a sticky snapshot would leave a balanced column empty.
+// The 18pt total produces a 9pt balancing target, which the sticky block
+// protrudes past before the attached block triggers the column break.
+#set page(height: 20pt, margin: 0pt, columns: 2)
+#set columns(gutter: 0pt, balanced: true)
+#set block(width: 100%, spacing: 0pt, breakable: false)
+
+#block(height: 0pt)[#metadata(none) <zero>]
+#block(height: 12pt, sticky: true)[#metadata(none) <sticky>]
+#block(height: 6pt)[#metadata(none) <attached>]
+
+#context test(
+  locate(<sticky>).position().x,
+  locate(<attached>).position().x,
+)
+
+--- columns-balanced-sticky-effective-capacity paged empty ---
+// An otherwise empty balanced column is only effectively 9pt tall. Moving the
+// sticky block to the unrestricted final column therefore improves layout even
+// though both columns have the same physical height.
+#set page(height: 20pt, margin: 0pt, columns: 2)
+#set columns(gutter: 0pt, balanced: true)
+#set block(width: 100%, spacing: 0pt, breakable: false)
+
+#block(height: 12pt, sticky: true)[#metadata(none) <sticky>]
+#block(height: 6pt)[#metadata(none) <attached>]
+
+#context test(
+  locate(<sticky>).position().x,
+  locate(<attached>).position().x,
+)
+
 --- columns-balanced-pagebreak paged ---
 #set page(width: 300pt, height: 90pt, margin: 5pt, columns: 3)
 #set text(hyphenate: true)

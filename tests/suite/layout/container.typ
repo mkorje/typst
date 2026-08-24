@@ -227,6 +227,72 @@ E
 )
 #block(height: 15pt, fill: blue)
 
+--- block-sticky-discarded-simulation-error paged empty ---
+// Test that delayed errors produced only while simulating a rejected sticky
+// migration don't leak into the actual compilation.
+#set page(height: 20pt, margin: 0pt, columns: 2)
+#set columns(gutter: 0pt)
+#set block(width: 100%, spacing: 0pt, breakable: false)
+#show emph: it => panic("discarded simulation")
+
+// Leave 15pt in the first column, then split this 20pt block into regions of
+// 15pt and 5pt. Its inner flow therefore has different base heights before
+// and after the column boundary.
+#block(height: 5pt)
+#block(height: 20pt, breakable: true)[
+  #block(height: 8pt)
+  #block(sticky: true)[
+    #layout(size => block(height: 4pt)[
+      #if size.height == 5pt { [_discarded_] }
+      #metadata(none)
+    ])
+  ]
+  #block(height: 4pt, sticky: true)[#metadata(none)]
+  #block(height: 1pt)[#metadata(none)]
+]
+
+--- block-sticky-discarded-simulation-fatal-error paged empty ---
+// Test that a fatal error reached only while simulating a rejected sticky
+// migration doesn't fail the actual compilation.
+#set page(height: 20pt, margin: 0pt, columns: 2)
+#set columns(gutter: 0pt)
+#set block(width: 100%, spacing: 0pt, breakable: false)
+
+#block(height: 5pt)
+#block(height: 20pt, breakable: true)[
+  #block(height: 8pt)
+  #block(sticky: true)[
+    #layout(size => {
+      if size.height == 5pt { panic("discarded fatal simulation") }
+      block(height: 4pt)[#metadata(none)]
+    })
+  ]
+  #block(height: 4pt, sticky: true)[#metadata(none)]
+  #block(height: 1pt)[#metadata(none)]
+]
+
+--- block-sticky-accepted-simulation-error paged empty ---
+// Test that delayed errors from an accepted simulation are committed. Actual
+// layout can reuse the frame cached by the simulation instead of emitting the
+// error a second time.
+// Error: 4:19-4:47 panicked with: accepted simulation
+#set page(height: 20pt, margin: 0pt, columns: 2)
+#set columns(gutter: 0pt)
+#set block(width: 100%, spacing: 0pt, breakable: false)
+#show emph: it => panic("accepted simulation")
+
+#block(height: 5pt)
+#block(height: 20pt, breakable: true)[
+  #block(height: 11pt)
+  #block(sticky: true)[
+    #layout(size => block(height: 2pt)[
+      #if size.height == 5pt { [_accepted_] }
+      #metadata(none)
+    ])
+  ]
+  #block(height: 3pt)[#metadata(none)]
+]
+
 --- block-sticky-float-footnote-migration paged ---
 // Test that a floating block containing a footnote, following a sticky block,
 // doesn't move to the next region needlessly.

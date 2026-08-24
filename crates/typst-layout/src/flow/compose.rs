@@ -1,9 +1,10 @@
 use std::convert::Infallible;
 use std::num::NonZeroUsize;
 
+use comemo::Track;
 use ecow::EcoVec;
 use typst_library::diag::{SourceDiagnostic, SourceResult};
-use typst_library::engine::Engine;
+use typst_library::engine::{Engine, Sink};
 use typst_library::foundations::{Content, NativeElement, Packed, Resolve, Smart};
 use typst_library::introspection::{
     Counter, CounterDisplayElem, CounterState, CounterUpdate, Location, Locator,
@@ -431,52 +432,83 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
             self.page_base
         };
 
-        let mut composer = Composer {
-            engine: self.engine,
-            config: self.config,
-            page_base,
-            column,
-            page_insertions: Insertions::default(),
-            column_insertions: Insertions::default(),
-            column_balancing_height: None,
-            work: &mut work,
-            footnote_spill: None,
-            footnote_queue: vec![],
+        // Simulated layout must not immediately commit warnings, delayed
+        // errors, traced values, or introspections from a destination we may
+        // reject. If we accept it, we commit the sink below because actual
+        // layout can reuse frames cached by the simulation.
+        let mut sink = Sink::new();
+        let result = {
+            let mut engine = Engine {
+                world: self.engine.world,
+                library: self.engine.library,
+                introspector: self.engine.introspector,
+                traced: self.engine.traced,
+                sink: sink.track_mut(),
+                route: self.engine.route.clone(),
+            };
+
+            let mut composer = Composer {
+                engine: &mut engine,
+                config: self.config,
+                page_base,
+                column,
+                page_insertions: Insertions::default(),
+                column_insertions: Insertions::default(),
+                // The simulated destination is either the unrestricted last
+                // column or the first column of a new page, whose balancing
+                // target is not known until that page's content is complete.
+                column_balancing_height: None,
+                work: &mut work,
+                footnote_spill: None,
+                footnote_queue: vec![],
+            };
+
+            (|| {
+                // Reset column insertion when starting a new column.
+                composer.column_insertions = Insertions::default();
+
+                // Process footnote spill.
+                if let Some(spill) = composer.work.footnote_spill.take() {
+                    composer.footnote_spill(spill, regions.base())?;
+                }
+
+                // This loop can restart column layout when requested to do so
+                // by a `RelayoutStop`. This happens when there is a
+                // column-scoped float.
+                let checkpoint = composer.work.clone();
+                loop {
+                    // Shrink the available space by the space used by column
+                    // insertions.
+                    let mut pod = regions;
+                    pod.size.y -= composer.column_insertions.height();
+
+                    // Queued insertions may have shortened only this region on
+                    // a previous simulated pass. A failed simulation then does
+                    // not rule out useful migration to a later region.
+                    let may_progress = pod.may_progress();
+
+                    match composer.column_contents_until(pod, target) {
+                        Ok(fits) => return Ok(fits || may_progress),
+                        Err(RelayoutStop::Relayout(PlacementScope::Column)) => {
+                            *composer.work = checkpoint.clone();
+                        }
+                        // Parent-scoped relayout can't be reproduced in
+                        // isolation, so it is inconclusive and we allow
+                        // migration.
+                        Err(RelayoutStop::Relayout(PlacementScope::Parent)) => {
+                            return Ok(true);
+                        }
+                        Err(RelayoutStop::Error(error)) => return Err(error),
+                    }
+                }
+            })()
         };
 
-        // Reset column insertion when starting a new column.
-        composer.column_insertions = Insertions::default();
-
-        // Process footnote spill.
-        if let Some(spill) = composer.work.footnote_spill.take() {
-            composer.footnote_spill(spill, regions.base())?;
+        if matches!(&result, Ok(true)) {
+            self.engine.apply_sink(sink);
         }
 
-        // This loop can restart column layout when requested to do so by a
-        // `RelayoutStop`. This happens when there is a column-scoped float.
-        let checkpoint = composer.work.clone();
-        loop {
-            // Shrink the available space by the space used by column
-            // insertions.
-            let mut pod = regions;
-            pod.size.y -= composer.column_insertions.height();
-
-            // Queued insertions may have shortened only this region on a
-            // previous simulated pass. A failed simulation then does not rule
-            // out useful migration to a later region.
-            let may_progress = pod.may_progress();
-
-            match composer.column_contents_until(pod, target) {
-                Ok(fits) => return Ok(fits || may_progress),
-                Err(RelayoutStop::Relayout(PlacementScope::Column)) => {
-                    *composer.work = checkpoint.clone();
-                }
-                // Parent-scoped relayout can't be reproduced in isolation, so
-                // it is inconclusive and we allow migration.
-                Err(RelayoutStop::Relayout(PlacementScope::Parent)) => return Ok(true),
-                Err(RelayoutStop::Error(error)) => return Err(error),
-            }
-        }
+        result
     }
 
     /// Lay out the inner contents of a column until a target child is reached.

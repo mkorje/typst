@@ -49,6 +49,12 @@ impl<'a> Engine<'a> {
         }
     }
 
+    /// Apply a subsink to this engine's sink.
+    pub fn apply_sink(&mut self, sink: Sink) {
+        self.sink
+            .extend(sink.introspections, sink.delayed, sink.warnings, sink.values);
+    }
+
     /// Runs tasks on the engine in parallel.
     pub fn parallelize<P, I, T, U, F>(
         &mut self,
@@ -89,13 +95,7 @@ impl<'a> Engine<'a> {
 
         // Apply the subsinks to the outer sink.
         for (_, sink) in &mut pairs {
-            let sink = std::mem::take(sink);
-            self.sink.extend(
-                sink.introspections,
-                sink.delayed,
-                sink.warnings,
-                sink.values,
-            );
+            self.apply_sink(std::mem::take(sink));
         }
 
         pairs.into_iter().map(|(output, _)| output)
