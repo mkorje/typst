@@ -1,9 +1,10 @@
 use std::cell::LazyCell;
 
+use ecow::EcoVec;
 use smallvec::SmallVec;
-use typst_library::diag::SourceResult;
+use typst_library::diag::{SourceDiagnostic, SourceResult};
 use typst_library::engine::Engine;
-use typst_library::foundations::{Packed, Resolve, StyleChain};
+use typst_library::foundations::{Content, Packed, Resolve, StyleChain};
 use typst_library::introspection::Locator;
 use typst_library::layout::{
     Abs, Axes, BlockBody, BlockElem, Fragment, Frame, FrameKind, Region, Regions, Rel,
@@ -12,6 +13,9 @@ use typst_library::layout::{
 use typst_library::visualize::Stroke;
 use typst_utils::Numeric;
 
+use super::{
+    ComposeStop, ControlledFragment, FlowControl, StickyScore, layout_fragment_controlled,
+};
 use crate::shapes::{clip_rect, fill_and_stroke};
 
 /// Lay this out as an unbreakable block.
@@ -111,6 +115,112 @@ pub fn layout_multi_block(
     styles: StyleChain,
     regions: Regions,
 ) -> SourceResult<Fragment> {
+    layout_multi_block_with(
+        elem,
+        engine,
+        locator,
+        styles,
+        regions,
+        WidthPolicy::FixedPoint,
+        |()| false,
+        |engine, body, locator, styles, regions| {
+            crate::layout_fragment(engine, body, locator, styles, regions)
+                .map(|fragment| MultiOutput { fragment, metadata: () })
+        },
+    )
+    .map(|output| output.fragment)
+}
+
+/// Lay out a normal-content breakable block under the enclosing optimizer's
+/// breakpoint stream.
+pub(super) fn layout_multi_block_controlled(
+    elem: &Packed<BlockElem>,
+    engine: &mut Engine,
+    locator: Locator,
+    styles: StyleChain,
+    regions: Regions,
+    control: FlowControl,
+) -> Result<ControlledFragment, ComposeStop> {
+    layout_multi_block_with(
+        elem,
+        engine,
+        locator,
+        styles,
+        regions,
+        WidthPolicy::Incremental,
+        |metadata: &ControlledMetadata| !metadata.complete,
+        |engine, body, locator, styles, regions| {
+            layout_fragment_controlled(
+                engine,
+                body,
+                locator,
+                styles,
+                regions,
+                control.clone(),
+            )
+            .map(|output| MultiOutput {
+                fragment: output.fragment,
+                metadata: ControlledMetadata {
+                    consumed: output.consumed,
+                    score: output.score,
+                    complete: output.complete,
+                },
+            })
+        },
+    )
+    .map(|output| ControlledFragment {
+        fragment: output.fragment,
+        consumed: output.metadata.consumed,
+        score: output.metadata.score,
+        complete: output.metadata.complete,
+    })
+}
+
+#[derive(Default)]
+struct ControlledMetadata {
+    consumed: usize,
+    score: StickyScore,
+    complete: bool,
+}
+
+struct MultiOutput<M> {
+    fragment: Fragment,
+    metadata: M,
+}
+
+#[derive(Copy, Clone)]
+enum WidthPolicy {
+    /// The complete fragment is available, so inconsistent widths can restart
+    /// the body with horizontal expansion.
+    FixedPoint,
+    /// Earlier fragments have already been emitted by a controlled
+    /// continuation and cannot be retroactively replaced.
+    Incremental,
+}
+
+#[expect(clippy::too_many_arguments)]
+fn layout_multi_block_with<M, E, D, F>(
+    elem: &Packed<BlockElem>,
+    engine: &mut Engine,
+    locator: Locator,
+    styles: StyleChain,
+    regions: Regions,
+    width_policy: WidthPolicy,
+    defer_empty_first: D,
+    mut layout_content: F,
+) -> Result<MultiOutput<M>, E>
+where
+    M: Default,
+    E: From<EcoVec<SourceDiagnostic>>,
+    D: Fn(&M) -> bool,
+    F: FnMut(
+        &mut Engine,
+        &Content,
+        Locator,
+        StyleChain,
+        Regions,
+    ) -> Result<MultiOutput<M>, E>,
+{
     // Fetch sizing properties.
     let width = elem.width.get(styles);
     let height = elem.height.get(styles);
@@ -124,7 +234,7 @@ pub fn layout_multi_block(
 
     // Layout the body.
     let body = elem.body.get_ref(styles);
-    let mut fragment = match body {
+    let mut output = match body {
         // If we have no body, just create one frame plus one per backlog
         // region. We create them zero-sized; if necessary, their size will
         // be adjusted below.
@@ -138,41 +248,62 @@ pub fn layout_multi_block(
                     iter.next();
                 }
             }
-            Fragment::frames(frames)
+            MultiOutput {
+                fragment: Fragment::frames(frames),
+                metadata: M::default(),
+            }
         }
 
         // If we have content as our body, just layout it.
         Some(BlockBody::Content(body)) => {
-            let mut fragment =
-                crate::layout_fragment(engine, body, locator.relayout(), styles, pod)?;
+            let mut layout = |engine: &mut Engine, locator, regions| {
+                layout_content(engine, body, locator, styles, regions).inspect_err(|_| {
+                    engine.sink.commit_effect_transaction();
+                })
+            };
+            engine.sink.begin_effect_transaction();
+            let mut output = layout(engine, locator.relayout(), pod)?;
 
             // If the body is automatically sized and produced more than one
             // fragment, ensure that the width was consistent across all
             // regions. If it wasn't, we need to relayout with expansion.
-            if !pod.expand.x
-                && fragment
+            if matches!(width_policy, WidthPolicy::FixedPoint)
+                && !pod.expand.x
+                && output
+                    .fragment
                     .as_slice()
                     .windows(2)
                     .any(|w| !w[0].width().approx_eq(w[1].width()))
             {
-                let max_width =
-                    fragment.iter().map(|frame| frame.width()).max().unwrap_or_default();
+                let max_width = output
+                    .fragment
+                    .iter()
+                    .map(|frame| frame.width())
+                    .max()
+                    .unwrap_or_default();
                 let pod = Regions {
                     size: Size::new(max_width, pod.size.y),
                     expand: Axes::new(true, pod.expand.y),
                     ..pod
                 };
-                fragment = crate::layout_fragment(engine, body, locator, styles, pod)?;
+                engine.sink.rollback_effect_transaction();
+                engine.sink.begin_effect_transaction();
+                output = layout(engine, locator, pod)?;
             }
 
-            fragment
+            engine.sink.commit_effect_transaction();
+            output
         }
 
         // If we have a child that wants to layout with just access to the
         // base region, give it that.
         Some(BlockBody::SingleLayouter(callback)) => {
             let pod = Region::new(pod.base(), pod.expand);
-            callback.call(engine, locator, styles, pod).map(Fragment::frame)?
+            let fragment = callback
+                .call(engine, locator, styles, pod)
+                .map(Fragment::frame)
+                .map_err(E::from)?;
+            MultiOutput { fragment, metadata: M::default() }
         }
 
         // If we have a child that wants to layout with full region access,
@@ -184,9 +315,13 @@ pub fn layout_multi_block(
         Some(BlockBody::MultiLayouter(callback)) => {
             let expand = (pod.expand | regions.expand) & pod.size.map(Abs::is_finite);
             let pod = Regions { expand, ..pod };
-            callback.call(engine, locator, styles, pod)?
+            let fragment =
+                callback.call(engine, locator, styles, pod).map_err(E::from)?;
+            MultiOutput { fragment, metadata: M::default() }
         }
     };
+
+    let fragment = &mut output.fragment;
 
     // Prepare fill and stroke.
     let fill = elem.fill.get_ref(styles);
@@ -210,7 +345,9 @@ pub fn layout_multi_block(
     // a non-empty one follows.
     let mut skip_first = false;
     if let [first, rest @ ..] = fragment.as_slice() {
-        skip_first = first.is_empty() && rest.iter().any(|frame| !frame.is_empty());
+        skip_first = first.is_empty()
+            && (rest.iter().any(|frame| !frame.is_empty())
+                || defer_empty_first(&output.metadata));
     }
 
     // Post-process to apply insets, clipping, fills, and strokes.
@@ -248,7 +385,7 @@ pub fn layout_multi_block(
         }
     }
 
-    Ok(fragment)
+    Ok(output)
 }
 
 /// Builds the pod region for an unbreakable sized container.

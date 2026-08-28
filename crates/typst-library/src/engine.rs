@@ -1,11 +1,13 @@
 //! Definition of the central compilation context.
 
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use comemo::internal::{Call as ComemoCall, Sink as ComemoSink, to_parts_ref};
 use comemo::{Track, Tracked, TrackedMut};
 use ecow::EcoVec;
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use typst_syntax::{FileId, Span};
 use typst_utils::{LazyHash, Protected};
 
@@ -36,6 +38,49 @@ pub struct Engine<'a> {
 }
 
 impl<'a> Engine<'a> {
+    /// Run speculative work with an isolated user-visible sink.
+    ///
+    /// Reads through tracked inputs are replayed into the enclosing constraints.
+    /// Warnings, delayed errors, and traced values are returned separately.
+    pub fn analyze<T>(&mut self, f: impl FnOnce(&mut Engine) -> T) -> (T, Sink) {
+        let world = self.world;
+        let introspector = *self
+            .introspector
+            .access("speculative analysis preserves all tracked reads");
+        let traced = self.traced;
+
+        let (world, world_parent) = to_parts_ref(world);
+        let (introspector, introspector_parent) = to_parts_ref(introspector);
+        let (traced, traced_parent) = to_parts_ref(traced);
+
+        let world_journal = CallJournal::new();
+        let introspector_journal = CallJournal::new();
+        let traced_journal = CallJournal::new();
+        let mut sink = Sink::new();
+
+        let value = {
+            let mut trial = Engine {
+                world: world.track_with(&world_journal),
+                library: self.library,
+                introspector: Protected::from_raw(
+                    introspector.track_with(&introspector_journal),
+                ),
+                traced: traced.track_with(&traced_journal),
+                sink: sink.track_mut(),
+                route: self.route.clone(),
+            };
+            f(&mut trial)
+        };
+
+        world_journal.replay(world_parent);
+        introspector_journal.replay(introspector_parent);
+        traced_journal.replay(traced_parent);
+
+        debug_assert!(sink.effect_buffers.is_empty());
+
+        (value, sink)
+    }
+
     /// Handles a result without immediately terminating execution. Instead, it
     /// produces a delayed error that is only promoted to a fatal one if it
     /// remains by the end of the introspection loop.
@@ -122,6 +167,84 @@ impl<'a> Engine<'a> {
     }
 }
 
+/// A replayable, exactly deduplicated journal for tracked calls.
+///
+/// Hashes only select a bucket. Calls in that bucket are compared for exact
+/// equality before they are merged, so a hash collision cannot lose a
+/// dependency.
+struct CallJournal<C> {
+    repr: Mutex<CallJournalRepr<C>>,
+}
+
+struct CallJournalRepr<C> {
+    ordered: Vec<(C, u128)>,
+    buckets: FxHashMap<u128, Vec<usize>>,
+}
+
+impl<C> CallJournal<C> {
+    fn new() -> Self {
+        Self {
+            repr: Mutex::new(CallJournalRepr {
+                ordered: vec![],
+                buckets: FxHashMap::default(),
+            }),
+        }
+    }
+}
+
+impl<C: ComemoCall> CallJournal<C> {
+    fn replay(&self, parent: Option<&dyn ComemoSink<Call = C>>) {
+        let Some(parent) = parent else { return };
+        let repr = self.repr.lock().expect("tracked-call journal was poisoned");
+        for (call, result) in &repr.ordered {
+            parent.emit(call.clone(), *result);
+        }
+    }
+}
+
+impl<C: ComemoCall> ComemoSink for CallJournal<C> {
+    type Call = C;
+
+    fn emit(&self, call: C, result: u128) -> bool {
+        let hash = typst_utils::hash128(&call);
+        let mut repr = self.repr.lock().expect("tracked-call journal was poisoned");
+
+        if let Some(indices) = repr.buckets.get(&hash) {
+            for &index in indices {
+                let (existing, existing_result) = &repr.ordered[index];
+                if existing == &call {
+                    assert_eq!(
+                        *existing_result, result,
+                        "tracked call returned different results during speculative analysis",
+                    );
+                    return false;
+                }
+            }
+        }
+
+        let index = repr.ordered.len();
+        repr.ordered.push((call, result));
+        repr.buckets.entry(hash).or_default().push(index);
+        true
+    }
+}
+
+static NEXT_EFFECT_TRANSACTION: AtomicUsize = AtomicUsize::new(0);
+
+/// Identifies an active visible-effect transaction.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct EffectTransaction(usize);
+
+impl EffectTransaction {
+    /// Allocate a fresh transaction identifier.
+    pub fn fresh() -> Self {
+        let id = NEXT_EFFECT_TRANSACTION
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .expect("exhausted visible-effect transaction identifiers");
+        Self(id)
+    }
+}
+
 /// May hold a span that is currently under inspection.
 #[derive(Default)]
 pub struct Traced(Option<Span>);
@@ -169,6 +292,18 @@ pub struct Sink {
     warnings_set: FxHashSet<u128>,
     /// A sequence of traced values for a span.
     values: EcoVec<(Value, Option<Styles>)>,
+    /// Nested buffers for speculative visible effects. Introspection descriptors
+    /// are not buffered because discarded passes still influence the computation.
+    effect_buffers: Vec<EffectBuffer>,
+}
+
+#[derive(Default, Clone)]
+struct EffectBuffer {
+    transaction: Option<EffectTransaction>,
+    delayed: EcoVec<SourceDiagnostic>,
+    warnings: EcoVec<SourceDiagnostic>,
+    warnings_set: FxHashSet<u128>,
+    values: EcoVec<(Value, Option<Styles>)>,
 }
 
 impl Sink {
@@ -187,27 +322,163 @@ impl Sink {
 
     /// Get the stored delayed errors.
     pub fn delayed(&mut self) -> EcoVec<SourceDiagnostic> {
+        debug_assert!(self.effect_buffers.is_empty());
         std::mem::take(&mut self.delayed)
     }
 
     /// Get the stored warnings.
     pub fn warnings(self) -> EcoVec<SourceDiagnostic> {
+        debug_assert!(self.effect_buffers.is_empty());
         self.warnings
     }
 
     /// Get the values for the traced span.
     pub fn values(self) -> EcoVec<(Value, Option<Styles>)> {
+        debug_assert!(self.effect_buffers.is_empty());
         self.values
     }
 
     /// Extend from another sink.
     pub fn extend_from_sink(&mut self, other: Sink) {
+        debug_assert!(other.effect_buffers.is_empty());
         self.extend(other.introspections, other.delayed, other.warnings, other.values);
+    }
+
+    /// Count values already stored at a merge destination. Each transaction
+    /// retains its own quota because enclosing buffers may be rolled back or
+    /// bypassed by a promotion. This intentionally permits up to `MAX_VALUES`
+    /// transient values per active transaction while preserving the root cap.
+    fn value_count_at(&self, target: Option<usize>) -> usize {
+        self.values.len()
+            + target.map_or(0, |index| self.effect_buffers[index].values.len())
+    }
+
+    fn active_value_count(&self) -> usize {
+        self.value_count_at(self.effect_buffers.len().checked_sub(1))
+    }
+
+    fn active_delayed(&mut self) -> &mut EcoVec<SourceDiagnostic> {
+        match self.effect_buffers.last_mut() {
+            Some(buffer) => &mut buffer.delayed,
+            None => &mut self.delayed,
+        }
+    }
+
+    fn active_values(&mut self) -> &mut EcoVec<(Value, Option<Styles>)> {
+        match self.effect_buffers.last_mut() {
+            Some(buffer) => &mut buffer.values,
+            None => &mut self.values,
+        }
+    }
+
+    fn warning_seen(&self, hash: u128) -> bool {
+        self.warnings_set.contains(&hash)
+            || self
+                .effect_buffers
+                .last()
+                .is_some_and(|buffer| buffer.warnings_set.contains(&hash))
+    }
+
+    fn push_warning(&mut self, hash: u128, warning: SourceDiagnostic) {
+        match self.effect_buffers.last_mut() {
+            Some(buffer) => {
+                buffer.warnings_set.insert(hash);
+                buffer.warnings.push(warning);
+            }
+            None => {
+                self.warnings_set.insert(hash);
+                self.warnings.push(warning);
+            }
+        }
+    }
+
+    fn merge_effect_buffer(&mut self, buffer: EffectBuffer, target: Option<usize>) {
+        let EffectBuffer { delayed, warnings, values, .. } = buffer;
+        match target {
+            Some(index) => {
+                let remaining =
+                    Self::MAX_VALUES.saturating_sub(self.value_count_at(Some(index)));
+                let target = &mut self.effect_buffers[index];
+                target.delayed.extend(delayed);
+                for warning in warnings {
+                    let hash = typst_utils::hash128(&(&warning.span, &warning.message));
+                    if !self.warnings_set.contains(&hash)
+                        && target.warnings_set.insert(hash)
+                    {
+                        target.warnings.push(warning);
+                    }
+                }
+                target.values.extend(values.into_iter().take(remaining));
+            }
+            None => {
+                let remaining =
+                    Self::MAX_VALUES.saturating_sub(self.value_count_at(None));
+                self.delayed.extend(delayed);
+                for warning in warnings {
+                    let hash = typst_utils::hash128(&(&warning.span, &warning.message));
+                    if self.warnings_set.insert(hash) {
+                        self.warnings.push(warning);
+                    }
+                }
+                self.values.extend(values.into_iter().take(remaining));
+            }
+        }
     }
 }
 
 #[comemo::track]
 impl Sink {
+    /// Start a nested visible-effect transaction.
+    pub fn begin_effect_transaction(&mut self) {
+        self.effect_buffers.push(EffectBuffer::default());
+    }
+
+    /// Start a transaction that can receive effects promoted from nested work.
+    pub fn begin_effect_transaction_with(&mut self, transaction: EffectTransaction) {
+        assert!(
+            self.effect_buffers
+                .iter()
+                .all(|buffer| buffer.transaction != Some(transaction)),
+            "started a duplicate visible-effect transaction",
+        );
+        self.effect_buffers.push(EffectBuffer {
+            transaction: Some(transaction),
+            ..EffectBuffer::default()
+        });
+    }
+
+    /// Commit the innermost visible-effect transaction.
+    pub fn commit_effect_transaction(&mut self) {
+        let buffer = self
+            .effect_buffers
+            .pop()
+            .expect("committed a visible-effect transaction that was not started");
+        let target = self.effect_buffers.len().checked_sub(1);
+        self.merge_effect_buffer(buffer, target);
+    }
+
+    /// Commit the innermost effect buffer directly to `target`.
+    pub fn promote_effect_transaction(&mut self, target: EffectTransaction) {
+        let buffer = self
+            .effect_buffers
+            .pop()
+            .expect("promoted a visible-effect transaction that was not started");
+        let target = self
+            .effect_buffers
+            .iter()
+            .rposition(|buffer| buffer.transaction == Some(target))
+            .expect("promoted visible effects to an inactive transaction");
+        self.merge_effect_buffer(buffer, Some(target));
+    }
+
+    /// Roll back warnings, delayed errors, and traced values from the
+    /// innermost transaction while retaining its introspection descriptors.
+    pub fn rollback_effect_transaction(&mut self) {
+        self.effect_buffers
+            .pop()
+            .expect("rolled back a visible-effect transaction that was not started");
+    }
+
     /// Trace an introspection.
     pub fn introspection(&mut self, introspection: Introspection) {
         self.introspections.push(introspection);
@@ -215,27 +486,27 @@ impl Sink {
 
     /// Add a delayed error.
     pub fn delayed_error(&mut self, error: SourceDiagnostic) {
-        self.delayed.push(error);
+        self.active_delayed().push(error);
     }
 
     /// Add multiple delayed errors.
     pub fn delayed_errors(&mut self, errors: EcoVec<SourceDiagnostic>) {
-        self.delayed.extend(errors);
+        self.active_delayed().extend(errors);
     }
 
     /// Add a warning.
     pub fn warn(&mut self, warning: SourceDiagnostic) {
         // Check if warning is a duplicate.
         let hash = typst_utils::hash128(&(&warning.span, &warning.message));
-        if self.warnings_set.insert(hash) {
-            self.warnings.push(warning);
+        if !self.warning_seen(hash) {
+            self.push_warning(hash, warning);
         }
     }
 
     /// Trace a value and optionally styles for the traced span.
     pub fn value(&mut self, value: Value, styles: Option<Styles>) {
-        if self.values.len() < Self::MAX_VALUES {
-            self.values.push((value, styles));
+        if self.active_value_count() < Self::MAX_VALUES {
+            self.active_values().push((value, styles));
         }
     }
 
@@ -248,12 +519,12 @@ impl Sink {
         values: EcoVec<(Value, Option<Styles>)>,
     ) {
         self.introspections.extend(introspections);
-        self.delayed.extend(delayed);
+        self.active_delayed().extend(delayed);
         for warning in warnings {
             self.warn(warning);
         }
-        if let Some(remaining) = Self::MAX_VALUES.checked_sub(self.values.len()) {
-            self.values.extend(values.into_iter().take(remaining));
+        if let Some(remaining) = Self::MAX_VALUES.checked_sub(self.active_value_count()) {
+            self.active_values().extend(values.into_iter().take(remaining));
         }
     }
 }

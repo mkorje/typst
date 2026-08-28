@@ -12,9 +12,9 @@ use typst_library::introspection::{
     Introspector, Location, Locator, LocatorLink, SplitLocator, Tag, TagElem,
 };
 use typst_library::layout::{
-    Abs, AlignElem, Alignment, Axes, BlockElem, ColbreakElem, FixedAlignment, FlushElem,
-    Fr, Fragment, Frame, FrameParent, Inherit, PagebreakElem, PlaceElem, PlacementScope,
-    Ratio, Region, Regions, Rel, Size, Sizing, Spacing, VElem,
+    Abs, AlignElem, Alignment, Axes, BlockBody, BlockElem, ColbreakElem, FixedAlignment,
+    FlushElem, Fr, Fragment, Frame, FrameParent, Inherit, PagebreakElem, PlaceElem,
+    PlacementScope, Ratio, Region, Regions, Rel, Size, Sizing, Spacing, VElem,
 };
 use typst_library::model::ParElem;
 use typst_library::routines::Pair;
@@ -22,7 +22,12 @@ use typst_library::text::TextElem;
 use typst_library::{Library, World};
 use typst_utils::{LazyHash, Protected, SliceExt};
 
-use super::{FlowMode, layout_multi_block, layout_single_block};
+use super::block::layout_multi_block_controlled;
+use super::{
+    BreakChoice, ChildId, ComposeStop, ControlledFragment, FlowControl, FlowMode,
+    FlowPathId, LayoutAttempt, StickyChoices, StickyScore, layout_multi_block,
+    layout_single_block,
+};
 use crate::inline::ParSituation;
 use crate::modifiers::layout_and_modify;
 
@@ -224,8 +229,14 @@ impl<'a> Collector<'a, '_, '_> {
                 frame.height()
             };
 
-            self.output
-                .push(Child::Line(self.boxed(LineChild { frame, align, need })));
+            let optional_break_before =
+                !(prevent_orphans && i == 1 || prevent_widows && i + 1 == len);
+            self.output.push(Child::Line(self.boxed(LineChild {
+                frame,
+                align,
+                need,
+                optional_break_before,
+            })));
         }
     }
 
@@ -365,12 +376,34 @@ pub enum Child<'a> {
     Break(bool),
 }
 
+impl Child<'_> {
+    /// Whether this is a sticky in-flow child.
+    pub(super) fn sticky(&self) -> bool {
+        match self {
+            Self::Single(single) => single.sticky,
+            Self::Multi(multi) => multi.sticky,
+            _ => false,
+        }
+    }
+
+    /// Whether an enclosing sticky breakable block may legally shape its tail
+    /// at the boundary before this child.
+    pub(super) fn optional_break_before(&self) -> bool {
+        match self {
+            Self::Line(line) => line.optional_break_before,
+            Self::Single(_) | Self::Multi(_) => true,
+            _ => false,
+        }
+    }
+}
+
 /// A child that encapsulates a layouted line of a paragraph.
 #[derive(Debug)]
 pub struct LineChild {
     pub frame: Frame,
     pub align: Axes<FixedAlignment>,
     pub need: Abs,
+    pub optional_break_before: bool,
 }
 
 /// A child that encapsulates a prepared unbreakable block.
@@ -388,8 +421,13 @@ pub struct SingleChild<'a> {
 
 impl SingleChild<'_> {
     /// Build the child's frame given the region's base size.
-    pub fn layout(&self, engine: &mut Engine, region: Region) -> SourceResult<Frame> {
-        self.cell.get_or_init(region, |mut region| {
+    pub fn layout(
+        &self,
+        engine: &mut Engine,
+        region: Region,
+        attempt: LayoutAttempt,
+    ) -> SourceResult<Frame> {
+        self.cell.get_or_init(attempt, region, |mut region| {
             // Vertical expansion is only kept if this block is the only child.
             region.expand.y &= self.alone;
             layout_single_impl(
@@ -452,24 +490,73 @@ pub struct MultiChild<'a> {
     cell: CachedCell<SourceResult<Fragment>>,
 }
 
+pub(super) struct MultiLayoutContext<'a> {
+    pub(super) attempt: LayoutAttempt,
+    pub(super) child: ChildId,
+    pub(super) path: FlowPathId,
+    pub(super) controlled: bool,
+    pub(super) choices: &'a mut StickyChoices,
+}
+
+pub(super) struct MultiLayout<'a, 'b> {
+    pub(super) frame: Frame,
+    pub(super) spill: Option<MultiSpill<'a, 'b>>,
+    pub(super) completed_score: Option<StickyScore>,
+}
+
 impl<'a> MultiChild<'a> {
     /// Build the child's frames given regions.
     pub fn layout<'b>(
         &'b self,
         engine: &mut Engine,
         regions: Regions,
-    ) -> SourceResult<(Frame, Option<MultiSpill<'a, 'b>>)> {
-        let fragment = self.layout_full(engine, regions)?;
-        let exist_non_empty_frame = fragment.iter().any(|f| !f.is_empty());
+        context: MultiLayoutContext,
+    ) -> Result<MultiLayout<'a, 'b>, ComposeStop> {
+        let MultiLayoutContext { attempt, child, path, controlled, choices } = context;
+        let controlled_content = controlled && self.has_content_body();
+        let nested_path =
+            if controlled_content { path.child(child) } else { path.clone() };
+        let (fragment, decisions, nested_score, complete) = if controlled_content {
+            let output = self.layout_full_controlled(
+                engine,
+                regions,
+                nested_path.clone(),
+                choices.remaining(),
+                0,
+            )?;
+            let Some(decisions) = choices.consume(output.consumed) else {
+                unreachable!("nested flow consumed decisions beyond its replay plan");
+            };
+            (output.fragment, decisions.to_vec(), output.score, output.complete)
+        } else {
+            (
+                self.layout_full(engine, regions, attempt)
+                    .map_err(ComposeStop::Error)?,
+                vec![],
+                StickyScore::default(),
+                true,
+            )
+        };
+        let exist_non_empty_frame =
+            !complete || fragment.iter().any(|frame| !frame.is_empty());
 
         // Extract the first frame.
         let mut frames = fragment.into_iter();
-        let frame = frames.next().unwrap();
+        let Some(frame) = frames.next() else {
+            unreachable!("breakable block layout produced no region frame");
+        };
 
         // If there's more, return a `spill`.
         let mut spill = None;
-        if frames.next().is_some() {
+        let has_more =
+            if controlled_content { !complete } else { frames.next().is_some() };
+        if has_more {
             spill = Some(MultiSpill {
+                child,
+                path: nested_path,
+                controlled,
+                decisions,
+                nested_score,
                 exist_non_empty_frame,
                 multi: self,
                 full: regions.full,
@@ -479,7 +566,37 @@ impl<'a> MultiChild<'a> {
             });
         }
 
-        Ok((frame, spill))
+        let completed_score = spill.is_none().then_some(nested_score);
+        Ok(MultiLayout { frame, spill, completed_score })
+    }
+
+    fn has_content_body(&self) -> bool {
+        matches!(self.elem.body.get_ref(self.styles), Some(BlockBody::Content(_)))
+    }
+
+    fn layout_full_controlled(
+        &self,
+        engine: &mut Engine,
+        regions: Regions,
+        path: FlowPathId,
+        decisions: &[BreakChoice],
+        limit: usize,
+    ) -> Result<ControlledFragment, ComposeStop> {
+        let mut regions = regions;
+        regions.expand.y &= self.alone;
+        layout_multi_controlled_impl(
+            engine.world,
+            engine.library,
+            engine.introspector.into_raw(),
+            engine.traced,
+            TrackedMut::reborrow_mut(&mut engine.sink),
+            engine.route.track(),
+            self.elem,
+            self.locator.track(),
+            self.styles,
+            regions,
+            FlowControl { path, tail_breaks: self.sticky, decisions, limit },
+        )
     }
 
     /// The shared internal implementation of [`Self::layout`] and
@@ -488,8 +605,9 @@ impl<'a> MultiChild<'a> {
         &self,
         engine: &mut Engine,
         regions: Regions,
+        attempt: LayoutAttempt,
     ) -> SourceResult<Fragment> {
-        self.cell.get_or_init(regions, |mut regions| {
+        self.cell.get_or_init(attempt, regions, |mut regions| {
             // Vertical expansion is only kept if this block is the only child.
             regions.expand.y &= self.alone;
             layout_multi_impl(
@@ -506,6 +624,45 @@ impl<'a> MultiChild<'a> {
             )
         })
     }
+}
+
+#[comemo::memoize]
+#[expect(clippy::too_many_arguments)]
+fn layout_multi_controlled_impl(
+    world: Tracked<dyn World + '_>,
+    library: &LazyHash<Library>,
+    introspector: Tracked<dyn Introspector + '_>,
+    traced: Tracked<Traced>,
+    sink: TrackedMut<Sink>,
+    route: Tracked<Route>,
+    elem: &Packed<BlockElem>,
+    locator: Tracked<Locator>,
+    styles: StyleChain,
+    regions: Regions,
+    control: FlowControl,
+) -> Result<ControlledFragment, ComposeStop> {
+    let introspector = Protected::from_raw(introspector);
+    let link = LocatorLink::new(locator);
+    let locator = Locator::link(&link);
+    let mut engine = Engine {
+        library,
+        world,
+        introspector,
+        traced,
+        sink,
+        route: Route::extend(route),
+    };
+
+    layout_and_modify(styles, |styles| {
+        layout_multi_block_controlled(
+            elem,
+            &mut engine,
+            locator,
+            styles,
+            regions,
+            control,
+        )
+    })
 }
 
 /// The cached, internal implementation of [`MultiChild::layout_full`].
@@ -543,6 +700,11 @@ fn layout_multi_impl(
 /// The spilled remains of a `MultiChild` that broke across two regions.
 #[derive(Debug, Clone)]
 pub struct MultiSpill<'a, 'b> {
+    child: ChildId,
+    path: FlowPathId,
+    controlled: bool,
+    decisions: Vec<BreakChoice>,
+    nested_score: StickyScore,
     pub(super) exist_non_empty_frame: bool,
     multi: &'b MultiChild<'a>,
     first: Abs,
@@ -551,13 +713,39 @@ pub struct MultiSpill<'a, 'b> {
     min_backlog_len: usize,
 }
 
-impl MultiSpill<'_, '_> {
+impl<'a, 'b> MultiSpill<'a, 'b> {
+    /// The identity of the breakable child that produced this spill.
+    pub(super) fn child_id(&self) -> ChildId {
+        self.child
+    }
+
+    pub(super) fn sticky(&self) -> bool {
+        self.multi.sticky
+    }
+
+    pub(super) fn key(&self) -> MultiSpillKey {
+        MultiSpillKey {
+            child: self.child,
+            path: self.path.clone(),
+            controlled: self.controlled,
+            decisions: self.decisions.clone(),
+            nested_score: self.nested_score,
+            exist_non_empty_frame: self.exist_non_empty_frame,
+            first: self.first,
+            full: self.full,
+            backlog: self.backlog.clone(),
+            min_backlog_len: self.min_backlog_len,
+        }
+    }
+
     /// Build the spill's frames given regions.
     pub fn layout(
         mut self,
         engine: &mut Engine,
         regions: Regions,
-    ) -> SourceResult<(Frame, Option<Self>)> {
+        attempt: LayoutAttempt,
+        choices: &mut StickyChoices,
+    ) -> Result<MultiLayout<'a, 'b>, ComposeStop> {
         // The first region becomes unchangeable and committed to our backlog.
         self.backlog.push(regions.size.y);
 
@@ -583,14 +771,45 @@ impl MultiSpill<'_, '_> {
         };
 
         // Extract the not-yet-processed frames.
-        let mut frames = self
-            .multi
-            .layout_full(engine, pod)?
-            .into_iter()
-            .skip(self.backlog.len());
+        let (fragment, controlled_complete) = if self.controlled
+            && self.multi.has_content_body()
+        {
+            let old = self.decisions.len();
+            let mut decisions = self.decisions.clone();
+            decisions.extend_from_slice(choices.remaining());
+            let output = self.multi.layout_full_controlled(
+                engine,
+                pod,
+                self.path.clone(),
+                &decisions,
+                self.backlog.len(),
+            )?;
+            let Some(added) = output.consumed.checked_sub(old) else {
+                unreachable!(
+                    "nested flow replay stopped before consuming its committed decisions"
+                );
+            };
+            let Some(decisions) = choices.consume(added) else {
+                unreachable!(
+                    "nested continuation consumed decisions beyond its replay plan"
+                );
+            };
+            self.decisions.extend_from_slice(decisions);
+            self.nested_score = output.score;
+            (output.fragment, Some(output.complete))
+        } else {
+            (
+                self.multi
+                    .layout_full(engine, pod, attempt)
+                    .map_err(ComposeStop::Error)?,
+                None,
+            )
+        };
 
-        // Ensure that the backlog never shrinks, so that unwrapping below is at
-        // least fairly safe. Note that the whole region juggling here is
+        let mut frames = fragment.into_iter().skip(self.backlog.len());
+
+        // Ensure that the backlog never shrinks, so that the committed prefix
+        // remains present below. Note that the whole region juggling here is
         // fundamentally not ideal: It is a compatibility layer between the old
         // (all regions provided upfront) & new (each region provided on-demand,
         // like an iterator) layout model. This approach is not 100% correct, as
@@ -600,21 +819,43 @@ impl MultiSpill<'_, '_> {
         self.min_backlog_len = self.min_backlog_len.max(backlog.len());
 
         // Save the first frame.
-        let frame = frames.next().unwrap();
+        let Some(frame) = frames.next() else {
+            unreachable!(
+                "nested continuation changed an already committed fragment prefix"
+            );
+        };
 
         // If there's more, return a `spill`.
+        let score = self.nested_score;
         let mut spill = None;
-        if frames.next().is_some() {
+        let has_more = controlled_complete
+            .map_or_else(|| frames.next().is_some(), |complete| !complete);
+        if has_more {
             spill = Some(self);
         }
 
-        Ok((frame, spill))
+        let completed_score = spill.is_none().then_some(score);
+        Ok(MultiLayout { frame, spill, completed_score })
     }
 
     /// The alignment of the breakable block.
     pub fn align(&self) -> Axes<FixedAlignment> {
         self.multi.align
     }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub(super) struct MultiSpillKey {
+    child: ChildId,
+    path: FlowPathId,
+    controlled: bool,
+    decisions: Vec<BreakChoice>,
+    nested_score: StickyScore,
+    exist_non_empty_frame: bool,
+    first: Abs,
+    full: Abs,
+    backlog: Vec<Abs>,
+    min_backlog_len: usize,
 }
 
 /// A child that encapsulates a prepared placed element.
@@ -635,8 +876,13 @@ pub struct PlacedChild<'a> {
 
 impl PlacedChild<'_> {
     /// Build the child's frame given the region's base size.
-    pub fn layout(&self, engine: &mut Engine, base: Size) -> SourceResult<Frame> {
-        self.cell.get_or_init(base, |base| {
+    pub fn layout(
+        &self,
+        engine: &mut Engine,
+        base: Size,
+        attempt: LayoutAttempt,
+    ) -> SourceResult<Frame> {
+        self.cell.get_or_init(attempt, base, |base| {
             let align = self.alignment.unwrap_or_else(|| Alignment::CENTER);
             let aligned = AlignElem::alignment.set(align).wrap();
             let styles = self.styles.chain(&aligned);
@@ -683,13 +929,13 @@ impl<T> CachedCell<T> {
     }
 
     /// Perform the computation `f` with caching.
-    fn get_or_init<F, I>(&self, input: I, f: F) -> T
+    fn get_or_init<F, I>(&self, attempt: LayoutAttempt, input: I, f: F) -> T
     where
         I: Hash,
         T: Clone,
         F: FnOnce(I) -> T,
     {
-        let input_hash = typst_utils::hash128(&input);
+        let input_hash = typst_utils::hash128(&(attempt, &input));
 
         let mut slot = self.0.borrow_mut();
         if let Some((hash, output)) = &*slot

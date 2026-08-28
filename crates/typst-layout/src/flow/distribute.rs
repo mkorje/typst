@@ -1,13 +1,86 @@
+use std::convert::Infallible;
+
+use ecow::EcoVec;
+use typst_library::diag::SourceDiagnostic;
 use typst_library::introspection::Tag;
 use typst_library::layout::{
-    Abs, Axes, FixedAlignment, Fr, Frame, FrameItem, Point, Region, Regions, Rel, Size,
+    Abs, Axes, FixedAlignment, Fr, Frame, FrameItem, PlacementScope, Point, Region,
+    Regions, Rel, Size,
 };
 use typst_utils::Numeric;
 
-use super::{
-    Child, Composer, FlowResult, LineChild, MultiChild, MultiSpill, PlacedChild,
-    SingleChild, Stop, Work,
+use super::compose::{
+    Composer, FloatStop, FootnoteStop, Migration, RelayoutResult, RelayoutStop,
 };
+use super::{
+    BreakClass, BreakId, Child, ChildId, ComposeStop, LineChild, MultiChild, MultiLayout,
+    MultiLayoutContext, MultiSpill, PlacedChild, SingleChild, StickyObservation,
+    StickyScore, StickyTrace, Work,
+};
+
+/// The result type for internal distributor control flow.
+///
+/// The `Err(_)` variant incorporates control flow events for finishing and
+/// relayouting regions.
+type FlowResult<T> = Result<T, Stop>;
+
+/// A control flow event during distribution.
+enum Stop {
+    /// Indicates that the current subregion should be finished.
+    Finish(Finish),
+    /// Indicates that the given scope should be relayouted.
+    Relayout(PlacementScope),
+    /// Another sticky choice is needed before distribution can finish.
+    Sticky(StickyObservation),
+    /// The actual layout of a fractional block requires its origin to move.
+    /// Replay the column and finish immediately before this child.
+    MigrateFractional(ChildId),
+    /// A fatal error.
+    Error(EcoVec<SourceDiagnostic>),
+}
+
+/// The reason why the current region should finish.
+enum Finish {
+    /// A lack of space.
+    Soft,
+    /// An explicit break.
+    Forced,
+}
+
+impl From<EcoVec<SourceDiagnostic>> for Stop {
+    fn from(error: EcoVec<SourceDiagnostic>) -> Self {
+        Self::Error(error)
+    }
+}
+
+impl From<ComposeStop> for Stop {
+    fn from(stop: ComposeStop) -> Self {
+        match stop {
+            ComposeStop::Sticky(observation) => Self::Sticky(observation),
+            ComposeStop::Error(error) => Self::Error(error),
+        }
+    }
+}
+
+impl From<FootnoteStop> for Stop {
+    fn from(stop: FootnoteStop) -> Self {
+        match stop {
+            FootnoteStop::Relayout(()) => Self::Relayout(PlacementScope::Column),
+            FootnoteStop::MigrateOrigin(()) => Self::Finish(Finish::Soft),
+            FootnoteStop::Error(error) => Self::Error(error),
+        }
+    }
+}
+
+impl From<FloatStop> for Stop {
+    fn from(stop: FloatStop) -> Self {
+        match stop {
+            FloatStop::Relayout(scope) => Self::Relayout(scope),
+            FloatStop::MigrateOrigin(()) => Self::Finish(Finish::Soft),
+            FloatStop::Error(error) => Self::Error(error),
+        }
+    }
+}
 
 /// Distributes as many children as fit from `composer.work` into the first
 /// region and returns the resulting frame and the height actually used
@@ -16,24 +89,40 @@ pub fn distribute(
     composer: &mut Composer,
     regions: Regions,
     balancing_target: Option<Abs>,
-) -> FlowResult<(Frame, Abs)> {
+) -> RelayoutResult<(Frame, Abs)> {
+    composer.engine.sink.begin_effect_transaction();
+    let fractional_break = composer.fractional_break.take();
+    let fractional_forbid = composer.fractional_forbid.take();
     let mut distributor = Distributor {
         composer,
         regions,
         items: vec![],
         used: Size::zero(),
-        target: balancing_target,
-        sticky: None,
-        stickable: None,
+        balancing_target,
+        restored_init: false,
+        fractional_break,
+        fractional_forbid,
     };
     let init = distributor.snapshot();
-    let forced = match distributor.run() {
-        Ok(()) => distributor.composer.work.done(),
-        Err(Stop::Finish(forced)) => forced,
-        Err(err) => return Err(err),
+    let (flush, explicit) = match distributor.run() {
+        Ok(()) => (distributor.composer.work.done(), false),
+        Err(Stop::Finish(Finish::Soft)) => (false, false),
+        Err(Stop::Finish(Finish::Forced)) => (true, true),
+        Err(stop) => return Err(distributor.handle_stop(stop)),
     };
     let region = Region::new(regions.size, regions.expand);
-    distributor.finalize(region, init, forced)
+    let result = distributor.finalize(region, init, flush, explicit);
+    match result {
+        Ok(output) => {
+            if distributor.restored_init {
+                distributor.engine_rollback();
+            } else {
+                distributor.engine_commit();
+            }
+            Ok(output)
+        }
+        Err(stop) => Err(distributor.handle_stop(stop)),
+    }
 }
 
 /// State for distribution.
@@ -49,30 +138,13 @@ struct Distributor<'a, 'b, 'x, 'y, 'z> {
     /// Size used by laid out items.
     used: Size,
     /// The target height for column balancing.
-    target: Option<Abs>,
-    /// A snapshot which can be restored to migrate a suffix of sticky blocks to
-    /// the next region.
-    sticky: Option<DistributionSnapshot<'a, 'b>>,
-    /// Whether the current group of consecutive sticky blocks are still sticky
-    /// and may migrate with the attached frame. This is `None` while we aren't
-    /// processing sticky blocks. On the first sticky block, this will become
-    /// `Some(true)` if migrating sticky blocks as usual would make a
-    /// difference - this is given by `regions.may_progress()`. Otherwise, it
-    /// is set to `Some(false)`, which is usually the case when the first
-    /// sticky block in the group is at the very top of the page (then,
-    /// migrating it would just lead us back to the top of the page, leading
-    /// to an infinite loop). In that case, all sticky blocks of the group are
-    /// also disabled, until this is reset to `None` on the first non-sticky
-    /// frame we find.
-    ///
-    /// While this behavior of disabling stickiness of sticky blocks at the
-    /// very top of the page may seem non-ideal, it is only problematic (that
-    /// is, may lead to orphaned sticky blocks / headings) if the combination
-    /// of 'sticky blocks + attached frame' doesn't fit in one page, in which
-    /// case there is nothing Typst can do to improve the situation, as sticky
-    /// blocks are supposed to always be in the same page as the subsequent
-    /// frame, but that is impossible in that case, which is thus pathological.
-    stickable: Option<bool>,
+    balancing_target: Option<Abs>,
+    /// Whether finalization restored the empty region-entry snapshot.
+    restored_init: bool,
+    /// A fractional origin which should start in the following region.
+    fractional_break: Option<ChildId>,
+    /// A fractional origin which was already at a no-progress region top.
+    fractional_forbid: Option<ChildId>,
 }
 
 /// A snapshot of the distribution state.
@@ -80,6 +152,8 @@ struct DistributionSnapshot<'a, 'b> {
     work: Work<'a, 'b>,
     items: usize,
     used: Size,
+    trace: StickyTrace,
+    choices: usize,
 }
 
 /// A laid out item in a distribution.
@@ -89,11 +163,26 @@ enum Item<'a, 'b> {
     /// Absolute spacing and its weakness level.
     Abs(Abs, u8),
     /// Fractional spacing or a fractional block.
-    Fr(Fr, u8, Option<&'b SingleChild<'a>>),
+    Fr(Fr, u8, Option<FrItem<'a, 'b>>),
     /// A frame for a laid out line or block.
-    Frame(Frame, Axes<FixedAlignment>),
+    Frame(Frame, Axes<FixedAlignment>, FlowFrame),
     /// A frame for an absolutely (not floatingly) placed child.
     Placed(Frame, &'b PlacedChild<'a>),
+}
+
+#[derive(Copy, Clone)]
+struct FrItem<'a, 'b> {
+    child: ChildId,
+    single: &'b SingleChild<'a>,
+    preliminary_nonempty: bool,
+}
+
+#[derive(Copy, Clone)]
+struct FlowFrame {
+    child: ChildId,
+    sticky: bool,
+    complete: bool,
+    nested_score: StickyScore,
 }
 
 impl Item<'_, '_> {
@@ -102,7 +191,7 @@ impl Item<'_, '_> {
     fn migratable(&self) -> bool {
         match self {
             Self::Tag(_) => true,
-            Self::Frame(frame, _) => {
+            Self::Frame(frame, ..) => {
                 frame.size().is_zero()
                     && frame.items().all(|(_, item)| {
                         matches!(item, FrameItem::Link(_, _) | FrameItem::Tag(_))
@@ -124,8 +213,44 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
 
         // If spill are taken care of, process children until no space is left
         // or no children are left.
-        while let Some(child) = self.composer.work.head() {
-            self.child(child)?;
+        while let Some((id, child)) = self.composer.work.head() {
+            if self.fractional_break == Some(id) {
+                self.fractional_break = None;
+
+                // Repeated migration at an unchanged region top cannot
+                // progress.
+                if self.can_finish_before_fractional() {
+                    return Err(Stop::Finish(Finish::Soft));
+                }
+                self.fractional_forbid = Some(id);
+            }
+
+            let class = if child.sticky() {
+                Some(BreakClass::StickyStart)
+            } else if self.composer.config.tail_breaks && child.optional_break_before() {
+                Some(BreakClass::StickyTail)
+            } else {
+                None
+            };
+
+            if let Some(class) = class
+                && self.can_break_before_sticky()
+            {
+                let observation = StickyObservation {
+                    id: BreakId {
+                        path: self.composer.config.path.clone(),
+                        child: id,
+                        class,
+                    },
+                };
+                let migrate =
+                    self.composer.choices.decide(observation).map_err(Stop::Sticky)?;
+                if migrate {
+                    return Err(Stop::Finish(Finish::Soft));
+                }
+            }
+
+            self.child(id, child)?;
             self.composer.work.advance();
         }
 
@@ -138,33 +263,76 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
     /// - Returns `Err(Stop::Finish)` if a region break should be triggered.
     /// - Returns `Err(Stop::Relayout(_))` if the region needs to be relayouted
     ///   due to an insertion (float/footnote).
+    /// - Returns `Err(Stop::Sticky(_))` if a sticky choice is still pending.
     /// - Returns `Err(Stop::Error(_))` if there was a fatal error.
-    fn child(&mut self, child: &'b Child<'a>) -> FlowResult<()> {
+    fn child(&mut self, id: ChildId, child: &'b Child<'a>) -> FlowResult<()> {
         match child {
-            Child::Tag(tag) => self.tag(tag),
+            Child::Tag(_) => self.tag(id),
             Child::Rel(amount, weakness) => self.rel(*amount, *weakness),
             Child::Fr(fr, weakness) => self.fr(*fr, *weakness),
-            Child::Line(line) => self.line(line)?,
-            Child::Single(single) => self.single(single)?,
-            Child::Multi(multi) => self.multi(multi)?,
-            Child::Placed(placed) => self.placed(placed)?,
+            Child::Line(line) => self.line(id, line)?,
+            Child::Single(single) => self.single(id, single)?,
+            Child::Multi(multi) => self.multi(id, multi)?,
+            Child::Placed(placed) => self.placed(id, placed)?,
             Child::Flush => self.flush()?,
             Child::Break(weak) => self.break_(*weak)?,
         }
         Ok(())
     }
 
+    /// Whether finishing before a sticky child can change its placement. At
+    /// the top of a repeating region, taking the choice would only create an
+    /// infinite sequence of empty regions.
+    fn can_break_before_sticky(&self) -> bool {
+        let has_in_flow = self.items.iter().any(|item| match item {
+            Item::Frame(frame, ..) => !frame.is_empty(),
+            Item::Fr(_, _, Some(fr_item)) => fr_item.preliminary_nonempty,
+            _ => false,
+        });
+        if has_in_flow {
+            // Unlike overflow migration, a deliberate sticky break is useful
+            // even when the next region has the same geometry: emitting the
+            // current non-empty region is itself progress.
+            return self.regions.may_break();
+        }
+
+        self.next_region_is_taller()
+    }
+
+    /// Whether replaying the column and stopping before a fractional origin
+    /// makes concrete progress.
+    fn can_finish_before_fractional(&self) -> bool {
+        if !self.regions.may_break() {
+            return false;
+        }
+
+        if self.items.iter().any(|item| !item.migratable()) {
+            return true;
+        }
+
+        self.next_region_is_taller()
+    }
+
+    fn next_region_is_taller(&self) -> bool {
+        self.regions
+            .backlog
+            .first()
+            .copied()
+            .or(self.regions.last)
+            .is_some_and(|height| height > self.regions.size.y)
+    }
+
     /// Processes a tag.
-    fn tag(&mut self, tag: &'a Tag) {
-        self.composer.work.tags.push(tag);
+    fn tag(&mut self, id: ChildId) {
+        self.composer.work.tags.push(id);
     }
 
     /// Generate items for pending tags.
     fn flush_tags(&mut self) {
         if !self.composer.work.tags.is_empty() {
-            let tags = &mut self.composer.work.tags;
-            self.items.extend(tags.iter().copied().map(Item::Tag));
-            tags.clear();
+            let tags = std::mem::take(&mut self.composer.work.tags);
+            self.items
+                .extend(tags.into_iter().map(|id| Item::Tag(self.composer.work.tag(id))));
         }
     }
 
@@ -293,18 +461,18 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
     pub fn fits(&self, amount: Abs) -> bool {
         self.regions.size.y.fits(amount)
             && self
-                .target
+                .balancing_target
                 // Add elements as long as the balancing target is not reached. By not including
                 // the amount itself here, we avoid protruding items to cumulate in the last column.
                 .is_none_or(|target| target.fits(self.used.y))
     }
 
     /// Processes a line of a paragraph.
-    fn line(&mut self, line: &'b LineChild) -> FlowResult<()> {
+    fn line(&mut self, id: ChildId, line: &'b LineChild) -> FlowResult<()> {
         // If the line doesn't fit and a followup region may improve things,
         // finish the region.
         if !self.fits(line.frame.height()) && self.regions.may_progress() {
-            return Err(Stop::Finish(false));
+            return Err(Stop::Finish(Finish::Soft));
         }
 
         // If the line's need, which includes its own height and that of
@@ -318,44 +486,102 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
                 .nth(1)
                 .is_some_and(|region| region.y.fits(line.need))
         {
-            return Err(Stop::Finish(false));
+            return Err(Stop::Finish(Finish::Soft));
         }
 
-        self.frame(line.frame.clone(), line.align, false, false)
+        self.frame(
+            line.frame.clone(),
+            line.align,
+            false,
+            FlowFrame {
+                child: id,
+                sticky: false,
+                complete: true,
+                nested_score: StickyScore::default(),
+            },
+        )?;
+        Ok(())
     }
 
     /// Processes an unbreakable block.
-    fn single(&mut self, single: &'b SingleChild<'a>) -> FlowResult<()> {
+    fn single(&mut self, id: ChildId, single: &'b SingleChild<'a>) -> FlowResult<()> {
+        self.composer.engine.sink.begin_effect_transaction();
+
         // Lay out the block.
-        let frame = single.layout(
+        let frame = match single.layout(
             self.composer.engine,
             Region::new(self.regions.base(), self.regions.expand),
-        )?;
+            self.composer.attempt,
+        ) {
+            Ok(frame) => frame,
+            Err(error) => {
+                self.composer.engine.sink.commit_effect_transaction();
+                return Err(Stop::Error(error));
+            }
+        };
 
         // Handle fractionally sized blocks.
         if let Some(fr) = single.fr {
-            self.composer
-                .footnotes(&self.regions, &frame, Abs::zero(), false, true)?;
+            if self.composer.config.optimize {
+                self.composer.engine.sink.rollback_effect_transaction();
+            } else {
+                // The sticky-free path discovers footnotes in the preliminary
+                // frame.
+                let result = self
+                    .composer
+                    .footnotes(
+                        &self.regions,
+                        &frame,
+                        Abs::zero(),
+                        false,
+                        Migration::ALLOW,
+                    )
+                    .map_err(Stop::from);
+                self.finish_child_effects(&result);
+                result?;
+            }
             self.flush_tags();
-            self.items.push(Item::Fr(fr, 0, Some(single)));
+            self.items.push(Item::Fr(
+                fr,
+                0,
+                Some(FrItem {
+                    child: id,
+                    single,
+                    preliminary_nonempty: !frame.is_empty(),
+                }),
+            ));
             return Ok(());
         }
 
         // If the block doesn't fit and a followup region may improve things,
         // finish the region.
         if !self.fits(frame.height()) && self.regions.may_progress() {
-            return Err(Stop::Finish(false));
+            self.composer.engine.sink.rollback_effect_transaction();
+            return Err(Stop::Finish(Finish::Soft));
         }
 
-        self.frame(frame, single.align, single.sticky, false)
+        let result = self.frame(
+            frame,
+            single.align,
+            false,
+            FlowFrame {
+                child: id,
+                sticky: single.sticky,
+                complete: true,
+                nested_score: StickyScore::default(),
+            },
+        );
+        self.finish_child_effects(&result);
+        result?;
+        Ok(())
     }
 
     /// Processes a breakable block.
-    fn multi(&mut self, multi: &'b MultiChild<'a>) -> FlowResult<()> {
+    fn multi(&mut self, id: ChildId, multi: &'b MultiChild<'a>) -> FlowResult<()> {
         let mut pod = self.regions;
 
         // For column balancing, reduce the region size for layout.
-        if let Some(lim) = self.target {
+        if let Some(lim) = self.balancing_target {
             let remaining = lim - self.used.y;
             pod.size.y.set_min(remaining);
         }
@@ -363,11 +589,32 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         // Skip directly if the region is already (over)full. `line` and
         // `single` implicitly do this through their `fits` checks.
         if pod.is_full() {
-            return Err(Stop::Finish(false));
+            return Err(Stop::Finish(Finish::Soft));
         }
 
+        self.composer.engine.sink.begin_effect_transaction();
+        let choices_checkpoint = self.composer.choices.checkpoint();
+
         // Lay out the block.
-        let (frame, spill) = multi.layout(self.composer.engine, pod)?;
+        let context = MultiLayoutContext {
+            attempt: self.composer.attempt,
+            child: id,
+            path: self.composer.config.path.clone(),
+            controlled: self.composer.config.optimize,
+            choices: self.composer.choices,
+        };
+        let output = match multi.layout(self.composer.engine, pod, context) {
+            Ok(output) => output,
+            Err(ComposeStop::Sticky(observation)) => {
+                self.composer.engine.sink.rollback_effect_transaction();
+                return Err(Stop::Sticky(observation));
+            }
+            Err(ComposeStop::Error(error)) => {
+                self.composer.engine.sink.commit_effect_transaction();
+                return Err(Stop::Error(error));
+            }
+        };
+        let MultiLayout { frame, spill, completed_score: nested_score } = output;
         if frame.is_empty()
             && spill.as_ref().is_some_and(|s| s.exist_non_empty_frame)
             && self.regions.may_progress()
@@ -375,20 +622,19 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
             // If the first frame is empty, but there are non-empty frames in
             // the spill, the whole child should be put in the next region to
             // avoid any invisible orphans at the end of this region.
-            return Err(Stop::Finish(false));
+            self.composer.choices.restore(choices_checkpoint);
+            self.composer.engine.sink.rollback_effect_transaction();
+            return Err(Stop::Finish(Finish::Soft));
         }
 
-        self.frame(frame, multi.align, multi.sticky, true)?;
-
-        // If the block didn't fully fit into the current region, save it into
-        // the `spill` and finish the region.
-        if let Some(spill) = spill {
-            self.composer.work.spill = Some(spill);
-            self.composer.work.advance();
-            return Err(Stop::Finish(false));
-        }
-
-        Ok(())
+        self.accept_multi(
+            id,
+            multi.sticky,
+            multi.align,
+            MultiLayout { frame, spill, completed_score: nested_score },
+            choices_checkpoint,
+            None,
+        )
     }
 
     /// Processes spillover from a breakable block.
@@ -396,7 +642,7 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         let mut pod = self.regions;
 
         // For column balancing, reduce the region size for layout.
-        if let Some(lim) = self.target {
+        if let Some(lim) = self.balancing_target {
             let remaining = lim - self.used.y;
             pod.size.y.set_min(remaining);
         }
@@ -404,19 +650,84 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         // Skip directly if the region is already (over)full.
         if pod.is_full() {
             self.composer.work.spill = Some(spill);
-            return Err(Stop::Finish(false));
+            return Err(Stop::Finish(Finish::Soft));
         }
 
-        // Lay out the spilled remains.
-        let align = spill.align();
-        let (frame, spill) = spill.layout(self.composer.engine, pod)?;
-        self.frame(frame, align, false, true)?;
+        let original = spill.clone();
+        let choices_checkpoint = self.composer.choices.checkpoint();
+        self.composer.engine.sink.begin_effect_transaction();
 
-        // If there's still more, save it into the `spill` and finish the
-        // region.
+        // Lay out the spilled remains.
+        let child = spill.child_id();
+        let sticky = spill.sticky();
+        let align = spill.align();
+        let output = match spill.layout(
+            self.composer.engine,
+            pod,
+            self.composer.attempt,
+            self.composer.choices,
+        ) {
+            Ok(output) => output,
+            Err(ComposeStop::Sticky(observation)) => {
+                self.composer.work.spill = Some(original);
+                self.composer.choices.restore(choices_checkpoint);
+                self.composer.engine.sink.rollback_effect_transaction();
+                return Err(Stop::Sticky(observation));
+            }
+            Err(ComposeStop::Error(error)) => {
+                self.composer.engine.sink.commit_effect_transaction();
+                return Err(Stop::Error(error));
+            }
+        };
+        self.accept_multi(
+            child,
+            sticky,
+            align,
+            output,
+            choices_checkpoint,
+            Some(original),
+        )
+    }
+
+    fn accept_multi(
+        &mut self,
+        child: ChildId,
+        sticky: bool,
+        align: Axes<FixedAlignment>,
+        output: MultiLayout<'a, 'b>,
+        choices_checkpoint: usize,
+        original: Option<MultiSpill<'a, 'b>>,
+    ) -> FlowResult<()> {
+        let continuation = original.is_some();
+        let MultiLayout { frame, spill, completed_score } = output;
+        let complete = spill.is_none();
+
+        let result = self.frame(
+            frame,
+            align,
+            true,
+            FlowFrame {
+                child,
+                sticky,
+                complete,
+                nested_score: completed_score.unwrap_or_default(),
+            },
+        );
+        if matches!(&result, Err(stop) if !matches!(stop, Stop::Error(_))) {
+            if let Some(original) = original {
+                self.composer.work.spill = Some(original);
+            }
+            self.composer.choices.restore(choices_checkpoint);
+        }
+        self.finish_child_effects(&result);
+        result?;
+
         if let Some(spill) = spill {
             self.composer.work.spill = Some(spill);
-            return Err(Stop::Finish(false));
+            if !continuation {
+                self.composer.work.advance();
+            }
+            return Err(Stop::Finish(Finish::Soft));
         }
 
         Ok(())
@@ -427,65 +738,28 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         &mut self,
         frame: Frame,
         align: Axes<FixedAlignment>,
-        sticky: bool,
         breakable: bool,
+        flow: FlowFrame,
     ) -> FlowResult<()> {
-        // If the frame is sticky and we haven't remembered a preceding sticky
-        // element, make a checkpoint which we can restore should we end on
-        // this sticky element.
-        //
-        // The first sticky block within consecutive sticky blocks determines
-        // whether this group of sticky blocks has stickiness disabled or not.
-        //
-        // The criteria used here is: if migrating this group of sticky blocks
-        // together with the "attached" block can't improve the lack of space,
-        // since we're at the start of the region, then we don't do so, and
-        // stickiness is disabled (at least, for this region). Otherwise,
-        // migration is allowed.
-        //
-        // Note that, since the whole region is checked, this ensures sticky
-        // blocks at the top of a block - but not necessarily of the page - can
-        // still be migrated.
-        if sticky
-            && self.sticky.is_none()
-            && *self.stickable.get_or_insert_with(|| self.regions.may_progress())
-        {
-            self.sticky = Some(self.snapshot());
-        }
-
-        // Handle footnotes.
-        //
-        // This must happen before we forget a previous sticky snapshot below.
-        // If a non-sticky frame's footnote doesn't fit, the frame and any
-        // preceding sticky blocks attached to it need to migrate to the next
-        // region together. Resetting the sticky state first would then strand
-        // those sticky blocks in this region.
         self.composer.footnotes(
             &self.regions,
             &frame,
             frame.height(),
             breakable,
-            true,
+            Migration::ALLOW,
         )?;
-
-        if !sticky && !frame.is_empty() {
-            // If the frame isn't sticky, we can forget a previous snapshot. We
-            // interrupt a group of sticky blocks, if there was one, so we reset
-            // the saved stickable check for the next group of sticky blocks.
-            self.sticky = None;
-            self.stickable = None;
-        }
 
         // Push an item for the frame.
         self.use_height(frame.height());
         self.used.x.set_max(frame.width());
         self.flush_tags();
-        self.items.push(Item::Frame(frame, align));
+        self.items.push(Item::Frame(frame, align, flow));
         Ok(())
     }
 
     /// Processes an absolutely or floatingly placed child.
-    fn placed(&mut self, placed: &'b PlacedChild<'a>) -> FlowResult<()> {
+    fn placed(&mut self, id: ChildId, placed: &'b PlacedChild<'a>) -> FlowResult<()> {
+        self.composer.engine.sink.begin_effect_transaction();
         if placed.float {
             // If the element is floatingly placed, let the composer handle it.
             // It might require relayout because the area available for
@@ -494,17 +768,54 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
             // ends up at a break due to the float.
             let weak_spacing = self.weak_spacing();
             self.use_height(-weak_spacing);
-            self.composer.float(
+            let result = self.composer.float(
+                id,
                 placed,
                 &self.regions,
                 self.items.iter().any(|item| matches!(item, Item::Frame(..))),
-                true,
-            )?;
-            self.use_height(weak_spacing);
+                Migration::ALLOW,
+            );
+            match result {
+                Ok(()) => {
+                    // A queued/skipped float has not been committed visually;
+                    // it will be laid out again in the insertion area.
+                    self.composer.engine.sink.rollback_effect_transaction();
+                    self.use_height(weak_spacing);
+                }
+                Err(FloatStop::Relayout(scope)) => {
+                    // `Composer::float` promoted only the insertion-owned
+                    // effects. The surrounding child attempt is abandoned and
+                    // will be replayed after the insertion fixed point settles.
+                    self.composer.engine.sink.rollback_effect_transaction();
+                    return Err(Stop::Relayout(scope));
+                }
+                Err(FloatStop::MigrateOrigin(())) => {
+                    self.composer.engine.sink.rollback_effect_transaction();
+                    return Err(Stop::Finish(Finish::Soft));
+                }
+                Err(FloatStop::Error(error)) => {
+                    self.composer.engine.sink.commit_effect_transaction();
+                    return Err(Stop::Error(error));
+                }
+            }
         } else {
-            let frame = placed.layout(self.composer.engine, self.regions.base())?;
-            self.composer
-                .footnotes(&self.regions, &frame, Abs::zero(), true, true)?;
+            let frame = match placed.layout(
+                self.composer.engine,
+                self.regions.base(),
+                self.composer.attempt,
+            ) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    self.composer.engine.sink.commit_effect_transaction();
+                    return Err(Stop::Error(error));
+                }
+            };
+            let result = self
+                .composer
+                .footnotes(&self.regions, &frame, Abs::zero(), true, Migration::ALLOW)
+                .map_err(Stop::from);
+            self.finish_child_effects(&result);
+            result?;
             self.flush_tags();
             self.items.push(Item::Placed(frame, placed));
         }
@@ -516,7 +827,7 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         // If there are still pending floats, finish the region instead of
         // adding more content to it.
         if !self.composer.work.floats.is_empty() {
-            return Err(Stop::Finish(false));
+            return Err(Stop::Finish(Finish::Soft));
         }
         Ok(())
     }
@@ -528,7 +839,7 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
             && (!self.regions.backlog.is_empty() || self.regions.last.is_some())
         {
             self.composer.work.advance();
-            return Err(Stop::Finish(true));
+            return Err(Stop::Finish(Finish::Forced));
         }
         Ok(())
     }
@@ -537,24 +848,19 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
     ///
     /// This performs alignment and resolves fractional spacing and blocks.
     fn finalize(
-        mut self,
+        &mut self,
         region: Region,
         init: DistributionSnapshot<'a, 'b>,
-        forced: bool,
+        flush: bool,
+        explicit: bool,
     ) -> FlowResult<(Frame, Abs)> {
-        if forced {
+        let trace_init = init.trace.clone();
+        if flush {
             // If this is the very end of the flow, flush pending tags.
             self.flush_tags();
         } else if !self.items.is_empty() && self.items.iter().all(Item::migratable) {
             // Restore the initial state of all items are migratable.
             self.restore(init);
-        } else {
-            // If we ended on a sticky block, but are not yet at the end of
-            // the flow, restore the saved checkpoint to move the sticky
-            // suffix to the next region.
-            if let Some(snapshot) = self.sticky.take() {
-                self.restore(snapshot);
-            }
         }
 
         self.trim_spacing();
@@ -581,14 +887,71 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         // Lay out fractionally sized blocks.
         let mut fr_frames = vec![];
         if has_fr_child {
-            for item in &self.items {
-                let Item::Fr(v, _, Some(single)) = item else { continue };
-                let length = v.share(frs, fr_space);
+            // Preliminary layouts were rolled back in optimized flows.
+            let fractional_attempt = if self.composer.config.optimize {
+                self.composer.config.next_attempt()
+            } else {
+                self.composer.attempt
+            };
+            let fr_items: Vec<_> = self
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    Item::Fr(fr, _, Some(child)) => Some((*fr, *child)),
+                    _ => None,
+                })
+                .collect();
+            for (fr, fr_item) in fr_items {
+                let length = fr.share(frs, fr_space);
                 let pod = Region::new(Size::new(region.size.x, length), region.expand);
-                let frame = single.layout(self.composer.engine, pod)?;
+                let frame = fr_item.single.layout(
+                    self.composer.engine,
+                    pod,
+                    fractional_attempt,
+                )?;
+                if self.composer.config.optimize {
+                    self.fractional_footnotes(fr_item.child, &frame)?;
+                }
                 self.used.x.set_max(frame.width());
                 fr_frames.push(frame);
             }
+        }
+
+        // Rebuild sticky state from the retained frames, using the allocated
+        // frames for fractional children.
+        self.composer.trace.restore(trace_init);
+        let mut actual_fr_frames = fr_frames.iter();
+        for item in &self.items {
+            let (frame, flow) = match item {
+                Item::Frame(frame, _, flow) => (frame, *flow),
+                Item::Fr(_, _, Some(fr_item)) => {
+                    let Some(frame) = actual_fr_frames.next() else {
+                        unreachable!("fractional block replay lost its allocated frame");
+                    };
+                    (
+                        frame,
+                        FlowFrame {
+                            child: fr_item.child,
+                            sticky: fr_item.single.sticky,
+                            complete: true,
+                            nested_score: StickyScore::default(),
+                        },
+                    )
+                }
+                _ => continue,
+            };
+
+            self.composer.trace.begin(flow.child, flow.sticky);
+            if !frame.is_empty() {
+                self.composer.trace.place(flow.child);
+            }
+            if flow.complete {
+                self.composer.trace.finish(flow.child);
+                self.composer.trace.add_score(flow.nested_score);
+            }
+        }
+        if explicit {
+            self.composer.trace.force_break();
         }
 
         // Also consider the width of insertions for alignment.
@@ -607,7 +970,7 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
 
         // Position all items.
         let mut baseline_set = false;
-        for item in self.items {
+        for item in std::mem::take(&mut self.items) {
             match item {
                 Item::Tag(tag) => {
                     let y = offset + ruler.position(free);
@@ -619,15 +982,19 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
                 }
                 Item::Fr(v, _, single) => {
                     let length = v.share(frs, fr_space);
-                    if let Some(single) = single {
-                        let frame = fr_frames.next().unwrap();
-                        let x = single.align.x.position(size.x - frame.width());
+                    if let Some(fr_item) = single {
+                        let Some(frame) = fr_frames.next() else {
+                            unreachable!(
+                                "fractional block output lost its allocated frame"
+                            );
+                        };
+                        let x = fr_item.single.align.x.position(size.x - frame.width());
                         let pos = Point::new(x, offset);
                         output.push_frame(pos, frame);
                     }
                     offset += length;
                 }
-                Item::Frame(frame, align) => {
+                Item::Frame(frame, align, _) => {
                     ruler = ruler.max(align.y);
 
                     let x = align.x.position(size.x - frame.width());
@@ -673,6 +1040,8 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
             work: self.composer.work.clone(),
             items: self.items.len(),
             used: self.used,
+            trace: self.composer.trace.checkpoint(),
+            choices: self.composer.choices.checkpoint(),
         }
     }
 
@@ -681,5 +1050,99 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         *self.composer.work = snapshot.work;
         self.items.truncate(snapshot.items);
         self.used = snapshot.used;
+        self.composer.trace.restore(snapshot.trace);
+        self.composer.choices.restore(snapshot.choices);
+        self.restored_init = true;
+    }
+
+    /// Handle footnotes from an allocated fractional frame.
+    fn fractional_footnotes(&mut self, child: ChildId, frame: &Frame) -> FlowResult<()> {
+        if self.fractional_forbid == Some(child) {
+            let result: Result<_, FootnoteStop<Infallible>> = self.composer.footnotes(
+                &self.regions,
+                frame,
+                frame.height(),
+                false,
+                Migration::FORBID,
+            );
+            return match result {
+                Ok(()) => {
+                    self.fractional_forbid = None;
+                    Ok(())
+                }
+                Err(FootnoteStop::Relayout(())) => {
+                    Err(Stop::Relayout(PlacementScope::Column))
+                }
+                Err(FootnoteStop::MigrateOrigin(never)) => match never {},
+                Err(FootnoteStop::Error(error)) => Err(Stop::Error(error)),
+            };
+        }
+
+        match self.composer.footnotes(
+            &self.regions,
+            frame,
+            frame.height(),
+            false,
+            Migration::ALLOW,
+        ) {
+            Ok(()) => Ok(()),
+            Err(FootnoteStop::Relayout(())) => {
+                Err(Stop::Relayout(PlacementScope::Column))
+            }
+            Err(FootnoteStop::MigrateOrigin(())) => Err(Stop::MigrateFractional(child)),
+            Err(FootnoteStop::Error(error)) => Err(Stop::Error(error)),
+        }
+    }
+
+    fn engine_commit(&mut self) {
+        self.composer.engine.sink.commit_effect_transaction();
+    }
+
+    /// Retain a pending fractional migration across an insertion-driven
+    /// column replay. Stable region completion intentionally drops it.
+    fn preserve_fractional_migration(&mut self) {
+        self.composer.fractional_break = self.fractional_break;
+        self.composer.fractional_forbid = self.fractional_forbid;
+    }
+
+    fn engine_rollback(&mut self) {
+        self.composer.engine.sink.rollback_effect_transaction();
+    }
+
+    fn handle_stop(&mut self, stop: Stop) -> RelayoutStop {
+        match stop {
+            Stop::Relayout(scope) => {
+                self.preserve_fractional_migration();
+                self.engine_rollback();
+                RelayoutStop::Relayout(scope)
+            }
+            Stop::Error(error) => {
+                self.engine_commit();
+                RelayoutStop::Error(error)
+            }
+            Stop::Sticky(observation) => {
+                self.engine_rollback();
+                RelayoutStop::Sticky(observation)
+            }
+            Stop::MigrateFractional(child) => {
+                self.composer.fractional_break = Some(child);
+                self.engine_rollback();
+                RelayoutStop::Relayout(PlacementScope::Column)
+            }
+            Stop::Finish(_) => {
+                self.engine_rollback();
+                unreachable!(
+                    "flow distribution requested a late region finish without a replay target"
+                );
+            }
+        }
+    }
+
+    fn finish_child_effects(&mut self, result: &FlowResult<()>) {
+        if matches!(result, Ok(()) | Err(Stop::Error(_))) {
+            self.engine_commit();
+        } else {
+            self.engine_rollback();
+        }
     }
 }
