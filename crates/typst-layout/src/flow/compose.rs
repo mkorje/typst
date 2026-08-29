@@ -175,6 +175,7 @@ pub(super) struct ComposeContext<'a> {
     pub(super) choices: &'a mut StickyChoices,
     pub(super) trace: &'a mut StickyTrace,
     pub(super) effects: EffectTransaction,
+    pub(super) line_numbers: bool,
 }
 
 /// Composes the contents of a single page/region. A region can have multiple
@@ -195,7 +196,7 @@ pub fn compose(
     regions: Regions,
     context: ComposeContext,
 ) -> ComposeResult<Frame> {
-    let ComposeContext { attempt, choices, trace, effects } = context;
+    let ComposeContext { attempt, choices, trace, effects, line_numbers } = context;
     Composer {
         engine,
         config,
@@ -214,6 +215,7 @@ pub fn compose(
         attempt,
         choices,
         trace,
+        line_numbers,
     }
     .page(locator, regions)
 }
@@ -252,6 +254,7 @@ pub struct Composer<'a, 'b, 'x, 'y> {
     pub(super) attempt: LayoutAttempt,
     pub(super) choices: &'x mut StickyChoices,
     pub(super) trace: &'x mut StickyTrace,
+    line_numbers: bool,
 }
 
 impl<'a, 'b> Composer<'a, 'b, '_, '_> {
@@ -472,7 +475,9 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
         );
 
         // Lay out per-column line numbers.
-        if let Some(line_config) = &self.config.line_numbers {
+        if self.line_numbers
+            && let Some(line_config) = &self.config.line_numbers
+        {
             layout_line_numbers(
                 self.engine,
                 self.config,

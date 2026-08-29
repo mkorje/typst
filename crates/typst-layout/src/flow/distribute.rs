@@ -236,15 +236,13 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
             if let Some(class) = class
                 && self.can_break_before_sticky()
             {
-                let observation = StickyObservation {
-                    id: BreakId {
-                        path: self.composer.config.path.clone(),
-                        child: id,
-                        class,
-                    },
+                let id = BreakId {
+                    path: self.composer.config.path.clone(),
+                    child: id,
+                    class,
                 };
                 let migrate =
-                    self.composer.choices.decide(observation).map_err(Stop::Sticky)?;
+                    self.composer.choices.decide(id).map_err(Stop::Sticky)?;
                 if migrate {
                     return Err(Stop::Finish(Finish::Soft));
                 }

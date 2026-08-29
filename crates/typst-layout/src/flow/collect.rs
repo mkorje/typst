@@ -521,13 +521,11 @@ impl<'a> MultiChild<'a> {
                 engine,
                 regions,
                 nested_path.clone(),
-                choices.remaining(),
+                choices.values(),
                 0,
             )?;
-            let Some(decisions) = choices.consume(output.consumed) else {
-                unreachable!("nested flow consumed decisions beyond its replay plan");
-            };
-            (output.fragment, decisions.to_vec(), output.score, output.complete)
+            choices.consume_choices(&output.choices);
+            (output.fragment, output.choices, output.score, output.complete)
         } else {
             (
                 self.layout_full(engine, regions, attempt)
@@ -774,9 +772,19 @@ impl<'a, 'b> MultiSpill<'a, 'b> {
         let (fragment, controlled_complete) = if self.controlled
             && self.multi.has_content_body()
         {
-            let old = self.decisions.len();
             let mut decisions = self.decisions.clone();
-            decisions.extend_from_slice(choices.remaining());
+            for choice in choices.values() {
+                if let Some(existing) = decisions
+                    .iter()
+                    .find(|existing| existing.observation == choice.observation)
+                {
+                    if existing.migrate != choice.migrate {
+                        unreachable!("nested flow replay changed a committed choice");
+                    }
+                } else {
+                    decisions.push(choice.clone());
+                }
+            }
             let output = self.multi.layout_full_controlled(
                 engine,
                 pod,
@@ -784,17 +792,15 @@ impl<'a, 'b> MultiSpill<'a, 'b> {
                 &decisions,
                 self.backlog.len(),
             )?;
-            let Some(added) = output.consumed.checked_sub(old) else {
+            if self.decisions.iter().any(|committed| {
+                !output.choices.iter().any(|used| used == committed)
+            }) {
                 unreachable!(
                     "nested flow replay stopped before consuming its committed decisions"
                 );
-            };
-            let Some(decisions) = choices.consume(added) else {
-                unreachable!(
-                    "nested continuation consumed decisions beyond its replay plan"
-                );
-            };
-            self.decisions.extend_from_slice(decisions);
+            }
+            choices.consume_choices(&output.choices);
+            self.decisions = output.choices;
             self.nested_score = output.score;
             (output.fragment, Some(output.complete))
         } else {

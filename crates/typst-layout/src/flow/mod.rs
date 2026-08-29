@@ -62,10 +62,10 @@ impl ChildId {
 }
 
 /// Identifies a prepared flow within one optimization session.
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub(super) struct FlowPathId(Option<Arc<FlowPathNode>>);
 
-#[derive(Debug, Eq, PartialEq, Hash)]
+#[derive(Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
 struct FlowPathNode {
     parent: Option<Arc<FlowPathNode>>,
     child: ChildId,
@@ -82,14 +82,14 @@ impl FlowPathId {
 }
 
 /// The semantic reason an optional region break is available.
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Hash)]
 enum BreakClass {
     StickyStart,
     StickyTail,
 }
 
 /// Stable identity of one optional breakpoint.
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd, Hash)]
 struct BreakId {
     path: FlowPathId,
     child: ChildId,
@@ -98,16 +98,30 @@ struct BreakId {
 
 /// A request to choose whether to finish the current region before a sticky
 /// child.
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd, Hash)]
 struct StickyObservation {
     id: BreakId,
+    occurrence: usize,
 }
 
 /// One validated decision in a deterministic replay.
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub(super) struct BreakChoice {
-    id: BreakId,
+    observation: StickyObservation,
     migrate: bool,
+}
+
+fn insert_choice(choices: &mut Vec<BreakChoice>, choice: BreakChoice) {
+    match choices.binary_search_by(|existing| {
+        existing.observation.cmp(&choice.observation)
+    }) {
+        Ok(index) => {
+            if choices[index] != choice {
+                unreachable!("flow optimizer assigned conflicting breakpoint choices");
+            }
+        }
+        Err(index) => choices.insert(index, choice),
+    }
 }
 
 #[derive(Debug, Clone, Hash)]
@@ -237,12 +251,11 @@ impl StickyTrace {
 /// Forced sticky choices for one deterministic replay.
 struct StickyChoices {
     values: Vec<BreakChoice>,
-    /// Cursor in the currently live transactional layout prefix.
-    cursor: usize,
-    /// Furthest decision consulted by any relayout pass for this region.
-    /// Unlike `cursor`, this is not rewound with layout state: deterministic
-    /// replay must still supply choices needed to reach a later rollback.
-    used: usize,
+    lookup: FxHashMap<StickyObservation, usize>,
+    cursors: FxHashMap<BreakId, usize>,
+    live: Vec<usize>,
+    used: Vec<bool>,
+    used_count: usize,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
@@ -297,49 +310,104 @@ impl FootnoteSpill {
 
 impl StickyChoices {
     fn new(values: &[BreakChoice]) -> Self {
-        Self { values: values.to_vec(), cursor: 0, used: 0 }
+        let mut values = values.to_vec();
+        values.sort_unstable();
+        let mut lookup = FxHashMap::default();
+        for (index, choice) in values.iter().enumerate() {
+            if lookup.insert(choice.observation.clone(), index).is_some() {
+                unreachable!("flow optimizer replay plan contains a duplicate choice");
+            }
+        }
+
+        Self {
+            used: vec![false; values.len()],
+            values,
+            lookup,
+            cursors: FxHashMap::default(),
+            live: vec![],
+            used_count: 0,
+        }
     }
 
-    fn decide(
-        &mut self,
-        observation: StickyObservation,
-    ) -> Result<bool, StickyObservation> {
-        let Some(choice) = self.values.get(self.cursor) else {
+    fn decide(&mut self, id: BreakId) -> Result<bool, StickyObservation> {
+        let occurrence = self.cursors.get(&id).copied().unwrap_or_default();
+        let observation = StickyObservation { id, occurrence };
+        let Some(&index) = self.lookup.get(&observation) else {
             return Err(observation);
         };
-        if choice.id != observation.id {
-            unreachable!("flow optimizer replay encountered a different breakpoint");
-        }
-        self.cursor += 1;
-        self.used = self.used.max(self.cursor);
-        Ok(choice.migrate)
+        let migrate = self.values[index].migrate;
+        self.consume(index);
+        Ok(migrate)
     }
 
     fn checkpoint(&self) -> usize {
-        self.cursor
+        self.live.len()
     }
 
     fn restore(&mut self, checkpoint: usize) {
-        self.cursor = checkpoint;
+        if checkpoint > self.live.len() {
+            unreachable!("flow optimizer restored an invalid choice checkpoint");
+        }
+
+        while self.live.len() > checkpoint {
+            let index = self.live.pop().unwrap();
+            let id = &self.values[index].observation.id;
+            let cursor = self.cursors.get_mut(id).unwrap();
+            *cursor = cursor.checked_sub(1).unwrap();
+        }
     }
 
-    fn remaining(&self) -> &[BreakChoice] {
-        &self.values[self.cursor..]
+    fn values(&self) -> &[BreakChoice] {
+        &self.values
     }
 
-    fn used(&self) -> usize {
-        self.used
+    fn used_len(&self) -> usize {
+        self.used_count
     }
 
-    fn consume(&mut self, count: usize) -> Option<&[BreakChoice]> {
-        let start = self.cursor;
-        let cursor = self
-            .cursor
-            .checked_add(count)
-            .filter(|&cursor| cursor <= self.values.len())?;
-        self.cursor = cursor;
-        self.used = self.used.max(cursor);
-        Some(&self.values[start..cursor])
+    fn used_choices(&self) -> Vec<BreakChoice> {
+        self.values
+            .iter()
+            .zip(&self.used)
+            .filter(|(_, used)| **used)
+            .map(|(choice, _)| choice.clone())
+            .collect()
+    }
+
+    fn consume_choices(&mut self, choices: &[BreakChoice]) {
+        for choice in choices {
+            let Some(&index) = self.lookup.get(&choice.observation) else {
+                continue;
+            };
+            if self.values[index].migrate != choice.migrate {
+                unreachable!("nested flow replay changed a committed choice");
+            }
+
+            let cursor = *self
+                .cursors
+                .entry(choice.observation.id.clone())
+                .or_insert(choice.observation.occurrence);
+            match choice.observation.occurrence.cmp(&cursor) {
+                Ordering::Less => {}
+                Ordering::Equal => self.consume(index),
+                Ordering::Greater => {
+                    unreachable!("nested flow replay skipped a planned choice");
+                }
+            }
+        }
+    }
+
+    fn consume(&mut self, index: usize) {
+        let observation = &self.values[index].observation;
+        let cursor = self.cursors.entry(observation.id.clone()).or_default();
+        if *cursor != observation.occurrence {
+            unreachable!("flow optimizer replay consumed a choice out of order");
+        }
+        *cursor += 1;
+        self.live.push(index);
+        if !std::mem::replace(&mut self.used[index], true) {
+            self.used_count += 1;
+        }
     }
 }
 
@@ -475,12 +543,11 @@ fn layout_fragment_impl(
 }
 
 /// A normal-content block layout driven by the enclosing flow's breakpoint
-/// stream. The consumed prefix belongs to this nested flow; any remaining
-/// decisions belong to later outer content.
+/// choices.
 #[derive(Clone)]
 pub(super) struct ControlledFragment {
     pub(super) fragment: Fragment,
-    pub(super) consumed: usize,
+    pub(super) choices: Vec<BreakChoice>,
     pub(super) score: StickyScore,
     pub(super) complete: bool,
 }
@@ -678,6 +745,7 @@ fn render_flow_controlled(
                 choices: &mut choices,
                 trace: &mut trace,
                 effects: transaction,
+                line_numbers: true,
             },
         );
         if outer < limit {
@@ -696,7 +764,7 @@ fn render_flow_controlled(
         if complete || outer == limit {
             return Ok(ControlledFragment {
                 fragment: Fragment::frames(frames),
-                consumed: choices.used(),
+                choices: choices.used_choices(),
                 score: trace.score,
                 complete,
             });
@@ -836,6 +904,7 @@ fn render_greedy_fallback(
                     choices: &mut choices,
                     trace: &mut trace,
                     effects: transaction,
+                    line_numbers: true,
                 },
             ) {
                 Ok(frame) => {
@@ -844,7 +913,10 @@ fn render_greedy_fallback(
                 }
                 Err(ComposeStop::Sticky(observation)) => {
                     engine.sink.rollback_effect_transaction();
-                    decisions.push(BreakChoice { id: observation.id, migrate: false });
+                    insert_choice(
+                        &mut decisions,
+                        BreakChoice { observation, migrate: false },
+                    );
                 }
                 Err(ComposeStop::Error(error)) => {
                     engine.sink.commit_effect_transaction();
@@ -937,6 +1009,7 @@ fn render_flow(
                 choices: &mut choices,
                 trace: &mut trace,
                 effects: transaction,
+                line_numbers: true,
             },
         ) {
             Ok(frame) => frame,
@@ -955,7 +1028,7 @@ fn render_flow(
         }
 
         if let Some(page_plan) = page_plan {
-            if choices.used() != page_plan.choices.len() {
+            if choices.used_len() != page_plan.choices.len() {
                 engine.sink.rollback_effect_transaction();
                 unreachable!("flow optimizer replay left breakpoints unconsumed");
             }
@@ -1040,6 +1113,23 @@ struct SearchKey {
     sticky: StickyState,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+struct ContinuationKey {
+    regions: RegionsKey,
+    work: Arc<WorkKey>,
+    sticky: StickyState,
+}
+
+impl SearchKey {
+    fn continuation(&self) -> ContinuationKey {
+        ContinuationKey {
+            regions: self.regions.clone(),
+            work: self.work.clone(),
+            sticky: self.sticky.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
 struct PlanQuality {
     detached: u32,
@@ -1119,7 +1209,16 @@ fn optimize_flow(
 
     let mut nodes = vec![initial];
     let mut table = FxHashMap::default();
-    table.insert(initial_key, 0_usize);
+    table.insert(initial_key.clone(), 0_usize);
+    // Search omits line-number decoration, so the page locator is not observed
+    // during composition. Reaching an otherwise identical continuation later
+    // in a repeating region is therefore dominated by the better-quality
+    // arrival. This is the active-window bound for long sticky chains.
+    let mut continuations = FxHashMap::default();
+    continuations.insert(
+        initial_key.continuation(),
+        (PlanQuality::default(), 0_usize),
+    );
     let mut active = VecDeque::from([0_usize]);
     let mut queued = vec![true];
     let mut transitions: FxHashMap<
@@ -1131,6 +1230,11 @@ fn optimize_flow(
     while let Some(node_id) = active.pop_front() {
         queued[node_id] = false;
         let node = nodes[node_id].clone();
+        if continuations.get(&node.key.continuation())
+            != Some(&(node.quality, node_id))
+        {
+            continue;
+        }
         let transition_key = (node.key.clone(), node.trace.score);
         let transition = if let Some(cached) = transitions.get(&transition_key) {
             cached.clone()
@@ -1198,6 +1302,14 @@ fn optimize_flow(
                 predecessor: Some((node_id, outcome.plan)),
             };
 
+            let continuation = key.continuation();
+            if continuations
+                .get(&continuation)
+                .is_some_and(|(best, _)| *best <= quality)
+            {
+                continue;
+            }
+
             let (successor_id, accepted) = if let Some(&existing) = table.get(&key) {
                 if quality < nodes[existing].quality {
                     nodes[existing] = successor;
@@ -1216,6 +1328,8 @@ fn optimize_flow(
             if !accepted {
                 continue;
             }
+
+            continuations.insert(continuation, (quality, successor_id));
 
             if complete && quality < incumbent {
                 incumbent = quality;
@@ -1275,7 +1389,10 @@ fn greedy_flow(
             )? {
                 PageAttempt::Complete(outcome) => break outcome,
                 PageAttempt::Choice(observation) => {
-                    choices.push(BreakChoice { id: observation.id, migrate: false });
+                    insert_choice(
+                        &mut choices,
+                        BreakChoice { observation, migrate: false },
+                    );
                 }
             }
         };
@@ -1319,6 +1436,8 @@ fn enumerate_page<'a, 'b>(
     // breakpoint window cannot overflow the Rust call stack. Push migration
     // first and natural continuation second so the latter is popped first.
     let mut active = vec![vec![]];
+    let mut seen = FxHashSet::default();
+    seen.insert(vec![]);
     let mut outcomes = vec![];
     let mut first_error = None;
     while let Some(choices) = active.pop() {
@@ -1334,12 +1453,25 @@ fn enumerate_page<'a, 'b>(
             Ok(PageAttempt::Complete(outcome)) => outcomes.push(*outcome),
             Ok(PageAttempt::Choice(observation)) => {
                 let mut migrate = choices.clone();
-                migrate.push(BreakChoice { id: observation.id.clone(), migrate: true });
-                active.push(migrate);
+                insert_choice(
+                    &mut migrate,
+                    BreakChoice {
+                        observation: observation.clone(),
+                        migrate: true,
+                    },
+                );
+                if seen.insert(migrate.clone()) {
+                    active.push(migrate);
+                }
 
                 let mut natural = choices;
-                natural.push(BreakChoice { id: observation.id, migrate: false });
-                active.push(natural);
+                insert_choice(
+                    &mut natural,
+                    BreakChoice { observation, migrate: false },
+                );
+                if seen.insert(natural.clone()) {
+                    active.push(natural);
+                }
             }
             Err(error) => {
                 first_error.get_or_insert(error);
@@ -1405,6 +1537,7 @@ fn replay_page<'a, 'b>(
             choices: &mut sticky_choices,
             trace: &mut trace,
             effects: transaction,
+            line_numbers: false,
         },
     );
     // Search transitions retain tracked dependencies and introspection
@@ -1420,7 +1553,7 @@ fn replay_page<'a, 'b>(
                 work,
                 trace,
                 plan: PagePlan {
-                    choices: choices[..sticky_choices.used()].to_vec(),
+                    choices: sticky_choices.used_choices(),
                     expected,
                 },
             })))

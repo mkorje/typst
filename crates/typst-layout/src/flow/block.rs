@@ -14,7 +14,8 @@ use typst_library::visualize::Stroke;
 use typst_utils::Numeric;
 
 use super::{
-    ComposeStop, ControlledFragment, FlowControl, StickyScore, layout_fragment_controlled,
+    BreakChoice, ComposeStop, ControlledFragment, FlowControl, StickyScore,
+    layout_fragment_controlled,
 };
 use crate::shapes::{clip_rect, fill_and_stroke};
 
@@ -161,7 +162,7 @@ pub(super) fn layout_multi_block_controlled(
             .map(|output| MultiOutput {
                 fragment: output.fragment,
                 metadata: ControlledMetadata {
-                    consumed: output.consumed,
+                    choices: output.choices,
                     score: output.score,
                     complete: output.complete,
                 },
@@ -170,7 +171,7 @@ pub(super) fn layout_multi_block_controlled(
     )
     .map(|output| ControlledFragment {
         fragment: output.fragment,
-        consumed: output.metadata.consumed,
+        choices: output.metadata.choices,
         score: output.metadata.score,
         complete: output.metadata.complete,
     })
@@ -178,7 +179,7 @@ pub(super) fn layout_multi_block_controlled(
 
 #[derive(Default)]
 struct ControlledMetadata {
-    consumed: usize,
+    choices: Vec<BreakChoice>,
     score: StickyScore,
     complete: bool,
 }
