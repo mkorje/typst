@@ -179,6 +179,12 @@ impl From<LazyHash<Style>> for Styles {
     }
 }
 
+impl From<&[LazyHash<Style>]> for Styles {
+    fn from(slice: &[LazyHash<Style>]) -> Self {
+        Self(slice.into())
+    }
+}
+
 impl<const N: usize> From<[LazyHash<Style>; N]> for Styles {
     fn from(arr: [LazyHash<Style>; N]) -> Self {
         Self(arr.into())

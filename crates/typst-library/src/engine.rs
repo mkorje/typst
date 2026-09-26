@@ -49,6 +49,39 @@ impl<'a> Engine<'a> {
         }
     }
 
+    /// Runs `f` with an engine whose side effects (introspections, delayed
+    /// errors, warnings, and traced values) are collected into a separate
+    /// sink, which is returned alongside the result.
+    ///
+    /// This is useful for work whose result may be discarded, like a layout
+    /// that is only done to learn something about it. If the result is kept,
+    /// the side effects can be applied with [`commit`](Self::commit).
+    /// Otherwise, they are dropped. Tracked dependencies are recorded as
+    /// usual.
+    pub fn isolate<T>(&mut self, f: impl FnOnce(&mut Engine) -> T) -> (T, Sink) {
+        let mut sink = Sink::new();
+        let output = f(&mut Engine {
+            world: self.world,
+            library: self.library,
+            introspector: self.introspector,
+            traced: self.traced,
+            sink: sink.track_mut(),
+            route: self.route.clone(),
+        });
+        (output, sink)
+    }
+
+    /// Applies side effects collected by [`isolate`](Self::isolate).
+    pub fn commit(&mut self, sink: Sink) {
+        // Don't record an empty call with memoized callers, which would
+        // replay it on each cache hit.
+        if sink.is_empty() {
+            return;
+        }
+        self.sink
+            .extend(sink.introspections, sink.delayed, sink.warnings, sink.values);
+    }
+
     /// Runs tasks on the engine in parallel.
     pub fn parallelize<P, I, T, U, F>(
         &mut self,
@@ -89,13 +122,7 @@ impl<'a> Engine<'a> {
 
         // Apply the subsinks to the outer sink.
         for (_, sink) in &mut pairs {
-            let sink = std::mem::take(sink);
-            self.sink.extend(
-                sink.introspections,
-                sink.delayed,
-                sink.warnings,
-                sink.values,
-            );
+            self.commit(std::mem::take(sink));
         }
 
         pairs.into_iter().map(|(output, _)| output)
@@ -188,6 +215,14 @@ impl Sink {
     /// Get the stored delayed errors.
     pub fn delayed(&mut self) -> EcoVec<SourceDiagnostic> {
         std::mem::take(&mut self.delayed)
+    }
+
+    /// Whether there are no side effects in the sink.
+    pub fn is_empty(&self) -> bool {
+        self.introspections.is_empty()
+            && self.delayed.is_empty()
+            && self.warnings.is_empty()
+            && self.values.is_empty()
     }
 
     /// Get the stored warnings.

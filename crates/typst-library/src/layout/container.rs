@@ -1,3 +1,9 @@
+use std::any::Any;
+use std::fmt::{self, Debug, Formatter};
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::diag::{HintedStrResult, SourceResult, bail};
 use crate::engine::Engine;
 use crate::foundations::{
@@ -6,8 +12,8 @@ use crate::foundations::{
 };
 use crate::introspection::Locator;
 use crate::layout::{
-    Abs, Corners, Em, Fr, Fragment, Frame, Length, Region, Regions, Rel, Sides, Size,
-    Spacing, VAlignment,
+    Abs, Corners, Em, Fr, Frame, Length, Region, Regions, Rel, Sides, Size, Spacing,
+    VAlignment,
 };
 use crate::visualize::{Paint, Stroke};
 
@@ -427,6 +433,14 @@ impl BlockElem {
     }
 
     /// Create a block with a custom multi-region layouter.
+    ///
+    /// The layouter is laid out one region at a time: It is called once per
+    /// region. It receives the current region followed by predictions of the
+    /// upcoming regions and the state it returned for the previous region
+    /// (`None` for the first one). It returns the frame for the current region
+    /// and, if it continues, its state for the next region. For a given state
+    /// and regions, it must always produce the same result.
+    #[expect(clippy::type_complexity)]
     pub fn multi_layouter<T: NativeElement>(
         captured: Packed<T>,
         f: fn(
@@ -435,7 +449,8 @@ impl BlockElem {
             locator: Locator,
             styles: StyleChain,
             regions: Regions,
-        ) -> SourceResult<Fragment>,
+            state: Option<&MultiState>,
+        ) -> SourceResult<MultiStep>,
     ) -> Self {
         Self::new().with_body(Some(BlockBody::MultiLayouter(
             callbacks::BlockMultiCallback::new(captured, f),
@@ -451,9 +466,96 @@ pub enum BlockBody {
     /// The block contains a layout callback that needs access to just one
     /// base region.
     SingleLayouter(callbacks::BlockSingleCallback),
-    /// The block contains a layout callback that needs access to the exact
-    /// regions.
+    /// The block contains a layout callback that is laid out one region at a
+    /// time.
     MultiLayouter(callbacks::BlockMultiCallback),
+}
+
+/// The type-erased state of a multi-region layouter between regions. See
+/// [`BlockElem::multi_layouter`].
+///
+/// States are compared and hashed by identity: Each state gets a unique ID
+/// when it is created. Since states are immutable and layout is
+/// deterministic, the same state always leads to the same layout, so layout
+/// that continues from a state can be memoized by its ID. Layout that is
+/// served from the cache returns the same states it returned before, so
+/// consecutive continuations are served from the cache, too.
+#[derive(Clone)]
+pub struct MultiState {
+    /// The unique ID of the state.
+    id: u64,
+    /// The layouter's state.
+    state: Arc<dyn Any + Send + Sync>,
+}
+
+impl MultiState {
+    /// Wraps a layouter's state.
+    pub fn new<S: Send + Sync + 'static>(state: S) -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        Self {
+            id: NEXT.fetch_add(1, Ordering::Relaxed),
+            state: Arc::new(state),
+        }
+    }
+
+    /// Accesses the layouter's state.
+    ///
+    /// Panics if the state is of a different type.
+    pub fn get<S: 'static>(&self) -> &S {
+        self.state
+            .downcast_ref()
+            .expect("multi-region layouter state has wrong type")
+    }
+}
+
+impl PartialEq for MultiState {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for MultiState {}
+
+impl Hash for MultiState {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
+}
+
+impl Debug for MultiState {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        f.pad("MultiState(..)")
+    }
+}
+
+/// The result of laying out one region with a multi-region layouter. See
+/// [`BlockElem::multi_layouter`].
+#[derive(Debug, Clone)]
+pub struct MultiStep {
+    /// The frame for the region.
+    pub frame: Frame,
+    /// The layouter's state for the next region, if it continues.
+    pub next: Option<MultiState>,
+    /// For each region after this one, how much height the state has
+    /// already laid out into it, if any. Such content was laid out with
+    /// predictions of those regions. It is only valid in regions that fit
+    /// it, so the caller checks it against the actual regions, and lays out
+    /// the step that laid it out again otherwise. Empty for layouters whose
+    /// state only says where they continue.
+    ///
+    /// A layouter whose state continues the state of a child must include
+    /// the child's declaration, adjusted for where the child's frames go in
+    /// its own. Flows are the exception: They check what their children laid
+    /// out ahead themselves, so steps of content never declare anything.
+    pub ahead: Vec<Abs>,
+}
+
+impl MultiStep {
+    /// A step of a layouter whose state only says where it continues, which
+    /// thus laid nothing out into the regions after this one.
+    pub fn new(frame: Frame, next: Option<MultiState>) -> Self {
+        Self { frame, next, ahead: vec![] }
+    }
 }
 
 impl Default for BlockBody {
@@ -684,6 +786,7 @@ mod callbacks {
             locator: Locator,
             styles: StyleChain,
             regions: Regions,
-        ) -> SourceResult<Fragment>
+            state: Option<&MultiState>,
+        ) -> SourceResult<MultiStep>
     }
 }

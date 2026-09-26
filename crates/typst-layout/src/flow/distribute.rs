@@ -7,8 +7,11 @@ use typst_library::layout::{
 };
 use typst_utils::Numeric;
 
+use super::collect::SpillTarget;
 use super::compose::{Composer, InsertionStop, Migration, RelayoutStop};
-use super::{Child, LineChild, MultiChild, MultiSpill, PlacedChild, SingleChild, Work};
+use super::{
+    Child, LineChild, MultiChild, MultiSpill, PlacedChild, Restart, SingleChild, Work,
+};
 
 /// A control flow event during distribution.
 enum Stop {
@@ -16,6 +19,8 @@ enum Stop {
     Finish(Finish),
     /// Indicates that the given scope should be relayouted.
     Relayout(PlacementScope),
+    /// Indicates that flow layout should restart at an earlier subregion.
+    Restart(Restart),
     /// A fatal error.
     Error(EcoVec<SourceDiagnostic>),
 }
@@ -69,11 +74,11 @@ pub fn distribute(
         Ok(()) => distributor.composer.work.done(),
         Err(Stop::Finish(finish)) => matches!(finish, Finish::Forced),
         Err(Stop::Relayout(scope)) => return Err(RelayoutStop::Relayout(scope)),
+        Err(Stop::Restart(restart)) => return Err(RelayoutStop::Restart(restart)),
         Err(Stop::Error(error)) => return Err(RelayoutStop::Error(error)),
     };
-    let region = Region::new(regions.size, regions.expand);
     distributor
-        .finalize(region, init, forced)
+        .finalize(regions, init, forced)
         .map_err(RelayoutStop::Error)
 }
 
@@ -86,14 +91,14 @@ struct Distributor<'a, 'b, 'x, 'y, 'z> {
     /// Regions which are continuously shrunk as new items are added.
     regions: Regions<'z>,
     /// Already laid out items, not yet aligned.
-    items: Vec<Item<'a, 'b>>,
+    items: Vec<Item<'b>>,
     /// Size used by laid out items.
     used: Size,
     /// The target height for column balancing.
     target: Option<Abs>,
     /// A snapshot which can be restored to migrate a suffix of sticky blocks to
     /// the next region.
-    sticky: Option<DistributionSnapshot<'a, 'b>>,
+    sticky: Option<DistributionSnapshot>,
     /// Whether the current group of consecutive sticky blocks are still sticky
     /// and may migrate with the attached frame. This is `None` while we aren't
     /// processing sticky blocks. On the first sticky block, this will become
@@ -117,27 +122,27 @@ struct Distributor<'a, 'b, 'x, 'y, 'z> {
 }
 
 /// A snapshot of the distribution state.
-struct DistributionSnapshot<'a, 'b> {
-    work: Work<'a, 'b>,
+struct DistributionSnapshot {
+    work: Work,
     items: usize,
     used: Size,
 }
 
 /// A laid out item in a distribution.
-enum Item<'a, 'b> {
+enum Item<'b> {
     /// An introspection tag.
-    Tag(&'a Tag),
+    Tag(&'b Tag),
     /// Absolute spacing and its weakness level.
     Abs(Abs, u8),
     /// Fractional spacing or a fractional block.
-    Fr(Fr, u8, Option<&'b SingleChild<'a>>),
+    Fr(Fr, u8, Option<&'b SingleChild>),
     /// A frame for a laid out line or block.
     Frame(Frame, Axes<FixedAlignment>),
     /// A frame for an absolutely (not floatingly) placed child.
-    Placed(Frame, &'b PlacedChild<'a>),
+    Placed(Frame, &'b PlacedChild),
 }
 
-impl Item<'_, '_> {
+impl Item<'_> {
     /// Whether this item should be migrated to the next region if the region
     /// consists solely of such items.
     fn migratable(&self) -> bool {
@@ -155,7 +160,7 @@ impl Item<'_, '_> {
     }
 }
 
-impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
+impl<'b> Distributor<'_, 'b, '_, '_, '_> {
     /// Distributes content into the region.
     fn run(&mut self) -> Result<(), Stop> {
         // First, handle spill of a breakable block.
@@ -165,8 +170,9 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
 
         // If spill are taken care of, process children until no space is left
         // or no children are left.
-        while let Some(child) = self.composer.work.head() {
-            self.child(child)?;
+        let children = self.composer.cx.children;
+        while let Some(index) = self.composer.work.head() {
+            self.child(&children[index], index)?;
             self.composer.work.advance();
         }
 
@@ -180,15 +186,15 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
     /// - Returns `Err(Stop::Relayout(_))` if the region needs to be relayouted
     ///   due to an insertion (float/footnote).
     /// - Returns `Err(Stop::Error(_))` if there was a fatal error.
-    fn child(&mut self, child: &'b Child<'a>) -> Result<(), Stop> {
+    fn child(&mut self, child: &'b Child, index: usize) -> Result<(), Stop> {
         match child {
-            Child::Tag(tag) => self.tag(tag),
+            Child::Tag(_) => self.tag(index),
             Child::Rel(amount, weakness) => self.rel(*amount, *weakness),
             Child::Fr(fr, weakness) => self.fr(*fr, *weakness),
             Child::Line(line) => self.line(line)?,
             Child::Single(single) => self.single(single)?,
-            Child::Multi(multi) => self.multi(multi)?,
-            Child::Placed(placed) => self.placed(placed)?,
+            Child::Multi(multi) => self.multi(multi, index)?,
+            Child::Placed(placed) => self.placed(placed, index)?,
             Child::Flush => self.flush()?,
             Child::Break(weak) => self.break_(*weak)?,
         }
@@ -196,22 +202,26 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
     }
 
     /// Processes a tag.
-    fn tag(&mut self, tag: &'a Tag) {
-        self.composer.work.tags.push(tag);
+    fn tag(&mut self, index: usize) {
+        self.composer.work.tags.push(index);
     }
 
     /// Generate items for pending tags.
     fn flush_tags(&mut self) {
         if !self.composer.work.tags.is_empty() {
+            let children = self.composer.cx.children;
             let tags = &mut self.composer.work.tags;
-            self.items.extend(tags.iter().copied().map(Item::Tag));
+            self.items.extend(tags.iter().map(|&i| match &children[i] {
+                Child::Tag(tag) => Item::Tag(tag),
+                _ => unreachable!("child is not a tag"),
+            }));
             tags.clear();
         }
     }
 
     /// Mark the amount of height used and reduce the region height accordingly.
     fn use_height(&mut self, amount: Abs) {
-        self.regions.size.y -= amount;
+        self.regions.consume(amount);
         self.used.y += amount;
     }
 
@@ -332,7 +342,7 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
     /// Whether the amount fits into the remaining region, taking into account
     /// column balancing limits.
     pub fn fits(&self, amount: Abs) -> bool {
-        self.regions.size.y.fits(amount)
+        self.regions.fits(amount)
             && self
                 .target
                 // Add elements as long as the balancing target is not reached. By not including
@@ -352,13 +362,7 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         // following lines grouped by widow/orphan prevention, does not fit into
         // the current region, but does fit into the next region, finish the
         // region.
-        if !self.fits(line.need)
-            && self
-                .regions
-                .iter()
-                .nth(1)
-                .is_some_and(|region| region.y.fits(line.need))
-        {
+        if !self.fits(line.need) && self.regions.fits_next(line.need) {
             return Err(Stop::Finish(Finish::Soft));
         }
 
@@ -366,10 +370,11 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
     }
 
     /// Processes an unbreakable block.
-    fn single(&mut self, single: &'b SingleChild<'a>) -> Result<(), Stop> {
+    fn single(&mut self, single: &'b SingleChild) -> Result<(), Stop> {
         // Lay out the block.
         let frame = single.layout(
             self.composer.engine,
+            self.composer.cx,
             Region::new(self.regions.base(), self.regions.expand),
         )?;
 
@@ -397,13 +402,13 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
     }
 
     /// Processes a breakable block.
-    fn multi(&mut self, multi: &'b MultiChild<'a>) -> Result<(), Stop> {
+    fn multi(&mut self, multi: &'b MultiChild, index: usize) -> Result<(), Stop> {
         let mut pod = self.regions;
 
         // For column balancing, reduce the region size for layout.
         if let Some(lim) = self.target {
             let remaining = lim - self.used.y;
-            pod.size.y.set_min(remaining);
+            pod.limit(remaining);
         }
 
         // Skip directly if the region is already (over)full. `line` and
@@ -413,9 +418,17 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
         }
 
         // Lay out the block.
-        let (frame, spill) = multi.layout(self.composer.engine, pod)?;
+        let subregion = self.composer.subregion();
+        let (frame, spill, exist_non_empty_frame) = multi.layout(
+            self.composer.engine,
+            self.composer.cx,
+            pod,
+            index,
+            subregion,
+        )?;
         if frame.is_empty()
-            && spill.as_ref().is_some_and(|s| s.exist_non_empty_frame)
+            && spill.is_some()
+            && exist_non_empty_frame
             && self.regions.may_progress()
         {
             // If the first frame is empty, but there are non-empty frames in
@@ -438,24 +451,40 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
     }
 
     /// Processes spillover from a breakable block.
-    fn multi_spill(&mut self, spill: MultiSpill<'a, 'b>) -> Result<(), Stop> {
+    fn multi_spill(&mut self, spill: MultiSpill) -> Result<(), Stop> {
         let mut pod = self.regions;
 
         // For column balancing, reduce the region size for layout.
         if let Some(lim) = self.target {
             let remaining = lim - self.used.y;
-            pod.size.y.set_min(remaining);
+            pod.limit(remaining);
         }
+
+        let multi = match &self.composer.cx.children[spill.index] {
+            Child::Multi(multi) => &**multi,
+            _ => unreachable!("child is not a breakable block"),
+        };
+        let align = multi.align;
+        let subregion = self.composer.subregion();
+        let restarts = self.composer.restarts(subregion);
+        let target = SpillTarget {
+            subregion,
+            restarts,
+            available: (restarts > 0).then(|| self.regions.height().max(Abs::zero())),
+        };
 
         // Skip directly if the region is already (over)full.
         if pod.is_full() {
-            self.composer.work.spill = Some(spill);
+            self.composer.work.spill = spill
+                .skip(multi, self.composer.engine, self.composer.cx, pod, target)?
+                .map_err(Stop::Restart)?;
             return Err(Stop::Finish(Finish::Soft));
         }
 
         // Lay out the spilled remains.
-        let align = spill.align();
-        let (frame, spill) = spill.layout(self.composer.engine, pod)?;
+        let (frame, spill) = spill
+            .layout(multi, self.composer.engine, self.composer.cx, pod, target)?
+            .map_err(Stop::Restart)?;
         self.frame(frame, align, false, true)?;
 
         // If there's still more, save it into the `spill` and finish the
@@ -531,7 +560,7 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
     }
 
     /// Processes an absolutely or floatingly placed child.
-    fn placed(&mut self, placed: &'b PlacedChild<'a>) -> Result<(), Stop> {
+    fn placed(&mut self, placed: &'b PlacedChild, index: usize) -> Result<(), Stop> {
         if placed.float {
             // If the element is floatingly placed, let the composer handle it.
             // It might require relayout because the area available for
@@ -541,14 +570,18 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
             let weak_spacing = self.weak_spacing();
             self.use_height(-weak_spacing);
             self.composer.float(
-                placed,
+                index,
                 &self.regions,
                 self.items.iter().any(|item| matches!(item, Item::Frame(..))),
                 Migration::ALLOW,
             )?;
             self.use_height(weak_spacing);
         } else {
-            let frame = placed.layout(self.composer.engine, self.regions.base())?;
+            let frame = placed.layout(
+                self.composer.engine,
+                self.composer.cx,
+                self.regions.base(),
+            )?;
             self.composer.footnotes(
                 &self.regions,
                 &frame,
@@ -575,9 +608,7 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
     /// Processes a column break.
     fn break_(&mut self, weak: bool) -> Result<(), Stop> {
         // If there is a region to break into, break into it.
-        if (!weak || !self.items.is_empty())
-            && (!self.regions.backlog.is_empty() || self.regions.last.is_some())
-        {
+        if (!weak || !self.items.is_empty()) && self.regions.may_break() {
             self.composer.work.advance();
             return Err(Stop::Finish(Finish::Forced));
         }
@@ -589,16 +620,21 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
     /// This performs alignment and resolves fractional spacing and blocks.
     fn finalize(
         mut self,
-        region: Region,
-        init: DistributionSnapshot<'a, 'b>,
+        regions: Regions,
+        init: DistributionSnapshot,
         forced: bool,
     ) -> SourceResult<(Frame, Abs)> {
         if forced {
             // If this is the very end of the flow, flush pending tags.
             self.flush_tags();
         } else if !self.items.is_empty() && self.items.iter().all(Item::migratable) {
-            // Restore the initial state of all items are migratable.
+            // Restore the initial state of all items are migratable. If a
+            // spill placed a frame, it is discarded, so the spill skips this
+            // region.
             self.restore(init);
+            if let Some(spill) = &mut self.composer.work.spill {
+                spill.skipped();
+            }
         } else {
             // If we ended on a sticky block, but are not yet at the end of
             // the flow, restore the saved checkpoint to move the sticky
@@ -624,9 +660,9 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
 
         // When we have fractional spacing, occupy the remaining space with it.
         let mut fr_space = Abs::zero();
-        if frs.get() > 0.0 && region.size.y.is_finite() {
-            fr_space = region.size.y - self.used.y;
-            self.used.y = region.size.y;
+        if frs.get() > 0.0 && regions.is_finite() {
+            fr_space = regions.height() - self.used.y;
+            self.used.y = regions.height();
         }
 
         // Lay out fractionally sized blocks.
@@ -635,20 +671,21 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
             for item in &self.items {
                 let Item::Fr(v, _, Some(single)) = item else { continue };
                 let length = v.share(frs, fr_space);
-                let pod = Region::new(Size::new(region.size.x, length), region.expand);
-                let frame = single.layout(self.composer.engine, pod)?;
+                let pod = Region::new(Size::new(regions.width(), length), regions.expand);
+                let frame = single.layout(self.composer.engine, self.composer.cx, pod)?;
                 self.used.x.set_max(frame.width());
                 fr_frames.push(frame);
             }
         }
 
         // Also consider the width of insertions for alignment.
-        if !region.expand.x {
+        if !regions.expand.x {
             self.used.x.set_max(self.composer.insertion_width());
         }
 
-        // Determine the region's size.
-        let size = region.expand.select(region.size, self.used.min(region.size));
+        // Determine the region's size. Only reveal the region's height if
+        // necessary.
+        let size = regions.fit(self.used, regions.expand);
         let free = size.y - self.used.y;
 
         let mut output = Frame::soft(size);
@@ -719,7 +756,7 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
     }
 
     /// Create a snapshot of the work and items.
-    fn snapshot(&self) -> DistributionSnapshot<'a, 'b> {
+    fn snapshot(&self) -> DistributionSnapshot {
         DistributionSnapshot {
             work: self.composer.work.clone(),
             items: self.items.len(),
@@ -728,7 +765,7 @@ impl<'a, 'b> Distributor<'a, 'b, '_, '_, '_> {
     }
 
     /// Restore a snapshot of the work and items.
-    fn restore(&mut self, snapshot: DistributionSnapshot<'a, 'b>) {
+    fn restore(&mut self, snapshot: DistributionSnapshot) {
         *self.composer.work = snapshot.work;
         self.items.truncate(snapshot.items);
         self.used = snapshot.used;

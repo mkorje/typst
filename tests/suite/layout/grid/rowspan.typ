@@ -492,3 +492,19 @@
 --- issue-6399-grid-cell-rowspan-set-rule paged ---
 #set grid.cell(rowspan: 2)
 #grid(columns: 2, [hehe])
+
+--- grid-rowspan-footnotes-ahead paged ---
+// The rowspan makes the grid lay out the first three pages at once, with the
+// predicted page heights. The footnotes shrink the third page, so the grid
+// must lay out its rows there again instead of overlapping the footnotes.
+#set page(width: 100pt, height: 80pt, margin: 5pt)
+#set text(size: 7pt)
+#set footnote.entry(gap: 1pt, clearance: 3pt)
+#table(
+  columns: (15pt, 1fr),
+  inset: 2pt,
+  table.cell(rowspan: 24)[A],
+  ..for i in range(24) {
+    ([#i#if i in (17, 19, 21) { footnote[N] }],)
+  }
+)

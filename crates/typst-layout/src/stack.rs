@@ -1,15 +1,19 @@
+use std::sync::Arc;
+
+use either::Either;
+
 use typst_library::diag::{SourceResult, bail};
 use typst_library::engine::Engine;
 use typst_library::foundations::{Content, Packed, Resolve, StyleChain, StyledElem};
-use typst_library::introspection::{Locator, SplitLocator};
+use typst_library::introspection::Locator;
 use typst_library::layout::{
-    Abs, AlignElem, Axes, Axis, Dir, FixedAlignment, Fr, Fragment, Frame, HElem, Point,
-    Regions, Size, Spacing, StackChild, StackElem, VElem,
+    Abs, AlignElem, Axes, Axis, Dir, FixedAlignment, Fr, Frame, HElem, MultiState,
+    MultiStep, Point, Regions, Spacing, StackChild, StackElem, VElem,
 };
 use typst_syntax::Span;
 use typst_utils::{Get, Numeric};
 
-/// Layout the stack.
+/// Layout the stack, one region at a time.
 #[typst_macros::time(span = elem.span())]
 pub fn layout_stack(
     elem: &Packed<StackElem>,
@@ -17,9 +21,18 @@ pub fn layout_stack(
     locator: Locator,
     styles: StyleChain,
     regions: Regions,
-) -> SourceResult<Fragment> {
-    layout_stack_internal::<fn(&mut Engine, StyleChain, Regions) -> SourceResult<Fragment>>(
-        elem.children.iter().map(From::from),
+    state: Option<&MultiState>,
+) -> SourceResult<MultiStep> {
+    layout_stack_internal::<
+        fn(
+            &mut Engine,
+            StyleChain,
+            Regions,
+            Option<&MultiState>,
+        ) -> SourceResult<MultiStep>,
+        _,
+    >(
+        |start| elem.children[start..].iter().map(From::from),
         elem.span(),
         elem.spacing.get(styles),
         elem.dir.get(styles),
@@ -27,6 +40,7 @@ pub fn layout_stack(
         locator,
         styles,
         regions,
+        state,
     )
 }
 
@@ -35,26 +49,56 @@ pub fn layout_stack(
 /// create other layouters, such as that of lists.
 pub enum StackLayoutChild<'a, F>
 where
-    F: Fn(&mut Engine, StyleChain, Regions) -> SourceResult<Fragment>,
+    F: Fn(
+        &mut Engine,
+        StyleChain,
+        Regions,
+        Option<&MultiState>,
+    ) -> SourceResult<MultiStep>,
 {
     /// A stack child with content or spacing.
     StackChild(&'a StackChild),
-    /// A child with a custom layouter, producing its own frames.
+    /// A child with a custom layouter, producing its own frames one region at
+    /// a time.
     CustomLayouter(F),
 }
 
 impl<'a, F> From<&'a StackChild> for StackLayoutChild<'a, F>
 where
-    F: Fn(&mut Engine, StyleChain, Regions) -> SourceResult<Fragment>,
+    F: Fn(
+        &mut Engine,
+        StyleChain,
+        Regions,
+        Option<&MultiState>,
+    ) -> SourceResult<MultiStep>,
 {
     fn from(value: &'a StackChild) -> Self {
         Self::StackChild(value)
     }
 }
 
-/// Layout multiple cells like a stack. Requires only the spacing to insert
-/// between blocks, the stack growth direction, its children, as well as
-/// relevant layout information.
+/// Where a stack continues.
+struct StackState {
+    /// The index of the child to continue with.
+    child: usize,
+    /// How to continue with the child.
+    resume: Resume,
+    /// The local hashes of the children's locators (see [`Locator::local`]).
+    locals: Arc<[u128]>,
+}
+
+/// How a stack continues with a child.
+enum Resume {
+    /// The child is laid out from the start, directly in the region. The
+    /// spacing before it was already laid out.
+    Start,
+    /// The child broke across regions and continues from the given state.
+    Continue(MultiState),
+}
+
+/// Layout multiple cells like a stack, one region at a time. Requires only the
+/// spacing to insert between blocks, the stack growth direction, its children,
+/// as well as relevant layout information.
 ///
 /// In particular, this doesn't require creating a stack element explicitly, as
 /// it requires `Content`, which has restrictions as to which values it can
@@ -64,9 +108,19 @@ where
 /// more deeply, such as for lists, which need a custom layout function that
 /// might borrow data from the environment for each list item (a stack child).
 /// Each child receives relevant layout data from the stack as well.
+///
+/// When called with `state` set to `None` for the first region and to the
+/// returned state for each following region, this produces a frame for each
+/// region, laying out children that break across regions one region at a
+/// time.
+///
+/// The `children` function yields the children from the given index onwards.
+/// A continuation only asks for the children from the one it continues with,
+/// so that each region costs time proportional to the children laid out in
+/// it rather than to all children.
 #[expect(clippy::too_many_arguments)]
-pub fn layout_stack_internal<'a, F>(
-    children: impl IntoIterator<Item = StackLayoutChild<'a, F>>,
+pub fn layout_stack_internal<'a, F, I>(
+    children: impl FnOnce(usize) -> I,
     span: Span,
     spacing: Option<Spacing>,
     dir: Dir,
@@ -74,57 +128,137 @@ pub fn layout_stack_internal<'a, F>(
     locator: Locator,
     styles: StyleChain,
     regions: Regions,
-) -> SourceResult<Fragment>
+    state: Option<&MultiState>,
+) -> SourceResult<MultiStep>
 where
-    F: Fn(&mut Engine, StyleChain, Regions) -> SourceResult<Fragment>,
+    F: Fn(
+        &mut Engine,
+        StyleChain,
+        Regions,
+        Option<&MultiState>,
+    ) -> SourceResult<MultiStep>,
+    I: IntoIterator<Item = StackLayoutChild<'a, F>>,
 {
+    let state = state.map(MultiState::get::<StackState>);
+    let axis = dir.axis();
+
+    // Children before the one we continue with were laid out in earlier
+    // regions. In the first region, all children are needed to provide
+    // unique locations to them. Their locators are prepared once and kept
+    // for the following regions.
+    let (start, children, locals) = match state {
+        Some(state) => (
+            state.child,
+            Either::Left(children(state.child).into_iter()),
+            state.locals.clone(),
+        ),
+        None => {
+            let children: Vec<_> = children(0).into_iter().collect();
+            let mut split = locator.relayout().split();
+            let locals = children
+                .iter()
+                .map(|child| match child {
+                    StackLayoutChild::StackChild(StackChild::Block(block))
+                        if transparent_spacing(block, axis).is_none() =>
+                    {
+                        split.next(&block.span()).local()
+                    }
+                    _ => 0,
+                })
+                .collect();
+            (0, Either::Right(children.into_iter()), locals)
+        }
+    };
+
     let mut layouter = StackLayouter::new(span, dir, locator, styles, regions);
-    let axis = layouter.dir.axis();
     let mut deferred = None;
 
-    for child in children {
-        match child {
+    for (i, child) in (start..).zip(children) {
+        // How to lay out the child if it's the one we continue with.
+        let resume = if i == start { state.map(|s| &s.resume) } else { None };
+
+        let step = match child {
             StackLayoutChild::StackChild(StackChild::Spacing(kind)) => {
                 layouter.layout_spacing(*kind);
                 deferred = None;
+                continue;
             }
             StackLayoutChild::StackChild(StackChild::Block(block)) => {
-                // Transparently handle `h`.
-                if let (Axis::X, Some(h)) = (axis, block.to_packed::<HElem>()) {
-                    layouter.layout_spacing(h.amount);
+                if let Some(amount) = transparent_spacing(block, axis) {
+                    layouter.layout_spacing(amount);
                     deferred = None;
                     continue;
                 }
 
-                // Transparently handle `v`.
-                if let (Axis::Y, Some(v)) = (axis, block.to_packed::<VElem>()) {
-                    layouter.layout_spacing(v.amount);
-                    deferred = None;
-                    continue;
-                }
+                let locator = layouter.locator.with_local(locals[i]);
+                let Some(inner) = layouter.prepare(&mut deferred, resume) else {
+                    return layouter.finish_early(i, locals);
+                };
 
-                if let Some(kind) = deferred {
-                    layouter.layout_spacing(kind);
+                // Block-axis alignment of the `AlignElem` is respected by
+                // stacks.
+                let align = if let Some(align) = block.to_packed::<AlignElem>() {
+                    align.alignment.get(styles)
+                } else if let Some(styled) = block.to_packed::<StyledElem>() {
+                    styles.chain(&styled.styles).get(AlignElem::alignment)
+                } else {
+                    styles.get(AlignElem::alignment)
                 }
+                .resolve(styles);
 
-                layouter.layout_block(engine, block, styles)?;
-                deferred = spacing;
+                let step = crate::flow::layout_fragment_step(
+                    engine,
+                    block,
+                    locator,
+                    styles,
+                    layouter.regions,
+                    inner,
+                )?;
+                (step, align)
             }
             StackLayoutChild::CustomLayouter(custom_layouter) => {
-                if let Some(kind) = deferred {
-                    layouter.layout_spacing(kind);
-                }
+                let Some(inner) = layouter.prepare(&mut deferred, resume) else {
+                    return layouter.finish_early(i, locals);
+                };
 
-                layouter.layout_custom_layouter(engine, custom_layouter, styles)?;
-                deferred = spacing;
+                let align = styles.get(AlignElem::alignment).resolve(styles);
+                let step = custom_layouter(engine, styles, layouter.regions, inner)?;
+                (step, align)
             }
+        };
+
+        let (MultiStep { frame, next, ahead }, align) = step;
+        layouter.push_frame(align, frame);
+
+        // If the child continues in the next region, so does the stack,
+        // starting with the child and whatever it laid out ahead.
+        if let Some(next) = next {
+            let frame = layouter.finish_region()?;
+            let next = StackState {
+                child: i,
+                resume: Resume::Continue(next),
+                locals: locals.clone(),
+            };
+            return Ok(MultiStep { frame, next: Some(MultiState::new(next)), ahead });
         }
+
+        deferred = spacing;
     }
 
-    layouter.finish()
+    let frame = layouter.finish_region()?;
+    Ok(MultiStep::new(frame, None))
 }
 
-/// Performs stack layout.
+/// The amount of spacing if a block is `h` or `v` spacing along the stack's
+/// axis, which is handled transparently.
+fn transparent_spacing(block: &Content, axis: Axis) -> Option<Spacing> {
+    match axis {
+        Axis::X => block.to_packed::<HElem>().map(|h| h.amount),
+        Axis::Y => block.to_packed::<VElem>().map(|v| v.amount),
+    }
+}
+
+/// Performs stack layout for one region.
 struct StackLayouter<'a> {
     /// The span to raise errors at during layout.
     span: Span,
@@ -132,16 +266,16 @@ struct StackLayouter<'a> {
     dir: Dir,
     /// The axis of the stacking direction.
     axis: Axis,
-    /// Provides unique locations to the stack's children.
-    locator: SplitLocator<'a>,
+    /// The stack's locator, whose link the children's locators share.
+    locator: Locator<'a>,
     /// The inherited styles.
     styles: StyleChain<'a>,
     /// The regions to layout children into.
     regions: Regions<'a>,
     /// Whether the stack itself should expand to fill the region.
     expand: Axes<bool>,
-    /// The initial size of the current region before we started subtracting.
-    initial: Size,
+    /// The regions before we started using up the current region.
+    initial: Regions<'a>,
     /// The generic size used by the frames for the current region.
     used: GenericSize<Abs>,
     /// The sum of fractions in the current region.
@@ -149,8 +283,6 @@ struct StackLayouter<'a> {
     /// Already layouted items whose exact positions are not yet known due to
     /// fractional spacing.
     items: Vec<StackItem>,
-    /// Finished frames for previous regions.
-    finished: Vec<Frame>,
 }
 
 /// A prepared item in a stack layout.
@@ -182,15 +314,14 @@ impl<'a> StackLayouter<'a> {
             span,
             dir,
             axis,
-            locator: locator.split(),
+            locator,
             styles,
             regions,
             expand,
-            initial: regions.size,
+            initial: regions,
             used: GenericSize::zero(),
             fr: Fr::zero(),
             items: vec![],
-            finished: vec![],
         }
     }
 
@@ -202,10 +333,12 @@ impl<'a> StackLayouter<'a> {
                 let resolved = v
                     .resolve(self.styles)
                     .relative_to(self.regions.base().get(self.axis));
-                let remaining = self.regions.size.get_mut(self.axis);
-                let limited = resolved.min(*remaining);
+                let limited = match self.axis {
+                    Axis::X => resolved.min(self.regions.width()),
+                    Axis::Y => self.regions.limited(resolved),
+                };
                 if self.dir.axis() == Axis::Y {
-                    *remaining -= limited;
+                    self.regions.consume(limited);
                 }
                 self.used.main += limited;
                 self.items.push(StackItem::Absolute(resolved));
@@ -217,103 +350,82 @@ impl<'a> StackLayouter<'a> {
         }
     }
 
-    /// Layout an arbitrary block.
-    fn layout_block(
+    /// Prepares for laying out a block or custom layouter child, given how to
+    /// resume it.
+    ///
+    /// Lays out the `deferred` spacing and returns the state to lay out the
+    /// child from, if it should be laid out in this region. Returns `None` if
+    /// the region is full and the child must be laid out in the next one.
+    fn prepare<'s>(
         &mut self,
-        engine: &mut Engine,
-        block: &Content,
-        styles: StyleChain,
-    ) -> SourceResult<()> {
-        if self.regions.is_full() {
-            self.finish_region()?;
-        }
-
-        // Block-axis alignment of the `AlignElem` is respected by stacks.
-        let align = if let Some(align) = block.to_packed::<AlignElem>() {
-            align.alignment.get(styles)
-        } else if let Some(styled) = block.to_packed::<StyledElem>() {
-            styles.chain(&styled.styles).get(AlignElem::alignment)
-        } else {
-            styles.get(AlignElem::alignment)
-        }
-        .resolve(styles);
-
-        let fragment = crate::layout_fragment(
-            engine,
-            block,
-            self.locator.next(&block.span()),
-            styles,
-            self.regions,
-        )?;
-
-        self.layout_fragment(align, fragment)
-    }
-
-    /// Layout a child with a custom layouter procedure.
-    fn layout_custom_layouter(
-        &mut self,
-        engine: &mut Engine,
-        layouter: impl Fn(&mut Engine, StyleChain, Regions) -> SourceResult<Fragment>,
-        styles: StyleChain,
-    ) -> SourceResult<()> {
-        if self.regions.is_full() {
-            self.finish_region()?;
-        }
-
-        let align = styles.get(AlignElem::alignment).resolve(styles);
-
-        let fragment = layouter(engine, styles, self.regions)?;
-
-        self.layout_fragment(align, fragment)
-    }
-
-    /// Store laid out content, coming from either a block or a custom layouter.
-    fn layout_fragment(
-        &mut self,
-        align: Axes<FixedAlignment>,
-        fragment: Fragment,
-    ) -> SourceResult<()> {
-        let len = fragment.len();
-        for (i, frame) in fragment.into_iter().enumerate() {
-            // Grow our size, shrink the region and save the frame for later.
-            let specific_size = frame.size();
-            if self.dir.axis() == Axis::Y {
-                self.regions.size.y -= specific_size.y;
-            }
-
-            let generic_size = match self.axis {
-                Axis::X => GenericSize::new(specific_size.y, specific_size.x),
-                Axis::Y => GenericSize::new(specific_size.x, specific_size.y),
-            };
-
-            self.used.main += generic_size.main;
-            self.used.cross.set_max(generic_size.cross);
-
-            self.items.push(StackItem::Frame(frame, align));
-
-            if i + 1 < len {
-                self.finish_region()?;
+        deferred: &mut Option<Spacing>,
+        resume: Option<&'s Resume>,
+    ) -> Option<Option<&'s MultiState>> {
+        match resume {
+            Some(Resume::Start) => Some(None),
+            Some(Resume::Continue(inner)) => Some(Some(inner)),
+            None => {
+                if let Some(kind) = deferred.take() {
+                    self.layout_spacing(kind);
+                }
+                if self.regions.is_full() { None } else { Some(None) }
             }
         }
-
-        Ok(())
     }
 
-    /// Advance to the next region.
-    fn finish_region(&mut self) -> SourceResult<()> {
+    /// Finishes the region before laying out the `child`-th child, which then
+    /// starts the next region.
+    fn finish_early(
+        mut self,
+        child: usize,
+        locals: Arc<[u128]>,
+    ) -> SourceResult<MultiStep> {
+        let frame = self.finish_region()?;
+        let next = StackState { child, resume: Resume::Start, locals };
+        Ok(MultiStep::new(frame, Some(MultiState::new(next))))
+    }
+
+    /// Store a laid out frame, coming from either a block or a custom
+    /// layouter.
+    fn push_frame(&mut self, align: Axes<FixedAlignment>, frame: Frame) {
+        // Grow our size, shrink the region and save the frame for later.
+        let specific_size = frame.size();
+        if self.dir.axis() == Axis::Y {
+            self.regions.consume(specific_size.y);
+        }
+
+        let generic_size = match self.axis {
+            Axis::X => GenericSize::new(specific_size.y, specific_size.x),
+            Axis::Y => GenericSize::new(specific_size.x, specific_size.y),
+        };
+
+        self.used.main += generic_size.main;
+        self.used.cross.set_max(generic_size.cross);
+
+        self.items.push(StackItem::Frame(frame, align));
+    }
+
+    /// Finish the region, producing its frame.
+    fn finish_region(&mut self) -> SourceResult<Frame> {
         // Determine the size of the stack in this region depending on whether
         // the region expands.
-        let mut size = self
-            .expand
-            .select(self.initial, self.used.into_axes(self.axis))
-            .min(self.initial);
+        let used = self.used.into_axes(self.axis);
+        let initial = self.initial;
+        let mut size = initial.fit(used, self.expand);
 
-        // Expand fully if there are fr spacings.
-        let full = self.initial.get(self.axis);
-        let remaining = full - self.used.main;
-        if self.fr.get() > 0.0 && full.is_finite() {
-            self.used.main = full;
-            size.set(self.axis, full);
+        // Expand fully if there are fr spacings. The remaining space only
+        // matters then.
+        let mut remaining = Abs::zero();
+        if self.fr.get() > 0.0 {
+            let full = match self.axis {
+                Axis::X => initial.width(),
+                Axis::Y => initial.height(),
+            };
+            remaining = full - self.used.main;
+            if full.is_finite() {
+                self.used.main = full;
+                size.set(self.axis, full);
+            }
         }
 
         if !size.is_finite() {
@@ -359,20 +471,7 @@ impl<'a> StackLayouter<'a> {
             }
         }
 
-        // Advance to the next region.
-        self.regions.next();
-        self.initial = self.regions.size;
-        self.used = GenericSize::zero();
-        self.fr = Fr::zero();
-        self.finished.push(output);
-
-        Ok(())
-    }
-
-    /// Finish layouting and return the resulting frames.
-    fn finish(mut self) -> SourceResult<Fragment> {
-        self.finish_region()?;
-        Ok(Fragment::frames(self.finished))
+        Ok(output)
     }
 }
 

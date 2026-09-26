@@ -203,6 +203,22 @@ impl<'a> Locator<'a> {
     pub fn relayout(&self) -> Self {
         Self { local: self.local, outer: self.outer }
     }
+
+    /// The local hash of this locator, which identifies it relative to its
+    /// outer link.
+    ///
+    /// Together with [`with_local`](Self::with_local), this allows storing a
+    /// locator independently of its link and restoring it later under an
+    /// equivalent link, e.g. across memoization boundaries.
+    pub fn local(&self) -> u128 {
+        self.local
+    }
+
+    /// Creates a locator with the same outer link as this one, but the given
+    /// local hash. See [`local`](Self::local).
+    pub fn with_local(&self, local: u128) -> Self {
+        Self { local, outer: self.outer }
+    }
 }
 
 #[comemo::track]
@@ -273,12 +289,33 @@ impl<'a> SplitLocator<'a> {
             std::mem::replace(slot, *slot + 1)
         };
 
+        self.nth_inner(key, disambiguator)
+    }
+
+    /// Produces the sublocator for a subtree with the given key and
+    /// disambiguator.
+    fn nth_inner(&self, key: u128, disambiguator: usize) -> Locator<'a> {
         // Combine the key, disambiguator and local hash into a sub-local hash.
         // The outer information is not yet merged into this, it is added
         // on-demand in `Locator::resolve`.
         let local = typst_utils::hash128(&(key, disambiguator, self.local));
 
         Locator { outer: self.outer, local }
+    }
+
+    /// The number of sublocators that were produced for the given key so far.
+    pub fn count<K: Hash>(&self, key: &K) -> usize {
+        self.disambiguators
+            .get(&typst_utils::hash128(key))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Produces the sublocator that [`next`](Self::next) would produce for the
+    /// given key once `n` sublocators were produced for it, without changing
+    /// the state of this split locator.
+    pub fn nth<K: Hash>(&self, key: &K, n: usize) -> Locator<'a> {
+        self.nth_inner(typst_utils::hash128(key), n)
     }
 
     /// Produces a unique location for an element.

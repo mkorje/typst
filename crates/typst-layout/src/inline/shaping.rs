@@ -442,7 +442,7 @@ impl<'a> ShapedText<'a> {
                 fill: fill.clone(),
                 stroke: stroke.clone().map(|s| s.unwrap_or_default()),
                 text: self.text[range.start - self.base..range.end - self.base].into(),
-                glyphs,
+                glyphs: glyphs.into(),
             };
 
             let width = item.width();

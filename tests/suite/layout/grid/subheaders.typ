@@ -272,6 +272,25 @@
   ..([z],) * 10,
 )
 
+--- grid-subheaders-repeat-replace-short-lived-columns paged ---
+// Short-lived headers following a pending header must not drop the pending
+// header's height when it starts repeating. This used to panic.
+#set page(height: 8em, columns: 2)
+#grid(
+  grid.header([a]),
+  grid.header(level: 2, [b]),
+  grid.header(level: 2, [c]),
+  grid.header(level: 2, [d]),
+  grid.header(level: 2, [e]),
+  grid.header(level: 2, [f]),
+  grid.header(level: 2, [g]),
+  grid.header(level: 2, [h]),
+  grid.header(level: 2, [i]),
+  grid.header(level: 2, [j]),
+  grid.header(level: 3, [k]),
+  ..([z],) * 10,
+)
+
 --- grid-subheaders-repeat-short-lived-also-replaces paged ---
 // Short-lived subheaders must still replace their conflicting predecessors.
 #set page(height: 8em)

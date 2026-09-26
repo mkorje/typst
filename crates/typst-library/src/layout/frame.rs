@@ -147,6 +147,31 @@ impl Frame {
     pub fn items(&self) -> std::slice::Iter<'_, (Point, FrameItem)> {
         self.items.iter()
     }
+
+    /// Whether two frames have identical contents, except that sizes and
+    /// positions may differ by floating-point error.
+    ///
+    /// This is the case for layouts of the same content into regions whose
+    /// heights are the same, but computed differently (like derived regions
+    /// and their materialized counterparts). Unlike comparing hashes, this
+    /// does not need to hash freshly produced frames in full and stops at the
+    /// first difference. Tags are compared by location instead of by their
+    /// element.
+    pub fn approx_identical(&self, other: &Self) -> bool {
+        approx::size(self.size, other.size)
+            && match (self.baseline, other.baseline) {
+                (Some(a), Some(b)) => a.approx_eq(b),
+                (a, b) => a == b,
+            }
+            && self.kind == other.kind
+            && (Arc::ptr_eq(&self.items, &other.items)
+                || (self.items.len() == other.items.len()
+                    && self.items.iter().zip(other.items.iter()).all(
+                        |((p1, i1), (p2, i2))| {
+                            approx::point(*p1, *p2) && i1.approx_identical(i2)
+                        },
+                    )))
+    }
 }
 
 /// Insert items and subframes.
@@ -498,6 +523,82 @@ pub enum FrameItem {
     Tag(Tag),
 }
 
+impl FrameItem {
+    /// Whether two items are identical up to floating-point error in their
+    /// geometry. See [`Frame::approx_identical`].
+    fn approx_identical(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Group(a), Self::Group(b)) => {
+                approx::transform(a.transform, b.transform)
+                    && match (&a.clip, &b.clip) {
+                        (Some(c1), Some(c2)) => approx::curve(c1, c2),
+                        (c1, c2) => c1 == c2,
+                    }
+                    && a.label == b.label
+                    && a.parent == b.parent
+                    && a.frame.approx_identical(&b.frame)
+            }
+            (Self::Text(a), Self::Text(b)) => a == b,
+            (Self::Shape(a, s1), Self::Shape(b, s2)) => approx::shape(a, b) && s1 == s2,
+            (Self::Image(a, z1, s1), Self::Image(b, z2, s2)) => {
+                a == b && approx::size(*z1, *z2) && s1 == s2
+            }
+            (Self::Link(a, z1), Self::Link(b, z2)) => a == b && approx::size(*z1, *z2),
+            (Self::Tag(Tag::Start(a, f1)), Self::Tag(Tag::Start(b, f2))) => {
+                a.location() == b.location() && f1 == f2
+            }
+            (Self::Tag(a @ Tag::End(..)), Self::Tag(b @ Tag::End(..))) => a == b,
+            _ => false,
+        }
+    }
+}
+
+/// Comparisons of geometry up to floating-point error, for
+/// [`Frame::approx_identical`].
+mod approx {
+    use crate::layout::{Point, Size, Transform};
+    use crate::visualize::{Curve, CurveItem, Geometry, Shape};
+
+    pub fn point(a: Point, b: Point) -> bool {
+        a.x.approx_eq(b.x) && a.y.approx_eq(b.y)
+    }
+
+    pub fn size(a: Size, b: Size) -> bool {
+        a.x.approx_eq(b.x) && a.y.approx_eq(b.y)
+    }
+
+    pub fn transform(a: Transform, b: Transform) -> bool {
+        (a.sx, a.ky, a.kx, a.sy) == (b.sx, b.ky, b.kx, b.sy)
+            && a.tx.approx_eq(b.tx)
+            && a.ty.approx_eq(b.ty)
+    }
+
+    pub fn curve(a: &Curve, b: &Curve) -> bool {
+        a.0.len() == b.0.len()
+            && a.0.iter().zip(&b.0).all(|pair| match pair {
+                (CurveItem::Move(p1), CurveItem::Move(p2))
+                | (CurveItem::Line(p1), CurveItem::Line(p2)) => point(*p1, *p2),
+                (CurveItem::Cubic(a1, b1, c1), CurveItem::Cubic(a2, b2, c2)) => {
+                    point(*a1, *a2) && point(*b1, *b2) && point(*c1, *c2)
+                }
+                (CurveItem::Close, CurveItem::Close) => true,
+                _ => false,
+            })
+    }
+
+    pub fn shape(a: &Shape, b: &Shape) -> bool {
+        a.fill == b.fill
+            && a.fill_rule == b.fill_rule
+            && a.stroke == b.stroke
+            && match (&a.geometry, &b.geometry) {
+                (Geometry::Line(p1), Geometry::Line(p2)) => point(*p1, *p2),
+                (Geometry::Rect(z1), Geometry::Rect(z2)) => size(*z1, *z2),
+                (Geometry::Curve(c1), Geometry::Curve(c2)) => curve(c1, c2),
+                _ => false,
+            }
+    }
+}
+
 impl Debug for FrameItem {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
@@ -593,4 +694,39 @@ impl FrameParent {
 pub enum Inherit {
     Yes,
     No,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::visualize::Color;
+
+    fn frame(height: f64, fill: Color) -> Frame {
+        let mut inner = Frame::soft(Size::new(Abs::pt(10.0), Abs::pt(height)));
+        inner.push(
+            Point::with_y(Abs::pt(height / 2.0)),
+            FrameItem::Shape(
+                Geometry::Rect(Size::new(Abs::pt(5.0), Abs::pt(height / 2.0)))
+                    .filled(fill),
+                Span::detached(),
+            ),
+        );
+        let mut outer = Frame::hard(inner.size());
+        outer.push_frame(Point::zero(), inner);
+        outer
+    }
+
+    #[test]
+    fn test_frame_approx_identical() {
+        // Heights that only differ by floating-point error.
+        let a = frame(163.278, Color::BLACK);
+        let b = frame(163.27799999999996, Color::BLACK);
+        assert_ne!(a.height(), b.height());
+        assert!(a.approx_identical(&b));
+        assert!(a.approx_identical(&a.clone()));
+
+        // Other geometry or contents.
+        assert!(!a.approx_identical(&frame(163.0, Color::BLACK)));
+        assert!(!a.approx_identical(&frame(163.278, Color::WHITE)));
+    }
 }

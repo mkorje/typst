@@ -171,7 +171,7 @@ impl GlyphFragment {
             stroke: styles.resolve(TextElem::stroke).map(|s| s.unwrap_or_default()),
             lang: styles.get(TextElem::lang),
             region: styles.get(TextElem::region),
-            glyphs,
+            glyphs: glyphs.into(),
         };
 
         let mut fragment = Self {
@@ -196,7 +196,7 @@ impl GlyphFragment {
     }
 
     fn with_span(mut self, span: Span) -> Self {
-        for glyph in &mut self.item.glyphs {
+        for glyph in self.item.glyphs.make_mut() {
             glyph.span = (span, 0);
         }
         self
@@ -211,7 +211,7 @@ impl GlyphFragment {
         let italics = italics_correction(&self.item.font, id).unwrap_or_default();
         let width = self.item.width();
         if !extended_shape {
-            self.item.glyphs[0].x_advance += italics;
+            self.item.glyphs.make_mut()[0].x_advance += italics;
         }
         let italics = italics.at(self.item.size);
 
@@ -291,7 +291,7 @@ impl GlyphFragment {
 
         // This is either good or the best we've got.
         if short_target <= best_advance || construction.assembly.is_none() {
-            self.item.glyphs = vec![Glyph {
+            self.item.glyphs = ecow::eco_vec![Glyph {
                 id: best_id.0,
                 x_advance: self.item.font.x_advance(best_id.0).unwrap_or_default(),
                 x_offset: Em::zero(),
@@ -696,7 +696,7 @@ fn assemble(
         }
     }
 
-    base.item.glyphs = glyphs;
+    base.item.glyphs = glyphs.into();
     base.italics_correction = base
         .item
         .font

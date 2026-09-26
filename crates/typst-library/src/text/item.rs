@@ -1,7 +1,7 @@
 use std::fmt::{self, Debug, Formatter};
 use std::ops::Range;
 
-use ecow::EcoString;
+use ecow::{EcoString, EcoVec};
 use typst_syntax::Span;
 
 use crate::layout::{Abs, Em, Point, Rect};
@@ -27,7 +27,7 @@ pub struct TextItem {
     pub text: EcoString,
     /// The glyphs. The number of glyphs may be different from the number of
     /// characters in the plain text due to e.g. ligatures.
-    pub glyphs: Vec<Glyph>,
+    pub glyphs: EcoVec<Glyph>,
 }
 
 impl TextItem {

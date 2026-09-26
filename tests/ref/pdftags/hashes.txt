@@ -32,6 +32,9 @@ cfbea2d7ed48bff043919987ff2a4130 figure-tags-listing
 434446e66eeb0f1a0cf8d8f307dbe594 figure-tags-only-marked-content
 d30d960cd017a77c60260a7386df8266 figure-tags-with-alt-flatten-content-basic
 02dc0d7c5ef5532c577742db0cad9076 figure-tags-with-alt-flatten-content-complex
+b83f745310be6c00afbc412e4f15698e flow-spill-fallback-actual-regions
+6e8c84f19794d250bf1d0c8e17820eff flow-spill-restart-cap-nested
+a13db25d7b310a71fc9b9e16b917bda8 flow-spill-restart-footnote
 dc328f34d7e95850a5b6ecaa3ac73237 footnote-tags-basic
 4ca1e7a47f5badb0bafbb5eb619397eb footnote-tags-different-lang
 8baa5ef5afdc18f3cc5ad494fa9fc74d footnote-tags-ref-to-other-footnote

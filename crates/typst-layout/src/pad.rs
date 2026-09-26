@@ -3,10 +3,11 @@ use typst_library::engine::Engine;
 use typst_library::foundations::{Packed, StyleChain};
 use typst_library::introspection::Locator;
 use typst_library::layout::{
-    Abs, Fragment, Frame, PadElem, Point, Regions, Rel, Sides, Size,
+    Abs, Followup, Frame, MultiState, MultiStep, PadElem, Point, Regions, Rel, Sides,
+    Size,
 };
 
-/// Layout the padded content.
+/// Layout the padded content, one region at a time.
 #[typst_macros::time(span = elem.span())]
 pub fn layout_pad(
     elem: &Packed<PadElem>,
@@ -14,7 +15,8 @@ pub fn layout_pad(
     locator: Locator,
     styles: StyleChain,
     regions: Regions,
-) -> SourceResult<Fragment> {
+    state: Option<&MultiState>,
+) -> SourceResult<MultiStep> {
     let padding = Sides::new(
         elem.left.resolve(styles),
         elem.top.resolve(styles),
@@ -22,40 +24,34 @@ pub fn layout_pad(
         elem.bottom.resolve(styles),
     );
 
-    let mut backlog = vec![];
-    let pod = regions.map(&mut backlog, |size| shrink(size, &padding));
+    let mut buf = Followup::default();
+    let pod = regions.shrink(&padding, &mut buf);
 
     // Layout child into padded regions.
-    let mut fragment = crate::layout_fragment(engine, &elem.body, locator, styles, pod)?;
+    let mut step = crate::flow::layout_fragment_step(
+        engine, &elem.body, locator, styles, pod, state,
+    )?;
+    grow(&mut step.frame, &padding);
+    step.ahead = grow_ahead(step.ahead, &padding, regions);
 
-    for frame in &mut fragment {
-        grow(frame, &padding);
-    }
+    Ok(step)
+}
 
-    Ok(fragment)
+/// Grows the heights that a child laid out into the regions after the current
+/// one (see [`MultiStep::ahead`]) by the vertical part of an inset, which each
+/// of the frames around the child has.
+pub fn grow_ahead(
+    ahead: Vec<Abs>,
+    inset: &Sides<Rel<Abs>>,
+    regions: Regions,
+) -> Vec<Abs> {
+    let extra = inset.sum_by_axis().y.relative_to(regions.base().y);
+    ahead.into_iter().map(|height| height + extra).collect()
 }
 
 /// Shrink a region size by an inset relative to the size itself.
 pub fn shrink(size: Size, inset: &Sides<Rel<Abs>>) -> Size {
     size - inset.sum_by_axis().relative_to(size)
-}
-
-/// Shrink the components of possibly multiple `Regions` by an inset relative to
-/// the regions themselves.
-pub fn shrink_multiple(
-    size: &mut Size,
-    full: &mut Abs,
-    backlog: &mut [Abs],
-    last: &mut Option<Abs>,
-    inset: &Sides<Rel<Abs>>,
-) {
-    let summed = inset.sum_by_axis();
-    *size -= summed.relative_to(*size);
-    *full -= summed.y.relative_to(*full);
-    for item in backlog {
-        *item -= summed.y.relative_to(*item);
-    }
-    *last = last.map(|v| v - summed.y.relative_to(v));
 }
 
 /// Grow a frame's size by an inset relative to the grown size.

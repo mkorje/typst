@@ -11,6 +11,8 @@ mod shaping;
 mod table;
 mod text;
 
+use std::sync::Arc;
+
 use comemo::Tracked;
 use typst_library::World;
 use typst_library::diag::{At, SourceResult, warning};
@@ -18,8 +20,9 @@ use typst_library::engine::Engine;
 use typst_library::foundations::{NativeElement, Packed, Resolve, Style, StyleChain};
 use typst_library::introspection::{Counter, Locator};
 use typst_library::layout::{
-    Abs, AlignElem, Axes, BlockElem, Em, FixedAlignment, Fragment, Frame, InlineItem,
-    OuterHAlignment, Point, Region, Regions, Size, SpecificAlignment, VAlignment,
+    Abs, AlignElem, Axes, BlockElem, Em, FixedAlignment, Frame, InlineItem, MultiState,
+    MultiStep, OuterHAlignment, Point, Region, Regions, Size, SpecificAlignment,
+    VAlignment,
 };
 use typst_library::math::ir::{
     BoxItem, ExternalItem, MathComponent, MathItem, MathKind, MathProperties, MathmlItem,
@@ -101,7 +104,7 @@ pub fn layout_equation_inline(
     Ok(items)
 }
 
-/// Layout a block-level equation (in a flow).
+/// Layout a block-level equation (in a flow), one region at a time.
 #[typst_macros::time(span = elem.span())]
 pub fn layout_equation_block(
     elem: &Packed<EquationElem>,
@@ -109,9 +112,120 @@ pub fn layout_equation_block(
     locator: Locator,
     styles: StyleChain,
     regions: Regions,
-) -> SourceResult<Fragment> {
+    state: Option<&MultiState>,
+) -> SourceResult<MultiStep> {
     assert!(elem.block.get(styles));
 
+    let state = match state {
+        Some(state) => state.get::<EquationState>().clone(),
+        None => EquationState {
+            prepared: prepare_equation(elem, engine, locator, styles, regions)?,
+            cursor: 0,
+        },
+    };
+
+    let prepared = &state.prepared;
+    let rows = &prepared.rows;
+    let mut cursor = state.cursor;
+
+    let builder = if !styles.get(BlockElem::breakable) {
+        MathRunFrameBuilder { frames: rows.clone(), size: prepared.size }
+    } else if rows.is_empty() {
+        // Ensure that there is a frame, even for empty equations.
+        MathRunFrameBuilder { frames: vec![], size: Size::zero() }
+    } else {
+        // Keep track of the position of the first row in this region, so
+        // that the offset can be reverted.
+        let first_pos = rows[cursor].1;
+
+        let mut frames = vec![];
+        let mut height = Abs::zero();
+        while let Some((sub, pos)) = rows.get(cursor) {
+            let mut pos = *pos;
+            pos.y -= first_pos.y;
+
+            // Finish this region if the line doesn't fit. Only do it if
+            // we placed at least one line _or_ we still have non-last
+            // regions. Crucially, we don't want to infinitely create
+            // new regions which are too small.
+            if !regions.fits(sub.height() + pos.y)
+                && (regions.may_progress() || (regions.may_break() && !frames.is_empty()))
+            {
+                break;
+            }
+
+            height = height.max(pos.y + sub.height());
+            frames.push((sub.clone(), pos));
+            cursor += 1;
+        }
+
+        MathRunFrameBuilder { frames, size: Size::new(prepared.size.x, height) }
+    };
+
+    let done = cursor >= rows.len() || !styles.get(BlockElem::breakable);
+    let frame = match &prepared.number {
+        // Don't number empty regions, but do number empty equations. A region
+        // is only empty if its rows are moved to the next region.
+        Some(number) if !builder.frames.is_empty() || rows.is_empty() => {
+            add_equation_number(
+                builder,
+                number.frame.clone(),
+                number.number_align,
+                number.equation_align,
+                number.region_width,
+                number.full_width,
+            )
+        }
+        _ => builder.build_aligned(),
+    };
+
+    let next = (!done).then(|| MultiState::new(EquationState { cursor, ..state }));
+    Ok(MultiStep::new(frame, next))
+}
+
+/// Where a block-level equation continues.
+#[derive(Clone)]
+struct EquationState {
+    /// The laid out equation.
+    prepared: Arc<PreparedEquation>,
+    /// The index of the next row.
+    cursor: usize,
+}
+
+/// A laid out block-level equation that is yet to be distributed across
+/// regions.
+struct PreparedEquation {
+    /// The rows of the equation and their positions.
+    rows: Vec<(Frame, Point)>,
+    /// The size of the whole equation.
+    size: Size,
+    /// The equation number, if any.
+    number: Option<EquationNumber>,
+}
+
+/// The number of a block-level equation.
+struct EquationNumber {
+    /// The laid out number.
+    frame: Frame,
+    /// How to align the number.
+    number_align: Axes<FixedAlignment>,
+    /// How the equation is aligned.
+    equation_align: FixedAlignment,
+    /// The width of the region the equation is laid out in.
+    region_width: Abs,
+    /// The width of the number including the gutter.
+    full_width: Abs,
+}
+
+/// Lays out a block-level equation into rows that can be distributed across
+/// regions.
+fn prepare_equation(
+    elem: &Packed<EquationElem>,
+    engine: &mut Engine,
+    locator: Locator,
+    styles: StyleChain,
+    regions: Regions,
+) -> SourceResult<Arc<PreparedEquation>> {
     let span = elem.span();
     let font = get_font(engine.world, styles, span)?;
     warn_non_math_font(&font, engine, span);
@@ -133,119 +247,46 @@ pub fn layout_equation_block(
     } else {
         ctx.layout_into_fragments(&item, styles)?.into_frame().into()
     };
-    let width = full_equation_builder.size.x;
 
-    let equation_builders = if styles.get(BlockElem::breakable) {
-        let mut rows = full_equation_builder.frames.into_iter().peekable();
-        let mut equation_builders = vec![];
-        let mut last_first_pos = Point::zero();
-        let mut regions = regions;
+    let number = match elem.numbering.get_ref(styles) {
+        None => None,
+        Some(numbering) => {
+            let pod = Region::new(regions.base(), Axes::splat(false));
+            let counter = Counter::of(EquationElem::ELEM)
+                .display_at(engine, elem.location().unwrap(), styles, numbering, span)?
+                .spanned(span);
+            let mut locator = locator.split();
+            let number =
+                crate::layout_frame(engine, &counter, locator.next(&()), styles, pod)?;
 
-        // Keep track of the position of the first row in this region,
-        // so that the offset can be reverted later.
-        while let Some(&(_, first_pos)) = rows.peek() {
-            last_first_pos = first_pos;
+            static NUMBER_GUTTER: Em = Em::new(0.5);
+            let full_width = number.width() + NUMBER_GUTTER.resolve(styles);
 
-            let mut frames = vec![];
-            let mut height = Abs::zero();
-            while let Some((sub, pos)) = rows.peek() {
-                let mut pos = *pos;
-                pos.y -= first_pos.y;
-
-                // Finish this region if the line doesn't fit. Only do it if
-                // we placed at least one line _or_ we still have non-last
-                // regions. Crucially, we don't want to infinitely create
-                // new regions which are too small.
-                if !regions.size.y.fits(sub.height() + pos.y)
-                    && (regions.may_progress()
-                        || (regions.may_break() && !frames.is_empty()))
-                {
-                    break;
+            let number_align = match elem.number_align.get(styles) {
+                SpecificAlignment::H(h) => {
+                    SpecificAlignment::Both(h, VAlignment::Horizon)
                 }
+                SpecificAlignment::V(v) => {
+                    SpecificAlignment::Both(OuterHAlignment::End, v)
+                }
+                SpecificAlignment::Both(h, v) => SpecificAlignment::Both(h, v),
+            };
 
-                let (sub, _) = rows.next().unwrap();
-                height = height.max(pos.y + sub.height());
-                frames.push((sub, pos));
-            }
-
-            equation_builders
-                .push(MathRunFrameBuilder { frames, size: Size::new(width, height) });
-            regions.next();
+            Some(EquationNumber {
+                frame: number,
+                number_align: number_align.resolve(styles),
+                equation_align: styles.get(AlignElem::alignment).resolve(styles).x,
+                region_width: regions.width(),
+                full_width,
+            })
         }
-
-        // Append remaining rows to the equation builder of the last region.
-        if let Some(equation_builder) = equation_builders.last_mut() {
-            equation_builder.frames.extend(rows.map(|(frame, mut pos)| {
-                pos.y -= last_first_pos.y;
-                (frame, pos)
-            }));
-
-            let height = equation_builder
-                .frames
-                .iter()
-                .map(|(frame, pos)| frame.height() + pos.y)
-                .max()
-                .unwrap_or(equation_builder.size.y);
-
-            equation_builder.size.y = height;
-        }
-
-        // Ensure that there is at least one frame, even for empty equations.
-        if equation_builders.is_empty() {
-            equation_builders
-                .push(MathRunFrameBuilder { frames: vec![], size: Size::zero() });
-        }
-
-        equation_builders
-    } else {
-        vec![full_equation_builder]
     };
 
-    let Some(numbering) = elem.numbering.get_ref(styles) else {
-        let frames = equation_builders
-            .into_iter()
-            .map(MathRunFrameBuilder::build_aligned)
-            .collect();
-        return Ok(Fragment::frames(frames));
-    };
-
-    let pod = Region::new(regions.base(), Axes::splat(false));
-    let counter = Counter::of(EquationElem::ELEM)
-        .display_at(engine, elem.location().unwrap(), styles, numbering, span)?
-        .spanned(span);
-    let mut locator = locator.split();
-    let number = crate::layout_frame(engine, &counter, locator.next(&()), styles, pod)?;
-
-    static NUMBER_GUTTER: Em = Em::new(0.5);
-    let full_number_width = number.width() + NUMBER_GUTTER.resolve(styles);
-
-    let number_align = match elem.number_align.get(styles) {
-        SpecificAlignment::H(h) => SpecificAlignment::Both(h, VAlignment::Horizon),
-        SpecificAlignment::V(v) => SpecificAlignment::Both(OuterHAlignment::End, v),
-        SpecificAlignment::Both(h, v) => SpecificAlignment::Both(h, v),
-    };
-
-    // Add equation numbers to each equation region.
-    let region_count = equation_builders.len();
-    let frames = equation_builders
-        .into_iter()
-        .map(|builder| {
-            if builder.frames.is_empty() && region_count > 1 {
-                // Don't number empty regions, but do number empty equations.
-                return builder.build_aligned();
-            }
-            add_equation_number(
-                builder,
-                number.clone(),
-                number_align.resolve(styles),
-                styles.get(AlignElem::alignment).resolve(styles).x,
-                regions.size.x,
-                full_number_width,
-            )
-        })
-        .collect();
-
-    Ok(Fragment::frames(frames))
+    Ok(Arc::new(PreparedEquation {
+        rows: full_equation_builder.frames,
+        size: full_equation_builder.size,
+        number,
+    }))
 }
 
 fn add_equation_number(

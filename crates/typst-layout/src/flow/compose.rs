@@ -10,8 +10,8 @@ use typst_library::introspection::{
     SplitLocator, Tag,
 };
 use typst_library::layout::{
-    Abs, Axes, Dir, FixedAlignment, Fragment, Frame, FrameItem, FrameParent, Inherit,
-    OuterHAlignment, PlacementScope, Point, Region, Regions, Rel, Size,
+    Abs, Axes, Dir, FixedAlignment, Followup, Fragment, Frame, FrameItem, FrameParent,
+    Inherit, OuterHAlignment, PlacementScope, Point, Region, Regions, Rel, Size,
 };
 use typst_library::model::ArtifactKind;
 use typst_library::model::{
@@ -21,7 +21,10 @@ use typst_syntax::Span;
 use typst_utils::{NonZeroExt, Numeric};
 
 use super::distribute::distribute;
-use super::{Config, FlowMode, LineNumberConfig, PlacedChild, Work};
+use super::{
+    Child, Config, FlowCx, FlowMode, LineNumberConfig, PlacedChild, Predictions, Restart,
+    Work,
+};
 
 /// A control flow event during layout.
 ///
@@ -29,6 +32,8 @@ use super::{Config, FlowMode, LineNumberConfig, PlacedChild, Work};
 pub(super) enum RelayoutStop<R = PlacementScope> {
     /// Indicates that the given scope should be relayouted.
     Relayout(R),
+    /// Indicates that flow layout should restart at an earlier subregion.
+    Restart(Restart),
     /// A fatal error.
     Error(EcoVec<SourceDiagnostic>),
 }
@@ -100,6 +105,18 @@ where
     }
 }
 
+impl<R> RelayoutStop<R> {
+    /// Propagates a restart or error to a caller with a different relayout
+    /// scope. Returns the relayout request, if any.
+    fn propagate<S>(self) -> Result<R, RelayoutStop<S>> {
+        match self {
+            Self::Relayout(r) => Ok(r),
+            Self::Restart(restart) => Err(RelayoutStop::Restart(restart)),
+            Self::Error(error) => Err(RelayoutStop::Error(error)),
+        }
+    }
+}
+
 impl<R, M> From<EcoVec<SourceDiagnostic>> for InsertionStop<R, M> {
     fn from(error: EcoVec<SourceDiagnostic>) -> Self {
         Self::Error(error)
@@ -147,17 +164,27 @@ impl<M> Migration<M> {
 ///
 /// To lay out the in-flow contents of individual subregions, the composer
 /// invokes [distribution](distribute()).
-pub fn compose(
+///
+/// The `region` is the index of the flow region being composed. The
+/// `predictions` are applied to the upcoming regions that children see.
+#[expect(clippy::too_many_arguments)]
+pub(super) fn compose(
     engine: &mut Engine,
     work: &mut Work,
+    cx: &FlowCx,
     config: &Config,
     locator: Locator,
     regions: Regions,
-) -> SourceResult<Frame> {
+    region: usize,
+    predictions: &Predictions,
+) -> Result<Frame, RelayoutStop<Infallible>> {
     Composer {
         engine,
+        cx,
         config,
         page_base: regions.base(),
+        region,
+        predictions,
         column: 0,
         page_insertions: Insertions::default(),
         column_insertions: Insertions::default(),
@@ -175,16 +202,21 @@ pub fn compose(
 /// it would force the lifetimes of various things to be equal if they
 /// shared a lifetime.
 ///
-/// The only interesting lifetimes are 'a and 'b. See [Work] for more details
-/// about them.
+/// The only interesting lifetimes are 'a and 'b: 'a is that of the flow's
+/// styles and locator and 'b is that of the flow's children.
 pub struct Composer<'a, 'b, 'x, 'y> {
     pub engine: &'x mut Engine<'y>,
-    pub work: &'x mut Work<'a, 'b>,
+    pub work: &'x mut Work,
+    pub cx: &'x FlowCx<'a, 'b>,
     pub config: &'x Config<'x>,
+    /// The index of the flow region being composed.
+    region: usize,
+    /// Learned predictions for the upcoming subregions.
+    predictions: &'x Predictions,
     column: usize,
     page_base: Size,
-    page_insertions: Insertions<'a, 'b>,
-    column_insertions: Insertions<'a, 'b>,
+    page_insertions: Insertions<'b>,
+    column_insertions: Insertions<'b>,
     column_balancing_height: Option<Abs>,
     // These are here because they have to survive relayout (we could lose the
     // footnotes otherwise). For floats, we revisit them anyway, so it's okay to
@@ -194,9 +226,13 @@ pub struct Composer<'a, 'b, 'x, 'y> {
     footnote_queue: Vec<Packed<FootnoteElem>>,
 }
 
-impl<'a, 'b> Composer<'a, 'b, '_, '_> {
+impl<'b> Composer<'_, 'b, '_, '_> {
     /// Lay out a container/page region, including container/page insertions.
-    fn page(mut self, locator: Locator, regions: Regions) -> SourceResult<Frame> {
+    fn page(
+        mut self,
+        locator: Locator,
+        regions: Regions,
+    ) -> Result<Frame, RelayoutStop<Infallible>> {
         // This loop can restart region layout when requested to do so by a
         // `RelayoutStop::Relayout(ParentScope)`. This happens when there is a
         // parent-scoped float or when balancing columns.
@@ -205,14 +241,14 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
             // Shrink the available space by the space used by page
             // insertions.
             let mut pod = regions;
-            pod.size.y -= self.page_insertions.height();
+            pod.consume(self.page_insertions.height());
 
             match self.page_contents(locator.relayout(), pod) {
                 Ok(frame) => break frame,
-                Err(RelayoutStop::Relayout(ParentScope)) => {
+                Err(stop) => {
+                    let ParentScope = stop.propagate()?;
                     *self.work = checkpoint.clone();
                 }
-                Err(RelayoutStop::Error(err)) => return Err(err),
             }
         };
         drop(checkpoint);
@@ -226,31 +262,42 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
         locator: Locator,
         regions: Regions,
     ) -> Result<Frame, RelayoutStop<ParentScope>> {
+        // The subregion that the first backlog entry corresponds to.
+        let first = self.region * self.config.columns.count + 1;
+
         // No point in create column regions, if there's just one!
         if self.config.columns.count == 1 {
+            let mut followup = Followup::default();
+            let regions = self.predict(regions, first, &mut followup);
             return self.column(locator, regions).map(|(frame, ..)| frame);
         }
 
-        // Create a backlog for multi-column layout.
-        let column_height = regions.size.y;
-        let backlog: Vec<_> = std::iter::once(&column_height)
-            .chain(regions.backlog)
-            .flat_map(|&h| std::iter::repeat_n(h, self.config.columns.count))
-            .skip(1)
-            .collect();
+        // Create the followup subregions for multi-column layout.
+        let count = self.config.columns.count;
+        let column_height = regions.height();
+        let columns = |heights: &[Abs]| {
+            heights.iter().flat_map(|&h| std::iter::repeat_n(h, count)).collect()
+        };
+        let Followup { backlog, predicted, last } = regions.followup();
+        let mut followup = Followup {
+            backlog: std::iter::repeat_n(column_height, count - 1)
+                .chain(columns(&backlog))
+                .collect(),
+            predicted: columns(&predicted),
+            last,
+        };
+        self.predictions.apply(&mut followup, first);
 
         // Subregions for column layout.
-        let mut inner = Regions {
-            size: Size::new(self.config.columns.width, column_height),
-            backlog: &backlog,
-            expand: Axes::new(true, regions.expand.y),
-            ..regions
-        };
+        let mut inner = regions
+            .with_width(self.config.columns.width)
+            .with_followup(&followup)
+            .with_expand(Axes::new(true, regions.expand.y));
 
         // The size of the merged frame hosting multiple columns.
         let size = Size::new(
-            regions.size.x,
-            if regions.expand.y { regions.size.y } else { Abs::zero() },
+            regions.width(),
+            if regions.expand.y { regions.height() } else { Abs::zero() },
         );
 
         let mut output = Frame::hard(size);
@@ -279,7 +326,7 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
                 let x = if self.config.columns.dir == Dir::LTR {
                     mid
                 } else {
-                    regions.size.x - mid
+                    regions.width() - mid
                 };
                 let height = column_separator_height.max(last_separator_height);
                 let frame = layout_column_separator(
@@ -303,7 +350,7 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
             let x = if self.config.columns.dir == Dir::LTR {
                 offset
             } else {
-                regions.size.x - offset - width
+                regions.width() - offset - width
             };
             offset += width;
 
@@ -359,7 +406,7 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
             // Shrink the available space by the space used by column
             // insertions.
             let mut pod = regions;
-            pod.size.y -= self.column_insertions.height();
+            pod.consume(self.column_insertions.height());
 
             // For column balancing, only consider space taken by floats, not footnotes
             let float_height = self.column_insertions.float_height();
@@ -371,15 +418,12 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
 
             match self.column_contents(pod, balancing_target) {
                 Ok((frame, used_height)) => break (frame, used_height + float_height),
-                Err(RelayoutStop::Relayout(PlacementScope::Column)) => {
-                    *self.work = checkpoint.clone();
-                }
-                Err(RelayoutStop::Relayout(PlacementScope::Parent)) => {
-                    return Err(RelayoutStop::Relayout(ParentScope));
-                }
-                Err(RelayoutStop::Error(error)) => {
-                    return Err(RelayoutStop::Error(error));
-                }
+                Err(stop) => match stop.propagate()? {
+                    PlacementScope::Column => *self.work = checkpoint.clone(),
+                    PlacementScope::Parent => {
+                        return Err(RelayoutStop::Relayout(ParentScope));
+                    }
+                },
             }
         };
         drop(checkpoint);
@@ -438,8 +482,8 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
         }
 
         // Process pending floats.
-        for placed in std::mem::take(&mut self.work.floats) {
-            self.float(placed, &regions, false, Migration::FORBID)?;
+        for index in std::mem::take(&mut self.work.floats) {
+            self.float(index, &regions, false, Migration::FORBID)?;
         }
 
         distribute(self, regions, balancing_target)
@@ -464,12 +508,13 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
     /// particular flow event, and [`Migration::FORBID`] elsewhere.
     pub fn float<M: Copy>(
         &mut self,
-        placed: &'b PlacedChild<'a>,
+        index: usize,
         regions: &Regions,
         clearance: bool,
         migration: Migration<M>,
     ) -> Result<(), FloatStop<M>> {
         // If the float is already processed, skip it.
+        let placed = self.placed(index);
         let loc = placed.location();
         if self.skipped(loc) {
             return Ok(());
@@ -478,7 +523,7 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
         // If there is already a queued float, queue this one as well. We
         // don't want to disrupt the order.
         if !self.work.floats.is_empty() {
-            self.work.floats.push(placed);
+            self.work.floats.push(index);
             return Ok(());
         }
 
@@ -489,29 +534,34 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
         };
 
         // Lay out the placed element.
-        let frame = placed.layout(self.engine, base)?;
-
-        // Determine the remaining space in the scope. This is exact for column
-        // placement, but only an approximation for page placement.
-        let remaining = match placed.scope {
-            PlacementScope::Column => regions.size.y,
-            PlacementScope::Parent => {
-                let remaining: Abs = regions
-                    .iter()
-                    .map(|size| size.y)
-                    .take(self.config.columns.count - self.column)
-                    .sum();
-                remaining / self.config.columns.count as f64
-            }
-        };
+        let frame = placed.layout(self.engine, self.cx, base)?;
 
         // We only require clearance if there is other content.
         let clearance = if clearance { placed.clearance } else { Abs::zero() };
         let need = frame.height() + clearance;
 
+        // Determine the remaining space in the scope. This is exact for column
+        // placement, but only an approximation for page placement.
+        let columns = self.config.columns.count;
+        let column = self.column;
+        let remaining = || match placed.scope {
+            PlacementScope::Column => regions.height(),
+            PlacementScope::Parent => {
+                let remaining: Abs =
+                    regions.iter().map(|size| size.y).take(columns - column).sum();
+                remaining / columns as f64
+            }
+        };
+
+        // Determine whether the float fits into the remaining space.
+        let fits = match placed.scope {
+            PlacementScope::Column => regions.fits(need),
+            PlacementScope::Parent => remaining().fits(need),
+        };
+
         // If the float doesn't fit, queue it for the next region.
-        if !remaining.fits(need) && regions.may_progress() {
-            self.work.floats.push(placed);
+        if !fits && regions.may_progress() {
+            self.work.floats.push(index);
             return Ok(());
         }
 
@@ -524,7 +574,7 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
             // When the float's vertical midpoint would be above the middle of
             // the page if it were layouted in-flow, we use top alignment.
             // Otherwise, we use bottom alignment.
-            let used = base.y - remaining;
+            let used = base.y - remaining();
             let half = need / 2.0;
             let ratio = (used + half) / base.y;
             if ratio <= 0.5 { FixedAlignment::Start } else { FixedAlignment::End }
@@ -569,8 +619,8 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
 
         // Search for footnotes.
         let mut notes = vec![];
-        for tag in &self.work.tags {
-            let Tag::Start(elem, _) = tag else { continue };
+        for &i in &self.work.tags {
+            let Child::Tag(Tag::Start(elem, _)) = &self.cx.children[i] else { continue };
             let Some(note) = elem.to_packed::<FootnoteElem>() else { continue };
             notes.push((Abs::zero(), note.clone()));
         }
@@ -659,7 +709,7 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
         // Prepare regions for the footnote.
         let mut pod = *regions;
         pod.expand.y = false;
-        pod.size.y -= flow_need + separator_need + self.config.footnote.gap;
+        pod.consume(flow_need + separator_need + self.config.footnote.gap);
 
         // Layout the footnote entry.
         let frames = layout_footnote(self.engine, self.config, &elem, pod)?.into_frames();
@@ -717,13 +767,13 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
         // Save the separator.
         if let Some(frame) = separator {
             area.push_footnote_separator(self.config, frame);
-            regions.size.y -= separator_need;
+            regions.consume(separator_need);
         }
 
         // Save the footnote's frame.
         area.push_footnote(self.config, first);
         area.skips.push(loc);
-        regions.size.y -= note_need;
+        regions.consume(note_need);
 
         // Save the spill.
         if !iter.as_slice().is_empty() {
@@ -785,9 +835,45 @@ impl<'a, 'b> Composer<'a, 'b, '_, '_> {
             || self.column_insertions.skips.contains(&loc)
     }
 
+    /// The placed child with the given index.
+    fn placed(&self, index: usize) -> &'b PlacedChild {
+        match &self.cx.children[index] {
+            Child::Placed(placed) => placed,
+            _ => unreachable!("child is not a placed element"),
+        }
+    }
+
     /// The amount of width needed by insertions.
     pub fn insertion_width(&self) -> Abs {
         self.column_insertions.width.max(self.page_insertions.width)
+    }
+
+    /// The index of the current subregion within the flow. Subregions are
+    /// numbered consecutively across columns and regions.
+    pub fn subregion(&self) -> usize {
+        self.region * self.config.columns.count + self.column
+    }
+
+    /// How many more restarts may be requested because the space in the
+    /// given subregion was mispredicted.
+    pub fn restarts(&self, subregion: usize) -> usize {
+        self.predictions.restarts(subregion)
+    }
+
+    /// Applies the learned predictions to the followup regions of `regions`,
+    /// the first of which is subregion `first`.
+    fn predict<'r>(
+        &self,
+        regions: Regions<'r>,
+        first: usize,
+        buf: &'r mut Followup,
+    ) -> Regions<'r> {
+        if !self.predictions.affects(first) {
+            return regions;
+        }
+        *buf = regions.followup();
+        self.predictions.apply(buf, first);
+        regions.with_followup(buf)
     }
 }
 
@@ -814,7 +900,8 @@ fn layout_footnote(
     pod: Regions,
 ) -> SourceResult<Fragment> {
     let loc = elem.location().unwrap();
-    crate::layout_fragment(
+    // The regions depend on the position of the footnote's reference.
+    crate::flow::layout_fragment_tracked(
         engine,
         &FootnoteEntry::new(elem.clone())
             .pack()
@@ -852,9 +939,9 @@ fn layout_column_separator(
 
 /// An additive list of insertions.
 #[derive(Default)]
-struct Insertions<'a, 'b> {
-    top_floats: Vec<(&'b PlacedChild<'a>, Frame)>,
-    bottom_floats: Vec<(&'b PlacedChild<'a>, Frame)>,
+struct Insertions<'b> {
+    top_floats: Vec<(&'b PlacedChild, Frame)>,
+    bottom_floats: Vec<(&'b PlacedChild, Frame)>,
     footnotes: Vec<Frame>,
     footnote_separator: Option<Frame>,
     top_size: Abs,
@@ -864,11 +951,11 @@ struct Insertions<'a, 'b> {
     skips: Vec<Location>,
 }
 
-impl<'a, 'b> Insertions<'a, 'b> {
+impl<'b> Insertions<'b> {
     /// Add a float to the top or bottom area.
     fn push_float(
         &mut self,
-        placed: &'b PlacedChild<'a>,
+        placed: &'b PlacedChild,
         frame: Frame,
         align_y: FixedAlignment,
     ) {
