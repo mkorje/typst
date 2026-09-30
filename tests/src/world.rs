@@ -15,7 +15,7 @@ use typst::foundations::{
     scope,
 };
 use typst::introspection::Locator;
-use typst::layout::{Abs, BlockElem, Fragment, Margin, PageElem, Regions};
+use typst::layout::{Abs, BlockElem, Margin, MultiState, MultiStep, PageElem, Regions};
 use typst::model::{Numbering, NumberingPattern};
 use typst::syntax::{FileId, Source, Span};
 use typst::text::{Font, FontBook, TextElem, TextSize};
@@ -24,7 +24,7 @@ use typst::visualize::Color;
 use typst::{Feature, Features, Library, LibraryExt, World};
 use typst_kit::datetime::Time;
 use typst_kit::files::{FileLoader, FileStore};
-use typst_layout::layout_fragment;
+use typst_layout::layout_fragment_step;
 use typst_syntax::package::PackageSpec;
 use typst_syntax::{RootedPath, VirtualPath, VirtualRoot};
 use unscanny::Scanner;
@@ -339,11 +339,10 @@ fn layout_bounds(
     locator: Locator,
     styles: StyleChain,
     regions: Regions,
-) -> SourceResult<Fragment> {
-    let mut fragment = layout_fragment(engine, &elem.body, locator, styles, regions)?;
-    for frame in &mut fragment {
-        frame.mark_box_in_place();
-    }
-
-    Ok(fragment)
+    state: Option<&MultiState>,
+) -> SourceResult<MultiStep> {
+    let mut step =
+        layout_fragment_step(engine, &elem.body, locator, styles, regions, state)?;
+    step.frame.mark_box_in_place();
+    Ok(step)
 }

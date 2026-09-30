@@ -147,6 +147,24 @@ impl Frame {
     pub fn items(&self) -> std::slice::Iter<'_, (Point, FrameItem)> {
         self.items.iter()
     }
+
+    /// Whether two frames have identical contents.
+    ///
+    /// Unlike comparing hashes, this does not need to hash freshly produced
+    /// frames in full and stops at the first difference. Tags are compared by
+    /// location instead of by their element.
+    pub fn identical(&self, other: &Self) -> bool {
+        self.size == other.size
+            && self.baseline == other.baseline
+            && self.kind == other.kind
+            && (Arc::ptr_eq(&self.items, &other.items)
+                || (self.items.len() == other.items.len()
+                    && self
+                        .items
+                        .iter()
+                        .zip(other.items.iter())
+                        .all(|((p1, i1), (p2, i2))| p1 == p2 && i1.identical(i2))))
+    }
 }
 
 /// Insert items and subframes.
@@ -498,6 +516,32 @@ pub enum FrameItem {
     Tag(Tag),
 }
 
+impl FrameItem {
+    /// Whether two items are identical. See [`Frame::identical`].
+    fn identical(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Group(a), Self::Group(b)) => {
+                a.transform == b.transform
+                    && a.clip == b.clip
+                    && a.label == b.label
+                    && a.parent == b.parent
+                    && a.frame.identical(&b.frame)
+            }
+            (Self::Text(a), Self::Text(b)) => a == b,
+            (Self::Shape(a, s1), Self::Shape(b, s2)) => a == b && s1 == s2,
+            (Self::Image(a, z1, s1), Self::Image(b, z2, s2)) => {
+                a == b && z1 == z2 && s1 == s2
+            }
+            (Self::Link(a, z1), Self::Link(b, z2)) => a == b && z1 == z2,
+            (Self::Tag(Tag::Start(a, f1)), Self::Tag(Tag::Start(b, f2))) => {
+                a.location() == b.location() && f1 == f2
+            }
+            (Self::Tag(a @ Tag::End(..)), Self::Tag(b @ Tag::End(..))) => a == b,
+            _ => false,
+        }
+    }
+}
+
 impl Debug for FrameItem {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
@@ -593,4 +637,36 @@ impl FrameParent {
 pub enum Inherit {
     Yes,
     No,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::visualize::Color;
+
+    fn frame(height: f64, fill: Color) -> Frame {
+        let mut inner = Frame::soft(Size::new(Abs::pt(10.0), Abs::pt(height)));
+        inner.push(
+            Point::with_y(Abs::pt(height / 2.0)),
+            FrameItem::Shape(
+                Geometry::Rect(Size::new(Abs::pt(5.0), Abs::pt(height / 2.0)))
+                    .filled(fill),
+                Span::detached(),
+            ),
+        );
+        let mut outer = Frame::hard(inner.size());
+        outer.push_frame(Point::zero(), inner);
+        outer
+    }
+
+    #[test]
+    fn test_frame_identical() {
+        let a = frame(163.278, Color::BLACK);
+        assert!(a.identical(&a.clone()));
+        assert!(a.identical(&frame(163.278, Color::BLACK)));
+
+        // Other geometry or contents.
+        assert!(!a.identical(&frame(163.27799999999996, Color::BLACK)));
+        assert!(!a.identical(&frame(163.278, Color::WHITE)));
+    }
 }

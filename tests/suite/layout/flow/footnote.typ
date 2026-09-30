@@ -390,6 +390,13 @@ C
 
 #footnote[]
 
+--- footnote-entry-outside-show-everything paged ---
+// Footnote entries are laid out with the styles of the page, which don't
+// include those of a show rule for the whole document.
+#set page(height: 80pt)
+#show: align.with(center)
+Hello#footnote[World]
+
 --- footnote-custom-head-html html ---
 #html.html({
   html.head()

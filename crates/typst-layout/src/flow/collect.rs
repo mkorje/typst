@@ -1,20 +1,20 @@
-use std::cell::{LazyCell, RefCell};
-use std::fmt::{self, Debug, Formatter};
-use std::hash::Hash;
+use std::cell::LazyCell;
+use std::fmt::Debug;
+use std::sync::Arc;
 
-use bumpalo::Bump;
-use bumpalo::boxed::Box as BumpBox;
 use comemo::{Track, Tracked, TrackedMut};
+use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 use typst_library::diag::{SourceResult, bail, warning};
 use typst_library::engine::{Engine, Route, Sink, Traced};
-use typst_library::foundations::{Packed, Resolve, Smart, StyleChain};
+use typst_library::foundations::{Packed, Resolve, Smart, Style, StyleChain, Styles};
 use typst_library::introspection::{
     Introspector, Location, Locator, LocatorLink, SplitLocator, Tag, TagElem,
 };
 use typst_library::layout::{
     Abs, AlignElem, Alignment, Axes, BlockElem, ColbreakElem, FixedAlignment, FlushElem,
-    Fr, Fragment, Frame, FrameParent, Inherit, PagebreakElem, PlaceElem, PlacementScope,
-    Ratio, Region, Regions, Rel, Size, Sizing, Spacing, VElem,
+    Fr, Frame, FrameParent, Inherit, PagebreakElem, PlaceElem, PlacementScope, Ratio,
+    Region, Regions, Rel, Size, Sizing, Spacing, VElem,
 };
 use typst_library::model::ParElem;
 use typst_library::routines::Pair;
@@ -22,59 +22,99 @@ use typst_library::text::TextElem;
 use typst_library::{Library, World};
 use typst_utils::{LazyHash, Protected, SliceExt};
 
-use super::{FlowMode, layout_multi_block, layout_single_block};
+use super::{
+    BlockState, BlockStep, FlowCx, FlowMode, Restart, layout_multi_block,
+    layout_single_block,
+};
 use crate::inline::ParSituation;
-use crate::modifiers::layout_and_modify;
+use crate::modifiers::{layout_and_modify, layout_with_modifiers};
 
 /// Collects all elements of the flow into prepared children. These are much
 /// simpler to handle than the raw elements.
+///
+/// The children don't borrow from the realized content: Their styles are
+/// stored relative to the `base` style chain (see [`base_styles`]) and their
+/// locators by their local hash. This allows them to outlive the realization
+/// of the flow's content.
 #[typst_macros::time]
 pub fn collect<'a>(
     engine: &mut Engine,
-    bump: &'a Bump,
     children: &[Pair<'a>],
     locator: Locator<'a>,
-    base: Size,
+    base: StyleChain<'a>,
+    size: Size,
     expand: bool,
     mode: FlowMode,
-) -> SourceResult<Vec<Child<'a>>> {
+) -> SourceResult<Vec<Child>> {
     Collector {
         engine,
-        bump,
-        locator: locator.split(),
-        base,
+        base: size,
         expand,
+        locator: locator.split(),
+        outer: base.links().collect(),
+        inner: FxHashMap::default(),
         output: Vec::with_capacity(children.len()),
         par_situation: ParSituation::First,
     }
     .run(children, mode)
 }
 
+/// The style chain that [`collect`] should store the styles of a flow's
+/// children relative to, given the styles the flow was realized with.
+///
+/// If all children's styles extend the flow's `styles` (which holds for
+/// content realized with them), it is `styles` itself. Otherwise, it is the
+/// shared trunk of the children's styles, which lives as long as the realized
+/// content.
+pub fn base_styles<'a>(children: &[Pair<'a>], styles: StyleChain<'a>) -> StyleChain<'a> {
+    let outer: Vec<_> = styles.links().collect();
+    if children
+        .iter()
+        .filter(|(c, _)| !c.is::<TagElem>())
+        .all(|&(_, chain)| inner_len(chain, &outer).is_some())
+    {
+        styles
+    } else {
+        StyleChain::trunk_from_pairs(children).unwrap_or(styles)
+    }
+}
+
+/// The number of links that `chain` adds to the `outer` links, if they are a
+/// suffix of its links (by identity).
+fn inner_len(chain: StyleChain, outer: &[&[LazyHash<Style>]]) -> Option<usize> {
+    let inner = chain.links().count().checked_sub(outer.len())?;
+    chain
+        .links()
+        .skip(inner)
+        .zip(outer)
+        .all(|(a, b)| std::ptr::eq(a.as_ptr(), b.as_ptr()) && a.len() == b.len())
+        .then_some(inner)
+}
+
 /// State for collection.
 struct Collector<'a, 'x, 'y> {
     engine: &'x mut Engine<'y>,
-    bump: &'a Bump,
     base: Size,
     expand: bool,
     locator: SplitLocator<'a>,
-    output: Vec<Child<'a>>,
+    /// The links of the flow's style chain, from innermost to outermost.
+    outer: Vec<&'a [LazyHash<Style>]>,
+    /// Deduplicates the inner styles of children, keyed by their links.
+    inner: FxHashMap<Vec<(usize, usize)>, InnerStyles>,
+    output: Vec<Child>,
     par_situation: ParSituation,
 }
 
 impl<'a> Collector<'a, '_, '_> {
     /// Perform the collection.
-    fn run(
-        mut self,
-        children: &[Pair<'a>],
-        mode: FlowMode,
-    ) -> SourceResult<Vec<Child<'a>>> {
+    fn run(mut self, children: &[Pair<'a>], mode: FlowMode) -> SourceResult<Vec<Child>> {
         // Extract leading and trailing tags.
         let (start, end) = children.split_prefix_suffix(|(c, _)| c.is::<TagElem>());
         let inner = &children[start..end];
 
         for (c, _) in &children[..start] {
             let elem = c.to_packed::<TagElem>().unwrap();
-            self.output.push(Child::Tag(&elem.tag));
+            self.output.push(Child::Tag(elem.tag.clone()));
         }
 
         match mode {
@@ -84,7 +124,7 @@ impl<'a> Collector<'a, '_, '_> {
 
         for (c, _) in &children[end..] {
             let elem = c.to_packed::<TagElem>().unwrap();
-            self.output.push(Child::Tag(&elem.tag));
+            self.output.push(Child::Tag(elem.tag.clone()));
         }
 
         Ok(self.output)
@@ -94,7 +134,7 @@ impl<'a> Collector<'a, '_, '_> {
     fn run_block(&mut self, children: &[Pair<'a>]) -> SourceResult<()> {
         for &(child, styles) in children {
             if let Some(elem) = child.to_packed::<TagElem>() {
-                self.output.push(Child::Tag(&elem.tag));
+                self.output.push(Child::Tag(elem.tag.clone()));
             } else if let Some(elem) = child.to_packed::<VElem>() {
                 self.v(elem, styles);
             } else if let Some(elem) = child.to_packed::<ParElem>() {
@@ -228,8 +268,7 @@ impl<'a> Collector<'a, '_, '_> {
                 frame.height()
             };
 
-            self.output
-                .push(Child::Line(self.boxed(LineChild { frame, align, need })));
+            self.output.push(Child::Line(LineChild { frame, align, need }));
         }
     }
 
@@ -241,7 +280,7 @@ impl<'a> Collector<'a, '_, '_> {
         styles: StyleChain<'a>,
         alone: bool,
     ) {
-        let locator = self.locator.next(&elem.span());
+        let locator = self.locator.next(&elem.span()).local();
         let align = styles.resolve(AlignElem::alignment);
         let sticky = elem.sticky.get(styles);
         let breakable = elem.breakable.get(styles);
@@ -257,32 +296,34 @@ impl<'a> Collector<'a, '_, '_> {
             Smart::Custom(Spacing::Fr(fr)) => Child::Fr(fr, 2),
         };
 
-        self.output.push(spacing(elem.above.get(styles)));
+        let above = spacing(elem.above.get(styles));
+        let below = spacing(elem.below.get(styles));
+        self.output.push(above);
 
+        let elem = elem.clone();
+        let inner = self.relative(styles);
         if !breakable || fr.is_some() {
-            self.output.push(Child::Single(self.boxed(SingleChild {
+            self.output.push(Child::Single(Box::new(SingleChild {
                 align,
                 sticky,
                 alone,
                 fr,
                 elem,
-                styles,
+                styles: inner,
                 locator,
-                cell: CachedCell::new(),
             })));
         } else {
-            self.output.push(Child::Multi(self.boxed(MultiChild {
+            self.output.push(Child::Multi(Box::new(MultiChild {
                 align,
                 sticky,
                 alone,
                 elem,
-                styles,
+                styles: inner,
                 locator,
-                cell: CachedCell::new(),
             })));
         }
 
-        self.output.push(spacing(elem.below.get(styles)));
+        self.output.push(below);
         self.par_situation = ParSituation::Other;
     }
 
@@ -321,52 +362,112 @@ impl<'a> Collector<'a, '_, '_> {
             );
         }
 
-        let locator = self.locator.next(&elem.span());
+        let locator = self.locator.next(&elem.span()).local();
         let clearance = elem.clearance.resolve(styles);
         let delta = Axes::new(elem.dx.get(styles), elem.dy.get(styles)).resolve(styles);
-        self.output.push(Child::Placed(self.boxed(PlacedChild {
+        let inner = self.relative(styles);
+        self.output.push(Child::Placed(Box::new(PlacedChild {
             align_x,
             align_y,
             scope,
             float,
             clearance,
             delta,
-            elem,
-            styles,
+            elem: elem.clone(),
+            styles: inner,
             locator,
             alignment,
-            cell: CachedCell::new(),
         })));
 
         Ok(())
     }
 
-    /// Wraps a value in a bump-allocated box to reduce its footprint in the
-    /// [`Child`] enum.
-    fn boxed<T>(&self, value: T) -> BumpBox<'a, T> {
-        BumpBox::new_in(value, self.bump)
+    /// Determines the styles of a child relative to the flow's styles.
+    fn relative(&mut self, styles: StyleChain<'a>) -> InnerStyles {
+        // Styles that don't extend the flow's styles are stored in full. This
+        // doesn't occur for content realized with the flow's styles.
+        let Some(len) = inner_len(styles, &self.outer) else {
+            return InnerStyles::new(styles, usize::MAX, true);
+        };
+        if len == 0 {
+            return InnerStyles::default();
+        }
+
+        let key: SmallVec<[_; 8]> = styles
+            .links()
+            .take(len)
+            .map(|l| (l.as_ptr() as usize, l.len()))
+            .collect();
+        if let Some(inner) = self.inner.get(key.as_slice()) {
+            return inner.clone();
+        }
+
+        let inner = InnerStyles::new(styles, len, false);
+        self.inner.insert(key.into_vec(), inner.clone());
+        inner
+    }
+}
+
+/// The styles of a child, stored relative to the styles of its flow.
+///
+/// Holds the style links that were added within the flow's content, from
+/// outermost to innermost. When the child is laid out, they are grafted onto
+/// the flow's styles. This way, a child doesn't borrow from the styles its flow
+/// was realized with and cloning is limited to the (typically few) links added
+/// within the flow.
+#[derive(Debug, Clone, Default)]
+pub struct InnerStyles {
+    links: Arc<[Styles]>,
+    /// Whether the links are the complete chain rather than relative to the
+    /// flow's styles, because the child's styles don't extend them.
+    absolute: bool,
+}
+
+impl InnerStyles {
+    /// Stores the first `len` links of `styles`.
+    fn new(styles: StyleChain, len: usize, absolute: bool) -> Self {
+        let mut links: Vec<_> = styles.links().take(len).map(Styles::from).collect();
+        links.reverse();
+        Self { links: links.into(), absolute }
+    }
+
+    /// Runs `f` with the full styles, given the styles of the flow.
+    pub fn with<R>(&self, outer: StyleChain, f: impl FnOnce(StyleChain) -> R) -> R {
+        fn graft<R>(
+            chain: StyleChain,
+            links: &[Styles],
+            f: impl FnOnce(StyleChain) -> R,
+        ) -> R {
+            match links.split_first() {
+                None => f(chain),
+                Some((link, rest)) => graft(chain.chain(link), rest, f),
+            }
+        }
+
+        let base = if self.absolute { StyleChain::default() } else { outer };
+        graft(base, &self.links, f)
     }
 }
 
 /// A prepared child in flow layout.
 ///
-/// The larger variants are bump-boxed to keep the enum size down.
+/// The larger variants are boxed to keep the enum size down.
 #[derive(Debug)]
-pub enum Child<'a> {
+pub enum Child {
     /// An introspection tag.
-    Tag(&'a Tag),
+    Tag(Tag),
     /// Relative spacing with a specific weakness level.
     Rel(Rel<Abs>, u8),
     /// Fractional spacing with a specific weakness level.
     Fr(Fr, u8),
     /// An already layouted line of a paragraph.
-    Line(BumpBox<'a, LineChild>),
+    Line(LineChild),
     /// An unbreakable block.
-    Single(BumpBox<'a, SingleChild<'a>>),
+    Single(Box<SingleChild>),
     /// A breakable block.
-    Multi(BumpBox<'a, MultiChild<'a>>),
+    Multi(Box<MultiChild>),
     /// An absolutely or floatingly placed element.
-    Placed(BumpBox<'a, PlacedChild<'a>>),
+    Placed(Box<PlacedChild>),
     /// A place flush.
     Flush,
     /// An explicit column break.
@@ -383,23 +484,28 @@ pub struct LineChild {
 
 /// A child that encapsulates a prepared unbreakable block.
 #[derive(Debug)]
-pub struct SingleChild<'a> {
+pub struct SingleChild {
     pub align: Axes<FixedAlignment>,
     pub sticky: bool,
     pub alone: bool,
     pub fr: Option<Fr>,
-    elem: &'a Packed<BlockElem>,
-    styles: StyleChain<'a>,
-    locator: Locator<'a>,
-    cell: CachedCell<SourceResult<Frame>>,
+    elem: Packed<BlockElem>,
+    styles: InnerStyles,
+    locator: u128,
 }
 
-impl SingleChild<'_> {
+impl SingleChild {
     /// Build the child's frame given the region's base size.
-    pub fn layout(&self, engine: &mut Engine, region: Region) -> SourceResult<Frame> {
-        self.cell.get_or_init(region, |mut region| {
-            // Vertical expansion is only kept if this block is the only child.
-            region.expand.y &= self.alone;
+    pub fn layout(
+        &self,
+        engine: &mut Engine,
+        cx: &FlowCx,
+        region: Region,
+    ) -> SourceResult<Frame> {
+        let mut region = region;
+        // Vertical expansion is only kept if this block is the only child.
+        region.expand.y &= self.alone;
+        self.styles.with(cx.styles, |styles| {
             layout_single_impl(
                 engine.world,
                 engine.library,
@@ -407,9 +513,9 @@ impl SingleChild<'_> {
                 engine.traced,
                 TrackedMut::reborrow_mut(&mut engine.sink),
                 engine.route.track(),
-                self.elem,
-                self.locator.track(),
-                self.styles,
+                &self.elem,
+                cx.locator.with_local(self.locator).track(),
+                styles,
                 region,
             )
         })
@@ -450,76 +556,98 @@ fn layout_single_impl(
 
 /// A child that encapsulates a prepared breakable block.
 #[derive(Debug)]
-pub struct MultiChild<'a> {
+pub struct MultiChild {
     pub align: Axes<FixedAlignment>,
     pub sticky: bool,
     alone: bool,
-    elem: &'a Packed<BlockElem>,
-    styles: StyleChain<'a>,
-    locator: Locator<'a>,
-    cell: CachedCell<SourceResult<Fragment>>,
+    elem: Packed<BlockElem>,
+    styles: InnerStyles,
+    locator: u128,
 }
 
-impl<'a> MultiChild<'a> {
-    /// Build the child's frames given regions.
-    pub fn layout<'b>(
-        &'b self,
-        engine: &mut Engine,
-        regions: Regions,
-    ) -> SourceResult<(Frame, Option<MultiSpill<'a, 'b>>)> {
-        let fragment = self.layout_full(engine, regions)?;
-        let exist_non_empty_frame = fragment.iter().any(|f| !f.is_empty());
-
-        // Extract the first frame.
-        let mut frames = fragment.into_iter();
-        let frame = frames.next().unwrap();
-
-        // If there's more, return a `spill`.
-        let mut spill = None;
-        if frames.next().is_some() {
-            spill = Some(MultiSpill {
-                exist_non_empty_frame,
-                multi: self,
-                full: regions.full,
-                first: regions.size.y,
-                backlog: vec![],
-                min_backlog_len: regions.backlog.len(),
-            });
-        }
-
-        Ok((frame, spill))
-    }
-
-    /// The shared internal implementation of [`Self::layout`] and
-    /// [`MultiSpill::layout`].
-    fn layout_full(
+impl MultiChild {
+    /// Build the child's first frame given regions. Also returns the spill
+    /// if the child continues, and whether the frame is an orphan (see
+    /// [`BlockStep::orphan`]).
+    ///
+    /// The `index` is the child's index in the flow and the `subregion` is the
+    /// index of the flow subregion into which the first frame will be placed.
+    pub fn layout(
         &self,
         engine: &mut Engine,
+        cx: &FlowCx,
         regions: Regions,
-    ) -> SourceResult<Fragment> {
-        self.cell.get_or_init(regions, |mut regions| {
-            // Vertical expansion is only kept if this block is the only child.
-            regions.expand.y &= self.alone;
-            layout_multi_impl(
+        index: usize,
+        subregion: usize,
+    ) -> SourceResult<(Frame, Option<MultiSpill>, bool)> {
+        let (step, sink) = engine.isolate(|engine| self.step(engine, cx, regions, None));
+        let step = step?;
+        let spill = match step.next {
+            Some(state) => Some(MultiSpill {
+                index,
+                state,
+                steps: vec![Emitted {
+                    state: None,
+                    regions: RegionsDesc::new(regions),
+                    frame: step.frame.clone(),
+                    ahead: step.ahead,
+                }],
+                pending: sink,
+                origin: subregion,
+                count: 1,
+                aligned: true,
+            }),
+            None => {
+                engine.commit(sink);
+                None
+            }
+        };
+        Ok((step.frame, spill, step.orphan))
+    }
+
+    /// The regions the block is laid out into, given the regions offered by
+    /// the flow.
+    fn pod<'r>(&self, mut regions: Regions<'r>) -> Regions<'r> {
+        // Vertical expansion is only kept if this block is the only child.
+        regions.expand.y &= self.alone;
+        regions
+    }
+
+    /// Lays out one region of the block, continuing from `state`. See
+    /// [`layout_multi_block`].
+    fn step(
+        &self,
+        engine: &mut Engine,
+        cx: &FlowCx,
+        regions: Regions,
+        state: Option<&BlockState>,
+    ) -> SourceResult<BlockStep> {
+        let regions = self.pod(regions);
+        self.styles.with(cx.styles, |styles| {
+            layout_multi_step_impl(
                 engine.world,
                 engine.library,
                 engine.introspector.into_raw(),
                 engine.traced,
                 TrackedMut::reborrow_mut(&mut engine.sink),
                 engine.route.track(),
-                self.elem,
-                self.locator.track(),
-                self.styles,
+                &self.elem,
+                cx.locator.with_local(self.locator).track(),
+                styles,
                 regions,
+                state,
             )
         })
     }
 }
 
-/// The cached, internal implementation of [`MultiChild::layout_full`].
+/// The cached implementation of [`MultiChild::step`].
+///
+/// Continuations are cached by the identity of their state (see
+/// [`MultiState`](typst_library::layout::MultiState)).
 #[comemo::memoize]
 #[expect(clippy::too_many_arguments)]
-fn layout_multi_impl(
+fn layout_multi_step_impl(
     world: Tracked<dyn World + '_>,
     library: &LazyHash<Library>,
     introspector: Tracked<dyn Introspector + '_>,
@@ -530,7 +658,8 @@ fn layout_multi_impl(
     locator: Tracked<Locator>,
     styles: StyleChain,
     regions: Regions,
-) -> SourceResult<Fragment> {
+    state: Option<&BlockState>,
+) -> SourceResult<BlockStep> {
     let introspector = Protected::from_raw(introspector);
     let link = LocatorLink::new(locator);
     let locator = Locator::link(&link);
@@ -543,131 +672,422 @@ fn layout_multi_impl(
         route: Route::extend(route),
     };
 
-    layout_and_modify(styles, |styles| {
-        layout_multi_block(elem, &mut engine, locator, styles, regions)
+    layout_with_modifiers(styles, |styles, modifiers| {
+        layout_multi_block(elem, &mut engine, locator, styles, modifiers, regions, state)
     })
 }
 
 /// The spilled remains of a `MultiChild` that broke across two regions.
-#[derive(Debug, Clone)]
-pub struct MultiSpill<'a, 'b> {
-    pub(super) exist_non_empty_frame: bool,
-    multi: &'b MultiChild<'a>,
-    first: Abs,
-    full: Abs,
-    backlog: Vec<Abs>,
-    min_backlog_len: usize,
+///
+/// The child is laid out one region at a time. The frame emitted for a region
+/// may depend on predictions of the upcoming regions, and so may content that
+/// the step already laid out into them ([`BlockStep::ahead`]). The steps whose
+/// predictions cover the region the next frame goes into are *unsettled*: the
+/// last one and those whose content ahead reaches the region. When that
+/// region is laid out with other regions than predicted, the last step is laid
+/// out again with the actual regions. If the content laid out ahead into the
+/// region then still doesn't fit, so are the unsettled steps. If the emitted
+/// frames stay the same, the child continues from the new state. Otherwise,
+/// gluing a changed frame together with the next one could lose or duplicate
+/// content, so the spill requests a [`Restart`] of flow layout at the region
+/// of the earliest of these frames, now knowing this region's space. If it
+/// can't, the child continues from the old state, which is consistent with
+/// the emitted frames. See DESIGN.md §53 for why this is sound.
+///
+/// The side effects of laying out the last emitted frame are held back until
+/// it is settled, since laying it out again may replace the state it
+/// continues from. Then, only the side effects of the layout whose state is
+/// kept are recorded, including those of any work it did ahead.
+#[derive(Clone)]
+pub struct MultiSpill {
+    /// The index of the breakable child in the flow.
+    pub(super) index: usize,
+    /// Where the block continues.
+    state: BlockState,
+    /// The unsettled steps, in order.
+    steps: Vec<Emitted>,
+    /// The side effects of laying out the last emitted frame, which are
+    /// recorded once it is settled.
+    pending: Sink,
+    /// The flow subregion into which the first frame was placed.
+    origin: usize,
+    /// The number of emitted frames.
+    count: usize,
+    /// Whether the emitted frames were placed into consecutive subregions,
+    /// starting at `origin`. Only then do the child's regions line up with the
+    /// flow's subregions, which is required for restarting.
+    aligned: bool,
 }
 
-impl MultiSpill<'_, '_> {
-    /// Build the spill's frames given regions.
+impl MultiSpill {
+    /// Lays out the spill's next frame given regions, returning the step and,
+    /// if there is more, the remaining spill. If the frames that were already
+    /// emitted are inconsistent with the actual size of this region, requests
+    /// a restart of flow layout instead.
+    ///
+    /// The `target` describes the flow subregion into which the frame will be
+    /// placed.
     pub fn layout(
         mut self,
+        multi: &MultiChild,
         engine: &mut Engine,
+        cx: &FlowCx,
         regions: Regions,
-    ) -> SourceResult<(Frame, Option<Self>)> {
-        // The first region becomes unchangeable and committed to our backlog.
-        self.backlog.push(regions.size.y);
+        target: SpillTarget,
+    ) -> SourceResult<Result<(BlockStep, Option<MultiSpill>), Restart>> {
+        // The next frame is always laid out with the actual regions.
+        let used = RegionsDesc::new(regions);
 
-        // The remaining regions are ephemeral and may be replaced.
-        let mut backlog: Vec<_> =
-            self.backlog.iter().chain(regions.backlog).copied().collect();
-
-        // Remove unnecessary backlog items to prevent it from growing
-        // unnecessarily, changing the region's hash.
-        while backlog.len() > self.min_backlog_len
-            && backlog.last().copied() == regions.last
-        {
-            backlog.pop();
+        // Settle the last step. Then, if the content it laid out ahead into
+        // this region still doesn't fit, settle the steps since the earliest
+        // one that laid out content into the region, too.
+        let last = self.steps.len() - 1;
+        if let Some(restart) = self.settle(multi, engine, cx, &used, target, last)? {
+            return Ok(Err(restart));
+        }
+        if self.steps[last].ahead.first().is_some_and(|&h| !used.size.y.fits(h)) {
+            let start = self.reaching(self.count);
+            if let Some(restart) = self.settle(multi, engine, cx, &used, target, start)? {
+                return Ok(Err(restart));
+            }
         }
 
-        // Build the pod with the merged regions.
-        let pod = Regions {
-            size: Size::new(regions.size.x, self.first),
-            expand: regions.expand,
-            full: self.full,
-            backlog: &backlog,
-            last: regions.last,
+        let (step, sink) = engine
+            .isolate(|engine| multi.step(engine, cx, used.regions(), Some(&self.state)));
+        let mut step = step?;
+        let Some(state) = step.next.take() else {
+            engine.commit(sink);
+            return Ok(Ok((step, None)));
         };
 
-        // Extract the not-yet-processed frames.
-        let mut frames = self
-            .multi
-            .layout_full(engine, pod)?
-            .into_iter()
-            .skip(self.backlog.len());
-
-        // Ensure that the backlog never shrinks, so that unwrapping below is at
-        // least fairly safe. Note that the whole region juggling here is
-        // fundamentally not ideal: It is a compatibility layer between the old
-        // (all regions provided upfront) & new (each region provided on-demand,
-        // like an iterator) layout model. This approach is not 100% correct, as
-        // in the old model later regions could have an effect on earlier
-        // frames, but it's the best we can do for now, until the multi
-        // layouters are refactored to the new model.
-        self.min_backlog_len = self.min_backlog_len.max(backlog.len());
-
-        // Save the first frame.
-        let frame = frames.next().unwrap();
-
-        // If there's more, return a `spill`.
-        let mut spill = None;
-        if frames.next().is_some() {
-            spill = Some(self);
-        }
-
-        Ok((frame, spill))
+        // Keep the unsettled steps for the next region: the new one and those
+        // whose content ahead reaches it.
+        self.steps.push(Emitted {
+            state: Some(std::mem::replace(&mut self.state, state)),
+            regions: used,
+            frame: step.frame.clone(),
+            ahead: step.ahead.clone(),
+        });
+        self.count += 1;
+        self.steps.drain(..self.reaching(self.count));
+        self.pending = sink;
+        Ok(Ok((step, Some(self))))
     }
 
-    /// The alignment of the breakable block.
-    pub fn align(&self) -> Axes<FixedAlignment> {
-        self.multi.align
+    /// Skips a subregion that is already full.
+    ///
+    /// To keep the child's regions lined up with the flow's subregions, the
+    /// child is laid out into the full subregion, too. If the child continues
+    /// and nothing of it was placed into the subregion, the frame is dropped.
+    /// It then holds at most the child's decoration, which is not missed
+    /// since the child continues with a decorated frame in the next
+    /// subregion. Otherwise, the child is deferred to the next subregion as
+    /// if the full one didn't exist. Returns the remaining spill or, like
+    /// [`layout`](Self::layout), a request to restart.
+    pub fn skip(
+        mut self,
+        multi: &MultiChild,
+        engine: &mut Engine,
+        cx: &FlowCx,
+        mut regions: Regions,
+        target: SpillTarget,
+    ) -> SourceResult<Result<Option<MultiSpill>, Restart>> {
+        if self.aligned {
+            regions.size.y.set_max(Abs::zero());
+            // The side effects of the layout only count if its result is kept.
+            let (trial, sink) = engine.isolate(|engine| {
+                self.clone().layout(multi, engine, cx, regions, target)
+            });
+            match trial? {
+                Ok((step, Some(spill)))
+                    if step.decoration_only && step.frame.height().approx_empty() =>
+                {
+                    engine.commit(sink);
+                    return Ok(Ok(Some(spill)));
+                }
+                Ok(_) => {}
+                Err(restart) => return Ok(Err(restart)),
+            }
+        }
+        self.skipped();
+        Ok(Ok(Some(self)))
+    }
+
+    /// Settles the steps from the one at position `start` in `steps` for the
+    /// region the next frame goes into, whose actual regions are described by
+    /// `used`: Lays them out again, each with the regions it was laid out with
+    /// up to that region, and the actual ones from there on, unless none of
+    /// them changes.
+    ///
+    /// The regions in between are the actual ones if the step was settled.
+    /// Otherwise, they are the predictions that it was laid out with, which
+    /// reproduce its frame, while the actual ones might not.
+    ///
+    /// If the emitted frames don't change, the spill continues from the new
+    /// state. Otherwise, returns a request to restart at the region of the
+    /// frame at `start` if the space in the `target` subregion was
+    /// mispredicted and a restart is left, and continues from the old state
+    /// otherwise.
+    ///
+    /// The side effects of laying the steps out again are only recorded if
+    /// the spill continues from the new state. Those of the steps before the
+    /// last one were recorded before, so some may be recorded twice, like
+    /// warnings, which are deduplicated.
+    fn settle(
+        &mut self,
+        multi: &MultiChild,
+        engine: &mut Engine,
+        cx: &FlowCx,
+        used: &RegionsDesc,
+        target: SpillTarget,
+        start: usize,
+    ) -> SourceResult<Option<Restart>> {
+        // The index of the next frame and of the frame of the first step.
+        let next = self.count;
+        let first = self.count - self.steps.len();
+
+        let actual: Vec<_> = (start..self.steps.len())
+            .map(|i| self.steps[i].regions.followed_by(next - (first + i), used))
+            .collect();
+        if actual.iter().zip(&self.steps[start..]).all(|(a, e)| *a == e.regions) {
+            // If the upcoming regions were predicted correctly, the steps
+            // would be laid out with the same regions again, which are cache
+            // hits.
+            engine.commit(std::mem::take(&mut self.pending));
+            return Ok(None);
+        }
+
+        let steps = &self.steps;
+        let (redone, sink) = engine.isolate(|engine| {
+            let mut state = steps[start].state.clone();
+            let mut redone = Vec::with_capacity(steps.len() - start);
+            for (emitted, regions) in steps[start..].iter().zip(actual) {
+                let step = multi.step(engine, cx, regions.regions(), state.as_ref())?;
+                let (Some(next_state), true) =
+                    (step.next, step.frame.identical(&emitted.frame))
+                else {
+                    return Ok(None);
+                };
+                redone.push(Emitted {
+                    state,
+                    regions,
+                    frame: emitted.frame.clone(),
+                    ahead: step.ahead,
+                });
+                state = Some(next_state);
+            }
+            SourceResult::Ok(Some((redone, state.unwrap())))
+        });
+
+        if let Some((redone, state)) = redone? {
+            engine.commit(sink);
+            self.pending = Sink::default();
+            self.steps.splice(start.., redone);
+            self.state = state;
+            return Ok(None);
+        }
+
+        // If the space in this subregion was mispredicted, restart with a
+        // better prediction. The subregion has more space than predicted if
+        // the prediction was learned from an earlier restart and insertions
+        // have moved since then. Raising the prediction requires that a
+        // restart is left to lower it again: If the layout alternates between
+        // two predictions, the last restart thus lowers it.
+        let available = target.available;
+        let needed = match self.steps[start].regions.prediction(next - (first + start)) {
+            Some(p) if !available.fits(p) => 1,
+            Some(p) if !p.fits(available) => 2,
+            _ => usize::MAX,
+        };
+        if self.aligned && target.restarts >= needed {
+            return Ok(Some(Restart {
+                from: self.origin + first + start,
+                at: target.subregion,
+                height: available,
+            }));
+        }
+
+        // Otherwise, continue from the old state, which is consistent with the
+        // emitted frames. Their decisions were based on the mispredicted
+        // regions, but continuing with any regions neither loses nor
+        // duplicates content. And with the actual regions, the next frame fits
+        // and its lookahead uses every prediction learned so far. Content laid
+        // out ahead into this region may overflow it.
+        engine.commit(std::mem::take(&mut self.pending));
+        Ok(None)
+    }
+
+    /// The position in `steps` of the earliest step whose content ahead
+    /// reaches the region of the frame with the given index, or of the last
+    /// step if none does.
+    fn reaching(&self, index: usize) -> usize {
+        let first = self.count - self.steps.len();
+        self.steps
+            .iter()
+            .enumerate()
+            .position(|(i, emitted)| first + i + emitted.ahead.len() >= index)
+            .unwrap_or(self.steps.len() - 1)
+    }
+
+    /// Notes that a subregion was skipped without placing a frame of the
+    /// spill into it. Then, the child's regions no longer line up with the
+    /// flow's subregions, so restarts are disabled for this spill.
+    pub fn skipped(&mut self) {
+        self.aligned = false;
+    }
+}
+
+/// Where the next frame of a [`MultiSpill`] is placed.
+#[derive(Copy, Clone)]
+pub struct SpillTarget {
+    /// The index of the flow subregion into which the frame will be placed.
+    pub subregion: usize,
+    /// How many more restarts may be requested because the space in the
+    /// subregion was mispredicted.
+    pub restarts: usize,
+    /// The height available in the subregion. Unlike the height of the
+    /// regions the spill is laid out into, this isn't limited by column
+    /// balancing, since it serves as a prediction for the subregion when
+    /// restarting.
+    pub available: Abs,
+}
+
+/// An emitted step of a [`MultiSpill`].
+#[derive(Clone)]
+struct Emitted {
+    /// The state the step was laid out from. `None` for the first frame.
+    state: Option<BlockState>,
+    /// The regions the step was laid out with.
+    regions: RegionsDesc,
+    /// The emitted frame.
+    frame: Frame,
+    /// How much height the step's state laid out into the upcoming regions.
+    ahead: Vec<Abs>,
+}
+
+/// An owned copy of [`Regions`].
+#[derive(Debug, Clone, PartialEq)]
+struct RegionsDesc {
+    size: Size,
+    expand: Axes<bool>,
+    full: Abs,
+    backlog: Vec<Abs>,
+    last: Option<Abs>,
+    predicted: usize,
+}
+
+impl RegionsDesc {
+    /// Describe the given regions.
+    fn new(regions: Regions) -> Self {
+        Self {
+            size: regions.size,
+            expand: regions.expand,
+            full: regions.full,
+            backlog: regions.backlog.to_vec(),
+            last: regions.last,
+            predicted: regions.predicted,
+        }
+    }
+
+    /// Recreate the regions.
+    fn regions(&self) -> Regions<'_> {
+        Regions {
+            size: self.size,
+            expand: self.expand,
+            full: self.full,
+            backlog: &self.backlog,
+            last: self.last,
+            predicted: self.predicted,
+        }
+    }
+
+    /// The same regions up to the one `at` breaks after the first one,
+    /// followed by the given regions instead of the ones from there on.
+    ///
+    /// The given regions take on the kind of the region they replace: If it
+    /// is a repetition of the final region, they are predicted repetitions,
+    /// too, since that affects whether moving on to them counts as progress.
+    fn followed_by(&self, at: usize, regions: &RegionsDesc) -> Self {
+        let kept = at - 1;
+        let finite = self.backlog.len() - self.predicted;
+        let mut backlog: Vec<Abs> = self
+            .backlog
+            .iter()
+            .chain(self.last.iter().cycle())
+            .take(kept)
+            .copied()
+            .collect();
+        backlog.push(regions.size.y);
+        backlog.extend(&regions.backlog);
+        let predicted = if self.last.is_some() && kept >= finite {
+            backlog.len() - finite
+        } else {
+            regions.predicted
+        };
+        let mut followed = Regions {
+            backlog: &backlog,
+            last: regions.last,
+            predicted,
+            ..self.regions()
+        };
+        followed.trim_predicted();
+        Self::new(followed)
+    }
+
+    /// The predicted remaining height of the region `at` breaks after the
+    /// first one.
+    fn prediction(&self, at: usize) -> Option<Abs> {
+        self.backlog.get(at - 1).copied().or(self.last)
     }
 }
 
 /// A child that encapsulates a prepared placed element.
 #[derive(Debug)]
-pub struct PlacedChild<'a> {
+pub struct PlacedChild {
     pub align_x: FixedAlignment,
     pub align_y: Smart<Option<FixedAlignment>>,
     pub scope: PlacementScope,
     pub float: bool,
     pub clearance: Abs,
     pub delta: Axes<Rel<Abs>>,
-    elem: &'a Packed<PlaceElem>,
-    styles: StyleChain<'a>,
-    locator: Locator<'a>,
+    elem: Packed<PlaceElem>,
+    styles: InnerStyles,
+    locator: u128,
     alignment: Smart<Alignment>,
-    cell: CachedCell<SourceResult<Frame>>,
 }
 
-impl PlacedChild<'_> {
+impl PlacedChild {
     /// Build the child's frame given the region's base size.
-    pub fn layout(&self, engine: &mut Engine, base: Size) -> SourceResult<Frame> {
-        self.cell.get_or_init(base, |base| {
-            let align = self.alignment.unwrap_or_else(|| Alignment::CENTER);
-            let aligned = AlignElem::alignment.set(align).wrap();
-            let styles = self.styles.chain(&aligned);
+    pub fn layout(
+        &self,
+        engine: &mut Engine,
+        cx: &FlowCx,
+        base: Size,
+    ) -> SourceResult<Frame> {
+        let align = self.alignment.unwrap_or_else(|| Alignment::CENTER);
+        let aligned = AlignElem::alignment.set(align).wrap();
 
-            let mut frame = layout_and_modify(styles, |styles| {
+        let mut frame = self.styles.with(cx.styles, |styles| {
+            let styles = styles.chain(&aligned);
+            layout_and_modify(styles, |styles| {
                 crate::layout_frame(
                     engine,
                     &self.elem.body,
-                    self.locator.relayout(),
+                    cx.locator.with_local(self.locator),
                     styles,
                     Region::new(base, Axes::splat(false)),
                 )
-            })?;
+            })
+        })?;
 
-            if self.float {
-                frame.set_parent(FrameParent::new(
-                    self.elem.location().unwrap(),
-                    Inherit::Yes,
-                ));
-            }
+        if self.float {
+            frame.set_parent(FrameParent::new(
+                self.elem.location().unwrap(),
+                Inherit::Yes,
+            ));
+        }
 
-            Ok(frame)
-        })
+        Ok(frame)
     }
 
     /// The element's location.
@@ -676,50 +1096,61 @@ impl PlacedChild<'_> {
     }
 }
 
-/// Wraps a parameterized computation and caches its latest output.
-///
-/// - When the computation is performed multiple times consecutively with the
-///   same argument, reuses the cache.
-/// - When the argument changes, the new output is cached.
-#[derive(Clone)]
-struct CachedCell<T>(RefCell<Option<(u128, T)>>);
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl<T> CachedCell<T> {
-    /// Create an empty cached cell.
-    fn new() -> Self {
-        Self(RefCell::new(None))
+    fn pt(v: f64) -> Abs {
+        Abs::pt(v)
     }
 
-    /// Perform the computation `f` with caching.
-    fn get_or_init<F, I>(&self, input: I, f: F) -> T
-    where
-        I: Hash,
-        T: Clone,
-        F: FnOnce(I) -> T,
-    {
-        let input_hash = typst_utils::hash128(&input);
-
-        let mut slot = self.0.borrow_mut();
-        if let Some((hash, output)) = &*slot
-            && *hash == input_hash
-        {
-            return output.clone();
+    fn desc(
+        height: f64,
+        backlog: &[f64],
+        predicted: &[f64],
+        last: Option<f64>,
+    ) -> RegionsDesc {
+        RegionsDesc {
+            size: Size::new(pt(100.0), pt(height)),
+            expand: Axes::splat(true),
+            full: pt(100.0),
+            backlog: backlog.iter().chain(predicted).copied().map(pt).collect(),
+            last: last.map(pt),
+            predicted: predicted.len(),
         }
-
-        let output = f(input);
-        *slot = Some((input_hash, output.clone()));
-        output
     }
-}
 
-impl<T> Default for CachedCell<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+    #[test]
+    fn test_regions_desc_followed_by() {
+        let actual = desc(60.0, &[70.0], &[], Some(90.0));
 
-impl<T> Debug for CachedCell<T> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.pad("CachedCell(..)")
+        // Replacing repetitions of the final region: The given regions are
+        // repetitions, too, and the kept ones stay repetitions.
+        let repeated = desc(80.0, &[], &[95.0], Some(100.0));
+        assert_eq!(
+            repeated.followed_by(1, &actual),
+            desc(80.0, &[], &[60.0, 70.0], Some(90.0)),
+        );
+        assert_eq!(
+            repeated.followed_by(3, &actual),
+            desc(80.0, &[], &[95.0, 100.0, 60.0, 70.0], Some(90.0)),
+        );
+
+        // Replacing backlog regions: The kept ones stay in the backlog.
+        let backlog = desc(80.0, &[85.0, 75.0], &[], Some(100.0));
+        assert_eq!(
+            backlog.followed_by(1, &actual),
+            desc(80.0, &[60.0, 70.0], &[], Some(90.0)),
+        );
+        assert_eq!(
+            backlog.followed_by(2, &actual),
+            desc(80.0, &[85.0, 60.0, 70.0], &[], Some(90.0)),
+        );
+
+        // Replacing the repetition after a backlog.
+        assert_eq!(
+            backlog.followed_by(3, &actual),
+            desc(80.0, &[85.0, 75.0], &[60.0, 70.0], Some(90.0)),
+        );
     }
 }

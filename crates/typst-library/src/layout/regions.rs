@@ -27,6 +27,7 @@ impl From<Region> for Regions<'_> {
             full: region.size.y,
             backlog: &[],
             last: None,
+            predicted: 0,
         }
     }
 }
@@ -52,6 +53,12 @@ pub struct Regions<'a> {
     /// The height of the final region that is repeated once the backlog is
     /// drained. The width is the same for all regions.
     pub last: Option<Abs>,
+    /// How many regions at the end of the backlog are repetitions of the final
+    /// region that are predicted to have less space. Their full height is
+    /// that of the final region. Unlike other backlog regions, moving on to
+    /// them only makes progress if the current region has less space than a
+    /// fresh final region (see [`may_progress`](Self::may_progress)).
+    pub predicted: usize,
 }
 
 impl Regions<'_> {
@@ -62,6 +69,7 @@ impl Regions<'_> {
             full: size.y,
             backlog: &[],
             last: Some(size.y),
+            predicted: 0,
             expand,
         }
     }
@@ -90,6 +98,7 @@ impl Regions<'_> {
             full: f(Size::new(x, self.full)).y,
             backlog,
             last: self.last.map(|y| f(Size::new(x, y)).y),
+            predicted: self.predicted,
             expand: self.expand,
         }
     }
@@ -104,23 +113,44 @@ impl Regions<'_> {
         !self.backlog.is_empty() || self.last.is_some()
     }
 
+    /// Whether there are followup regions before the final, repeated one,
+    /// not counting its predicted repetitions.
+    pub fn has_backlog(&self) -> bool {
+        self.backlog.len() > self.predicted
+    }
+
     /// Whether calling `next()` may improve a situation where there is a lack
     /// of space.
     pub fn may_progress(&self) -> bool {
-        !self.backlog.is_empty() || self.last.is_some_and(|height| self.size.y != height)
+        self.has_backlog()
+            || self.last.is_some_and(|height| !self.size.y.approx_eq(height))
+    }
+
+    /// Drops the predicted repetitions of the final region at the end of the
+    /// backlog that don't have less space than it, since they are no
+    /// predictions.
+    pub fn trim_predicted(&mut self) {
+        while self.predicted > 0
+            && let [rest @ .., height] = self.backlog
+            && Some(*height) == self.last
+        {
+            self.backlog = rest;
+            self.predicted -= 1;
+        }
     }
 
     /// Advance to the next region if there is any.
     pub fn next(&mut self) {
-        if let Some(height) = self
-            .backlog
-            .split_first()
-            .map(|(first, tail)| {
-                self.backlog = tail;
-                *first
-            })
-            .or(self.last)
-        {
+        if let Some((&height, tail)) = self.backlog.split_first() {
+            self.full = if self.has_backlog() {
+                height
+            } else {
+                self.predicted -= 1;
+                self.last.unwrap_or(height)
+            };
+            self.backlog = tail;
+            self.size.y = height;
+        } else if let Some(height) = self.last {
             self.size.y = height;
             self.full = height;
         }
@@ -155,5 +185,54 @@ impl Debug for Regions<'_> {
             list.entry(&(..));
         }
         list.finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pt(v: f64) -> Abs {
+        Abs::pt(v)
+    }
+
+    #[test]
+    fn test_regions_predicted() {
+        let backlog = [pt(80.0), pt(100.0), pt(40.0), pt(100.0)];
+        let mut regions = Regions {
+            predicted: 3,
+            last: Some(pt(100.0)),
+            backlog: &backlog,
+            ..Regions::repeat(Size::splat(pt(100.0)), Axes::splat(false))
+        };
+
+        // The trailing prediction that doesn't differ is dropped.
+        regions.trim_predicted();
+        assert_eq!(regions.backlog, [pt(80.0), pt(100.0), pt(40.0)]);
+        assert_eq!(regions.predicted, 2);
+
+        // A backlog region follows, so moving on makes progress.
+        assert!(regions.has_backlog());
+        assert!(regions.may_progress());
+
+        // Moving on from a fresh repetition makes no progress, even if a
+        // later one is predicted to be smaller.
+        regions.next();
+        assert_eq!((regions.size.y, regions.full), (pt(80.0), pt(80.0)));
+        assert!(regions.may_progress());
+        regions.next();
+        assert_eq!((regions.size.y, regions.full), (pt(100.0), pt(100.0)));
+        assert!(!regions.has_backlog());
+        assert!(!regions.may_progress());
+
+        // Predicted repetitions have their predicted heights and the full
+        // height of the final region. Moving on from a smaller one makes
+        // progress.
+        regions.next();
+        assert_eq!((regions.size.y, regions.full), (pt(40.0), pt(100.0)));
+        assert_eq!(regions.predicted, 0);
+        assert!(regions.may_progress());
+        regions.next();
+        assert_eq!((regions.size.y, regions.full), (pt(100.0), pt(100.0)));
     }
 }

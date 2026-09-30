@@ -10,9 +10,10 @@ use typst_library::introspection::{Counter, Locator, LocatorLink};
 use typst_library::layout::{
     Abs, AlignElem, Alignment, Axes, BlockBody, BlockElem, ColumnsElem, Em,
     FixedAlignment, GridCell, GridChild, GridElem, GridItem, HAlignment, HElem, HideElem,
-    InlineElem, LayoutElem, Length, MoveElem, OuterVAlignment, PadElem, PageElem,
-    PlaceElem, PlacementScope, Region, Rel, RepeatElem, RotateElem, ScaleElem, Sides,
-    Size, Sizing, SkewElem, Spacing, StackChild, StackElem, TrackSizings, VElem,
+    InlineElem, LayoutElem, Length, MoveElem, MultiState, MultiStep, OuterVAlignment,
+    PadElem, PageElem, PlaceElem, PlacementScope, Region, Rel, RepeatElem, RotateElem,
+    ScaleElem, Sides, Size, Sizing, SkewElem, Spacing, StackChild, StackElem,
+    TrackSizings, VElem,
 };
 use typst_library::math::EquationElem;
 use typst_library::model::{ArtifactElem, ArtifactKind, PdfMarkerTag};
@@ -746,19 +747,48 @@ const HIDE_RULE: ShowFn<HideElem> =
     |elem, _, _| Ok(elem.body.clone().set(HideElem::hidden, true));
 
 const LAYOUT_RULE: ShowFn<LayoutElem> = |elem, _, _| {
+    /// Where the laid out result of the layout function continues.
+    struct LayoutState {
+        /// The result of the layout function.
+        content: Content,
+        /// Where the content continues.
+        inner: MultiState,
+    }
+
     Ok(BlockElem::multi_layouter(
         elem.clone(),
-        |elem, engine, locator, styles, regions| {
-            // Gets the current region's base size, which will be the size of the
-            // outer container, or of the page if there is no such container.
-            let Size { x, y } = regions.base();
-            let loc = elem.location().unwrap();
-            let context = Context::new(Some(loc), Some(styles));
-            let result = elem
-                .func
-                .call(engine, context.track(), [dict! { "width" => x, "height" => y }])?
-                .display();
-            crate::flow::layout_fragment(engine, &result, locator, styles, regions)
+        |elem, engine, locator, styles, regions, state| {
+            let state = state.map(MultiState::get::<LayoutState>);
+            let content = match state {
+                Some(state) => state.content.clone(),
+                None => {
+                    // Gets the current region's base size, which will be the
+                    // size of the outer container, or of the page if there is
+                    // no such container.
+                    let Size { x, y } = regions.base();
+                    let loc = elem.location().unwrap();
+                    let context = Context::new(Some(loc), Some(styles));
+                    elem.func
+                        .call(
+                            engine,
+                            context.track(),
+                            [dict! { "width" => x, "height" => y }],
+                        )?
+                        .display()
+                }
+            };
+
+            let inner = state.map(|state| &state.inner);
+            let step = crate::flow::layout_fragment_step(
+                engine, &content, locator, styles, regions, inner,
+            )?;
+            Ok(MultiStep {
+                frame: step.frame,
+                next: step
+                    .next
+                    .map(|inner| MultiState::new(LayoutState { content, inner })),
+                ahead: step.ahead,
+            })
         },
     )
     .pack())

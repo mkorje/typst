@@ -121,6 +121,16 @@ where
     F: FnOnce(StyleChain) -> R,
     R: FrameModify,
 {
+    layout_with_modifiers(styles, |styles, modifiers| layout(styles).modified(modifiers))
+}
+
+/// Like [`layout_and_modify`], but leaves applying the modifiers to `layout`,
+/// which receives them alongside the styles. This is useful if `layout`
+/// produces frames bit by bit.
+pub fn layout_with_modifiers<F, R>(styles: StyleChain, layout: F) -> R
+where
+    F: FnOnce(StyleChain, &FrameModifiers) -> R,
+{
     let modifiers = FrameModifiers::get_in(styles);
 
     // Disable the current link internally since it's already applied at this
@@ -134,5 +144,5 @@ where
         styles = outer.chain(&reset);
     }
 
-    layout(styles).modified(&modifiers)
+    layout(styles, &modifiers)
 }

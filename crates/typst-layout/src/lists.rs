@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use comemo::Track;
 use smallvec::smallvec;
 use typst_library::diag::SourceResult;
@@ -5,7 +7,7 @@ use typst_library::engine::Engine;
 use typst_library::foundations::{Content, Context, Depth, Packed, Resolve, StyleChain};
 use typst_library::introspection::Locator;
 use typst_library::layout::{
-    Abs, Axes, Dir, Fragment, Frame, FrameItem, Length, Point, Region, Regions, Size,
+    Abs, Axes, Dir, Frame, Length, MultiState, MultiStep, Point, Region, Regions, Size,
 };
 use typst_library::model::{
     EnumElem, ListElem, Numbering, ParElem, ParbreakElem, PdfMarkerTag,
@@ -13,9 +15,10 @@ use typst_library::model::{
 use typst_library::text::TextElem;
 use typst_syntax::Span;
 
+use crate::grid::is_empty_frame;
 use crate::stack::{StackLayoutChild, layout_stack_internal};
 
-/// Layout the list.
+/// Layout the list, one region at a time.
 #[typst_macros::time(span = elem.span())]
 pub fn layout_list(
     elem: &Packed<ListElem>,
@@ -23,7 +26,8 @@ pub fn layout_list(
     locator: Locator,
     styles: StyleChain,
     regions: Regions,
-) -> SourceResult<Fragment> {
+    state: Option<&MultiState>,
+) -> SourceResult<MultiStep> {
     let indent = elem.indent.get(styles);
     let body_indent = elem.body_indent.get(styles);
     let tight = elem.tight.get(styles);
@@ -32,12 +36,34 @@ pub fn layout_list(
     });
     let is_rtl = styles.get(TextElem::dir).resolve(styles) == Dir::RTL;
 
-    let Depth(depth) = styles.get(ListElem::depth);
-
     // Use the user's preferred vertical alignment. Among other things, it
     // avoids '#set align' interference with the list.
     let marker_align = elem.marker_align.get(styles);
     let baseline_align = marker_align.y().is_none();
+
+    let layouter = ListLayouter::new(
+        gutter,
+        elem.span(),
+        indent,
+        body_indent,
+        baseline_align,
+        is_rtl,
+        styles,
+    );
+
+    let items = |engine: &mut Engine| list_items(elem, engine, styles);
+    layout_items(layouter, items, engine, locator, styles, regions, state)
+}
+
+/// Prepares the content of the list's items.
+fn list_items(
+    elem: &Packed<ListElem>,
+    engine: &mut Engine,
+    styles: StyleChain,
+) -> SourceResult<Vec<ItemContent>> {
+    let tight = elem.tight.get(styles);
+    let Depth(depth) = styles.get(ListElem::depth);
+    let marker_align = elem.marker_align.get(styles);
     let marker = elem
         .marker
         .get_ref(styles)
@@ -61,6 +87,34 @@ pub fn layout_list(
         items.push(item);
     }
 
+    Ok(items)
+}
+
+/// Layout the enumeration, one region at a time.
+#[typst_macros::time(span = elem.span())]
+pub fn layout_enum(
+    elem: &Packed<EnumElem>,
+    engine: &mut Engine,
+    locator: Locator,
+    styles: StyleChain,
+    regions: Regions,
+    state: Option<&MultiState>,
+) -> SourceResult<MultiStep> {
+    let indent = elem.indent.get(styles);
+    let body_indent = elem.body_indent.get(styles);
+    let tight = elem.tight.get(styles);
+    let gutter = elem.spacing.get(styles).unwrap_or_else(|| {
+        if tight { styles.get(ParElem::leading) } else { styles.get(ParElem::spacing) }
+    });
+    let is_rtl = styles.get(TextElem::dir).resolve(styles) == Dir::RTL;
+
+    // Horizontally align based on the given respective parameter.
+    // Vertically align to the top to avoid inheriting `horizon` or `bottom`
+    // alignment from the context and having the number be displaced in
+    // relation to the item it refers to.
+    let number_align = elem.number_align.get(styles);
+    let baseline_align = number_align.y().is_none();
+
     let layouter = ListLayouter::new(
         gutter,
         elem.span(),
@@ -71,27 +125,19 @@ pub fn layout_list(
         styles,
     );
 
-    layout_items(layouter, items, engine, locator, styles, regions)
+    let items = |engine: &mut Engine| enum_items(elem, engine, styles);
+    layout_items(layouter, items, engine, locator, styles, regions, state)
 }
 
-/// Layout the enumeration.
-#[typst_macros::time(span = elem.span())]
-pub fn layout_enum(
+/// Prepares the content of the enumeration's items.
+fn enum_items(
     elem: &Packed<EnumElem>,
     engine: &mut Engine,
-    locator: Locator,
     styles: StyleChain,
-    regions: Regions,
-) -> SourceResult<Fragment> {
+) -> SourceResult<Vec<ItemContent>> {
     let numbering = elem.numbering.get_ref(styles);
     let reversed = elem.reversed.get(styles);
-    let indent = elem.indent.get(styles);
-    let body_indent = elem.body_indent.get(styles);
     let tight = elem.tight.get(styles);
-    let gutter = elem.spacing.get(styles).unwrap_or_else(|| {
-        if tight { styles.get(ParElem::leading) } else { styles.get(ParElem::spacing) }
-    });
-    let is_rtl = styles.get(TextElem::dir).resolve(styles) == Dir::RTL;
 
     let mut items = vec![];
     let mut number = elem
@@ -101,13 +147,7 @@ pub fn layout_enum(
     let mut parents = styles.get_cloned(EnumElem::parents);
 
     let full = elem.full.get(styles);
-
-    // Horizontally align based on the given respective parameter.
-    // Vertically align to the top to avoid inheriting `horizon` or `bottom`
-    // alignment from the context and having the number be displaced in
-    // relation to the item it refers to.
     let number_align = elem.number_align.get(styles);
-    let baseline_align = number_align.y().is_none();
 
     for item in &elem.children {
         number = item.number.get(styles).unwrap_or(number);
@@ -156,17 +196,7 @@ pub fn layout_enum(
             if reversed { number.saturating_sub(1) } else { number.saturating_add(1) };
     }
 
-    let layouter = ListLayouter::new(
-        gutter,
-        elem.span(),
-        indent,
-        body_indent,
-        baseline_align,
-        is_rtl,
-        styles,
-    );
-
-    layout_items(layouter, items, engine, locator, styles, regions)
+    Ok(items)
 }
 
 /// Structure with the content for each list item.
@@ -246,62 +276,121 @@ impl ListLayouter {
 #[typst_macros::time(span = layouter.span)]
 fn layout_items(
     mut layouter: ListLayouter,
-    items: Vec<ItemContent>,
+    items: impl FnOnce(&mut Engine) -> SourceResult<Vec<ItemContent>>,
     engine: &mut Engine,
     locator: Locator,
     styles: StyleChain,
     regions: Regions,
-) -> SourceResult<Fragment> {
-    // Store locators used during measuring to ensure the same locators will be
-    // used later when laying out. This is needed to make introspection work
-    // properly.
-    let mut locator = locator.split();
-    let locators: Vec<_> = items
-        .iter()
-        .map(|item| {
-            let marker_locator = locator.next(&item.marker.span());
-            let body_locator = locator.next(&item.body.span());
-            (marker_locator, body_locator)
-        })
-        .collect();
+    state: Option<&MultiState>,
+) -> SourceResult<MultiStep> {
+    // The items, the locators used during measuring, and the measurements are
+    // prepared for the first region and kept for the following ones. The
+    // locators are stored to ensure the same locators will be used later when
+    // laying out. This is needed to make introspection work properly. The
+    // measurements only depend on the first region.
+    let state = state.map(MultiState::get::<ListState>);
+    let (items, locals) = match state {
+        Some(state) => {
+            layouter.marker_width = state.marker_width;
+            layouter.body_width = state.body_width;
+            (state.items.clone(), state.locals.clone())
+        }
+        None => {
+            let items: Arc<[ItemContent]> = items(engine)?.into();
+            let mut split = locator.relayout().split();
+            let locals: Arc<[(u128, u128)]> = items
+                .iter()
+                .map(|item| {
+                    let marker = split.next(&item.marker.span()).local();
+                    let body = split.next(&item.body.span()).local();
+                    (marker, body)
+                })
+                .collect();
 
-    layouter.marker_width =
-        measure_markers(&layouter, &items, &locators, engine, styles, regions)?;
+            let locators: Vec<_> = locals
+                .iter()
+                .map(|&(marker, body)| {
+                    (locator.with_local(marker), locator.with_local(body))
+                })
+                .collect();
 
-    if regions.size.x.to_raw().is_infinite() || !regions.expand.x {
-        layouter.body_width =
-            Some(measure_bodies(&layouter, &items, &locators, engine, styles, regions)?);
-    }
+            layouter.marker_width =
+                measure_markers(&layouter, &items, &locators, engine, styles, regions)?;
 
-    let cells =
-        items
+            if regions.size.x.to_raw().is_infinite() || !regions.expand.x {
+                layouter.body_width = Some(measure_bodies(
+                    &layouter, &items, &locators, engine, styles, regions,
+                )?);
+            }
+
+            (items, locals)
+        }
+    };
+
+    // The stack only asks for the items from the one it continues with.
+    let layouter = &layouter;
+    let base = &locator;
+    let cells = |start: usize| {
+        items[start..]
             .iter()
-            .zip(&locators)
-            .map(|(item, (marker_locator, body_locator))| {
-                StackLayoutChild::CustomLayouter(|engine, styles, regions| {
+            .zip(&locals[start..])
+            .map(|(item, &(marker, body))| {
+                let marker_locator = base.with_local(marker);
+                let body_locator = base.with_local(body);
+                StackLayoutChild::CustomLayouter(move |engine, styles, regions, state| {
                     layout_item(
                         item,
-                        &layouter,
+                        layouter,
                         engine,
-                        marker_locator,
-                        body_locator,
+                        &marker_locator,
+                        &body_locator,
                         styles,
                         regions,
+                        state,
                     )
                 })
-            });
+            })
+    };
 
-    layout_stack_internal(
+    let step = layout_stack_internal(
         cells,
         layouter.span,
         Some(layouter.gutter.into()),
         Dir::TTB,
         engine,
         // This locator should not be used by cells.
-        locator.next(&()),
+        locator.relayout().split().next(&()),
         styles,
         regions,
-    )
+        state.map(|state| &state.stack),
+    )?;
+
+    let next = step.next.map(|stack| {
+        MultiState::new(ListState {
+            items: items.clone(),
+            locals: locals.clone(),
+            marker_width: layouter.marker_width,
+            body_width: layouter.body_width,
+            stack,
+        })
+    });
+
+    Ok(MultiStep { frame: step.frame, next, ahead: step.ahead })
+}
+
+/// Where a list continues.
+struct ListState {
+    /// The content of the items.
+    items: Arc<[ItemContent]>,
+    /// The local hashes of the locators of the items' markers and bodies (see
+    /// [`Locator::local`]).
+    locals: Arc<[(u128, u128)]>,
+    /// The measured marker width. See [`ListLayouter::marker_width`].
+    marker_width: Abs,
+    /// The measured body width. See [`ListLayouter::body_width`].
+    body_width: Option<Abs>,
+    /// Where the stack of items continues.
+    stack: MultiState,
 }
 
 /// Measure marker.
@@ -370,8 +459,10 @@ fn measure_bodies(
     Ok(measured_body_width.min(available_width - list.marker_width))
 }
 
-/// Layout the item, with support for vertical marker alignment.
+/// Layout the item, with support for vertical marker alignment, one region at
+/// a time.
 #[typst_macros::time(span = item.body.span())]
+#[expect(clippy::too_many_arguments)]
 fn layout_item(
     item: &ItemContent,
     list: &ListLayouter,
@@ -380,9 +471,29 @@ fn layout_item(
     body_locator: &Locator,
     styles: StyleChain,
     regions: Regions,
-) -> SourceResult<Fragment> {
+    state: Option<&MultiState>,
+) -> SourceResult<MultiStep> {
     let mut layouter =
         ItemLayouter::new(item, list, marker_locator, body_locator, styles, regions);
+
+    // Continue the body in the next region.
+    if let Some(state) = state.map(MultiState::get::<ItemState>) {
+        layouter.first_frame = state.first_frame;
+        layouter.body_offset = state.body_offset;
+        layouter.marker_offset = state.marker_offset;
+        let step =
+            layouter.step_body(layouter.body_regions, engine, Some(&state.body))?;
+        let frame = layouter.finish_frame(&state.marker, step.frame, state.index);
+        let next = step.next.map(|body| {
+            MultiState::new(ItemState {
+                marker: state.marker.clone(),
+                index: state.index + 1,
+                body,
+                ..*state
+            })
+        });
+        return Ok(MultiStep { frame, next, ahead: step.ahead });
+    }
 
     let mut marker = layouter.layout_marker(
         Region::new(
@@ -397,10 +508,40 @@ fn layout_item(
     if layouter.list.baseline_align {
         layouter.baseline_align(&marker, &mut body, engine)?;
     } else {
-        layouter.vertical_align(&mut marker, &body, engine)?;
+        layouter.vertical_align(&mut marker, body.1.as_ref(), engine)?;
     }
 
-    layouter.finish(marker, body)
+    let (first, _) = body;
+    let frame = layouter.finish_frame(&marker, first.frame, 0);
+    let ahead = first.ahead;
+    let next = first.next.map(|body| {
+        MultiState::new(ItemState {
+            marker,
+            first_frame: layouter.first_frame,
+            body_offset: layouter.body_offset,
+            marker_offset: layouter.marker_offset,
+            index: 1,
+            body,
+        })
+    });
+
+    Ok(MultiStep { frame, next, ahead })
+}
+
+/// Where a list item continues.
+struct ItemState {
+    /// The laid out marker.
+    marker: Frame,
+    /// See [`ItemLayouter::first_frame`].
+    first_frame: usize,
+    /// See [`ItemLayouter::body_offset`].
+    body_offset: Point,
+    /// See [`ItemLayouter::marker_offset`].
+    marker_offset: Point,
+    /// The index of the next frame.
+    index: usize,
+    /// Where the body continues.
+    body: MultiState,
 }
 
 /// Layout data for a specific item.
@@ -481,28 +622,55 @@ impl<'a> ItemLayouter<'a> {
         )
     }
 
-    /// Layout the list body with the given region data.
+    /// Layout the start of the list body with the given region data. Returns
+    /// the body's first step and, if known, the frame the marker is placed on.
     fn layout_body(
         &mut self,
         regions: Regions,
         engine: &mut Engine,
-    ) -> SourceResult<Fragment> {
-        let fragment = crate::layout_fragment(
+    ) -> SourceResult<(MultiStep, Option<Frame>)> {
+        let first = self.step_body(regions, engine, None)?;
+
+        // Update the first non-empty frame (ignoring a frame with only tags due
+        // to a forced region break). If the first frame is not virtually empty,
+        // then keep the default of 0. This requires looking at the following
+        // frames, which we lay out into the predicted regions.
+        let mut rest = vec![];
+        if first.next.is_some() && is_empty_frame(&first.frame) {
+            rest = crate::flow::peek_remaining(
+                engine,
+                regions,
+                first.next.clone(),
+                |engine, regions, state| self.step_body(regions, engine, Some(state)),
+                |frame| !is_empty_frame(frame),
+            )?;
+            if rest.last().is_some_and(|f| !is_empty_frame(f)) {
+                self.first_frame = 1;
+            }
+        }
+
+        let marked = match self.first_frame {
+            0 => Some(first.frame.clone()),
+            _ => rest.into_iter().next(),
+        };
+        Ok((first, marked))
+    }
+
+    /// Layout one region of the list body.
+    fn step_body(
+        &self,
+        regions: Regions,
+        engine: &mut Engine,
+        state: Option<&MultiState>,
+    ) -> SourceResult<MultiStep> {
+        crate::flow::layout_fragment_step(
             engine,
             &self.item.body,
             self.body_locator.relayout(),
             self.styles,
             regions,
-        )?;
-
-        // Update the first non-empty frame (ignoring a frame with only tags due
-        // to a forced region break). If the first frame is not virtually empty,
-        // then keep the default of 0.
-        if should_skip_first_frame(&fragment) {
-            self.first_frame = 1;
-        }
-
-        Ok(fragment)
+            state,
+        )
     }
 
     /// Ensure baselines are aligned by either increasing the marker's offset,
@@ -512,7 +680,7 @@ impl<'a> ItemLayouter<'a> {
     fn baseline_align(
         &mut self,
         marker: &Frame,
-        body_fragment: &mut Fragment,
+        body: &mut (MultiStep, Option<Frame>),
         engine: &mut Engine,
     ) -> SourceResult<()> {
         // Difference between marker and body baselines, for alignment. A
@@ -520,10 +688,10 @@ impl<'a> ItemLayouter<'a> {
         // whereas a negative 'diff' means that the marker is below, so the body
         // must be moved down instead.
         let diff = if marker.has_baseline()
-            && let Some(first) = body_fragment.as_slice().get(self.first_frame)
-            && first.has_baseline()
+            && let Some(marked) = &body.1
+            && marked.has_baseline()
         {
-            first.baseline() - marker.baseline()
+            marked.baseline() - marker.baseline()
         } else {
             // One of the frames has no natural baseline, so baseline alignment
             // is disabled.
@@ -546,8 +714,8 @@ impl<'a> ItemLayouter<'a> {
             // there is only so much we can do with a finite number of
             // iterations.
             let mut regions = self.body_regions;
-            regions.size.y += diff;
-            *body_fragment = self.layout_body(regions, engine)?;
+            regions.size.y -= -diff;
+            *body = self.layout_body(regions, engine)?;
 
             self.body_offset.y = -diff;
         }
@@ -561,13 +729,13 @@ impl<'a> ItemLayouter<'a> {
     fn vertical_align(
         &mut self,
         marker: &mut Frame,
-        body: &Fragment,
+        marked: Option<&Frame>,
         engine: &mut Engine,
     ) -> SourceResult<()> {
         // 'Measuring' the height of an 'auto row'.
-        let height = if let Some(body_first) = body.as_slice().get(self.first_frame) {
+        let height = if let Some(marked) = marked {
             // Don't align if the body is too short.
-            body_first.height().max(marker.height())
+            marked.height().max(marker.height())
         } else {
             // Body appears to be fully empty, so the marker should not align.
             marker.height()
@@ -580,72 +748,47 @@ impl<'a> ItemLayouter<'a> {
         Ok(())
     }
 
-    /// Finish list item layout by indenting the body's frames and add the
-    /// marker to the first non-empty frame.
-    fn finish(&self, marker: Frame, body_fragment: Fragment) -> SourceResult<Fragment> {
-        // Collect the item's frames. Here, we add the marker to the first
-        // non-empty frame, and additionally indent the whole body so it appears
-        // after the marker.
-        let mut frames = vec![];
-        for (i, body_frame) in body_fragment.into_iter().enumerate() {
-            let width = self.body_offset.x + body_frame.width();
+    /// Finish a frame of the list item by indenting the body's frame and
+    /// adding the marker if it is the first non-empty frame.
+    fn finish_frame(&self, marker: &Frame, body_frame: Frame, i: usize) -> Frame {
+        let width = self.body_offset.x + body_frame.width();
 
-            let mut height = body_frame.height() + self.body_offset.y;
-            if i == self.first_frame {
-                // Also consider the marker height, but only for the frame into
-                // which it will be placed.
-                height.set_max(marker.height() + self.marker_offset.y);
-            }
-
-            let mut frame = Frame::soft(Size::new(width, height));
-
-            let mut body_pos = self.body_offset;
-            if self.list.is_rtl {
-                // In RTL, items expand to the left, thus the position must
-                // additionally be offset by the full width. However, since the
-                // body is always at the end, it will expand to the right in
-                // LTR, and therefore to the left in RTL. That is, its leftmost
-                // corner must be at the left of the frame, since it now expands
-                // to the left.
-                //
-                // Or, mathematically:
-                // body_pos.x = width - (body_frame.width() + body_pos.x)
-                //            = self.body_offset.x + body_frame.width() -
-                //                  - (body_frame.width() + self.body_offset.x)
-                //            = 0.
-                body_pos.x = Abs::zero();
-            }
-
-            // Only place the marker on the first non-empty frame.
-            if i == self.first_frame {
-                let mut marker_pos = self.marker_offset;
-                if self.list.is_rtl {
-                    marker_pos.x = width - (self.list.marker_width + marker_pos.x);
-                }
-                frame.push_frame(marker_pos, marker.clone());
-            }
-
-            frame.push_frame(body_pos, body_frame);
-            frames.push(frame);
+        let mut height = body_frame.height() + self.body_offset.y;
+        if i == self.first_frame {
+            // Also consider the marker height, but only for the frame into
+            // which it will be placed.
+            height.set_max(marker.height() + self.marker_offset.y);
         }
 
-        Ok(Fragment::frames(frames))
+        let mut frame = Frame::soft(Size::new(width, height));
+
+        let mut body_pos = self.body_offset;
+        if self.list.is_rtl {
+            // In RTL, items expand to the left, thus the position must
+            // additionally be offset by the full width. However, since the
+            // body is always at the end, it will expand to the right in
+            // LTR, and therefore to the left in RTL. That is, its leftmost
+            // corner must be at the left of the frame, since it now expands
+            // to the left.
+            //
+            // Or, mathematically:
+            // body_pos.x = width - (body_frame.width() + body_pos.x)
+            //            = self.body_offset.x + body_frame.width() -
+            //                  - (body_frame.width() + self.body_offset.x)
+            //            = 0.
+            body_pos.x = Abs::zero();
+        }
+
+        // Only place the marker on the first non-empty frame.
+        if i == self.first_frame {
+            let mut marker_pos = self.marker_offset;
+            if self.list.is_rtl {
+                marker_pos.x = width - (self.list.marker_width + marker_pos.x);
+            }
+            frame.push_frame(marker_pos, marker.clone());
+        }
+
+        frame.push_frame(body_pos, body_frame);
+        frame
     }
-}
-
-/// Check whether the first frame is essentially empty (only contains tags).
-/// This usually indicates a forced region break, which we should ignore.
-fn should_skip_first_frame(fragment: &Fragment) -> bool {
-    fragment.len() > 1
-        && is_empty_frame(&fragment.as_slice()[0])
-        && fragment.iter().skip(1).any(|f| !is_empty_frame(f))
-}
-
-/// Check if a frame is empty (taken from grid layouting).
-///
-/// HACK: Also consider frames empty if they only contain tags. Table
-/// and grid cells need to be locatable for pdf accessibility, but
-/// the introspection tags interfere with the layouting.
-fn is_empty_frame(frame: &Frame) -> bool {
-    frame.items().all(|(_, item)| matches!(item, FrameItem::Tag(_)))
 }

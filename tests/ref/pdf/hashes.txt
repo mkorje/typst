@@ -258,6 +258,13 @@ ce021acd6263989175451e7e120ced38 flow-heading-no-orphan
 7ba3685ff8290483c83165e82bc9aba2 flow-heading-no-orphan-with-footnote
 51f3c8b3eb6a1b22371dce8c192a833a flow-heading-orphan-forced-with-footnote
 2375d0e0148d07153cb082836c213ba1 flow-par-no-orphan-and-widow-lines
+0ad184c8557f3e432168d970e1bc0c05 flow-spill-block-width-consistent
+4b8a8cce267658b07f346c2618748200 flow-spill-fallback-actual-regions
+c3371ff0e968b2c829c548739f157854 flow-spill-restart-cap-nested
+b28f50739b69fac440e5a5c2ab02193a flow-spill-restart-footnote
+820414eb6863ccb2a17af32cca2d9495 flow-spill-restart-table
+23c702aa11322e4fa7d4be186f80f5b5 flow-spill-restart-widow
+5caeae5aa5610f424395ca0c652fc3ee flow-spill-skip-full-region
 f8a5a605c5c664d613b105e67aa6bb19 flow-widow-forced
 b2bdc8e35c5748f9f57446071d3f7d21 fold-vec-order-meta
 0d0d1bb00f5a2b581397ac9557bad74c fold-vec-order-text-decos
@@ -271,6 +278,7 @@ f4d189d1ed0c39cca0c90381ced86b8f footnote-break-across-pages-block
 4e156086ad265809f0512540c64be27a footnote-break-across-pages-nested
 50e341e0f5aff18a0846af5dca858d84 footnote-duplicate
 d323e5c6fc0c7f7f156c382289ba853b footnote-entry
+e606945fec9686d8e55c07135e047e9b footnote-entry-outside-show-everything
 41776db382c7705f5a5e97e349df7596 footnote-float-priority
 92cefcf8f0818008b8a6f987a33b54fa footnote-in-caption
 f23f7a0a0411586163a27c7aff1cb297 footnote-in-columns
@@ -456,7 +464,7 @@ d0e1206057290c398eeb98ab18151297 grid-header-stroke-edge-cases
 02301d3e3bd02115ddc3010f0bf6629e grid-header-too-large-non-repeating-orphan
 c19a48b7f92557e1af7c0320628003ce grid-header-too-large-repeating-orphan
 40c613e5d3cfebc76fcc14f715c1eb01 grid-header-too-large-repeating-orphan-not-at-first-row
-fac0f7bf42d6e67239fd0323db19847c grid-header-too-large-repeating-orphan-with-footer
+1a808626dd7d9bf8ebe71a2f2c8c93cc grid-header-too-large-repeating-orphan-with-footer
 01abe0d8d87c9a5e40a6ac8610c7b644 grid-headers
 9facda8e4bd8cf9328f964e3fc1db0a9 grid-headers-gutter
 ad3bbeddcfd7092956c36c245791b748 grid-headers-no-repeat
@@ -476,6 +484,7 @@ e46afa674345eeea600c3252059cb7f5 grid-rowspan-cell-order
 c14404315b3e7f834d2b3792990a8cac grid-rowspan-excessive
 fdcbd15827d2350a47920ecce4cf09b3 grid-rowspan-excessive-gutter
 294939036c2148177e7dfea2aa533a69 grid-rowspan-fixed-size
+66455804fad3a3d931e763cc42457646 grid-rowspan-footnotes-ahead
 c6cf197065ca30d02438cb4bf2d5e71d grid-rowspan-gutter
 98d2b820a845a94873e5d187a8893b96 grid-rowspan-in-all-columns-stroke
 ce6804c94454749e97015c92edd647b6 grid-rowspan-in-all-columns-stroke-gutter
@@ -574,6 +583,7 @@ fab3a8803dbf88b4c5018640232f0a02 grid-subheaders-repeat-replace
 40590a89c72c5919b93e4c95f6fe571d grid-subheaders-repeat-replace-multiple-levels
 0e527c81abc5b6a4a1b83df3f7c8f460 grid-subheaders-repeat-replace-orphan
 95f23308ae8f542e029f330f9456949e grid-subheaders-repeat-replace-short-lived
+e5d3b3ebb5e8fe8da8b63776125eea85 grid-subheaders-repeat-replace-short-lived-columns
 6178a4c23b1a3713fb74fd7d37f7f443 grid-subheaders-repeat-replace-with-footer
 7d2dfe1ebc4bd9997f65c2e822793880 grid-subheaders-repeat-replace-with-footer-orphan
 309f641b6b7f339933ca2c7fa0e87a7e grid-subheaders-repeat-short-lived-also-replaces
@@ -582,7 +592,7 @@ e68f595f11f9a15c729953ff5aed5d07 grid-subheaders-repeating-orphan-prevention
 1b44a9538f09a17281808919f475dfb1 grid-subheaders-short-lived-no-orphan-prevention
 e2db0bc02959efcf456a92b4f6da13a0 grid-subheaders-too-large-non-repeating-orphan-before-auto
 8229414ab11b35acc0e67b878f03e078 grid-subheaders-too-large-non-repeating-orphan-before-relative
-a20586f89c99751cc802af4ca04efeb2 grid-subheaders-too-large-repeating-orphan-before-auto
+3675c416e973df85d961ed8e7da85e78 grid-subheaders-too-large-repeating-orphan-before-auto
 4c227c0af32f05451c0dca8b070923d3 grid-subheaders-too-large-repeating-orphan-before-relative
 68e71b21b7fa5a4f6c82b92bad0f5ac3 grid-trailing-linebreak-region-overflow
 318d28fcb0e010691dfbdc8c05ea0c71 heading-basic
