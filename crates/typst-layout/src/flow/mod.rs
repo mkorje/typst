@@ -8,6 +8,7 @@ mod distribute;
 pub(crate) use self::block::unbreakable_pod;
 
 use std::collections::BTreeMap;
+use std::convert::Infallible;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -21,8 +22,8 @@ use typst_library::introspection::{
     Introspector, Location, Locator, LocatorLink, SplitLocator,
 };
 use typst_library::layout::{
-    Abs, Angle, ColumnsElem, Dir, Em, Followup, Fragment, Frame, HAlignment, MultiState,
-    MultiStep, PageElem, Region, Regions, RegionsLink, Rel, Size, VAlignment,
+    Abs, Angle, ColumnsElem, Dir, Em, Fragment, Frame, HAlignment, MultiState, MultiStep,
+    PageElem, Region, Regions, Rel, Size, VAlignment,
 };
 use typst_library::model::{
     ArtifactKind, FootnoteElem, FootnoteEntry, LineNumberingScope, ParLine,
@@ -63,10 +64,6 @@ pub fn layout_fragment(
     styles: StyleChain,
     regions: Regions,
 ) -> SourceResult<Fragment> {
-    // Eager layout is keyed by the exact regions, which its callers typically
-    // compute precisely anyway (like the heights of grid rows). Tracking the
-    // questions asked about them would just add overhead.
-    let mut buf = Followup::default();
     layout_fragment_impl(
         engine.world,
         engine.library,
@@ -77,35 +74,7 @@ pub fn layout_fragment(
         content,
         locator.track(),
         styles,
-        regions.materialize(&mut buf),
-    )
-}
-
-/// Lays out content into multiple regions, like [`layout_fragment`], but
-/// only depending on the answers to the questions layout asks about the
-/// regions instead of on the exact regions.
-///
-/// This is useful when the regions often vary in ways that don't matter to the
-/// content, like when they depend on the content's position. Otherwise,
-/// prefer [`layout_fragment`], as tracking has some overhead.
-pub fn layout_fragment_tracked(
-    engine: &mut Engine,
-    content: &Content,
-    locator: Locator,
-    styles: StyleChain,
-    regions: Regions,
-) -> SourceResult<Fragment> {
-    layout_fragment_tracked_impl(
-        engine.world,
-        engine.library,
-        engine.introspector.into_raw(),
-        engine.traced,
-        TrackedMut::reborrow_mut(&mut engine.sink),
-        engine.route.track(),
-        content,
-        locator.track(),
-        styles,
-        regions.track(),
+        regions,
     )
 }
 
@@ -166,64 +135,32 @@ pub fn layout_columns(
     )
 }
 
-/// Lays out a multi-region layouter one region at a time until it is done,
-/// producing the frames it would produce for the given regions.
-pub fn layout_steps(
-    regions: Regions,
-    mut step: impl FnMut(Regions, Option<&MultiState>) -> SourceResult<MultiStep>,
-) -> SourceResult<Fragment> {
-    let MultiStep { frame, next, .. } = step(regions, None)?;
-    let rest =
-        layout_remaining(regions, next, |regions, state| step(regions, Some(state)));
-    std::iter::once(Ok(frame))
-        .chain(rest)
-        .collect::<SourceResult<_>>()
-        .map(Fragment::frames)
-}
-
-/// Lays out the remaining regions of a multi-region layouter one region at a
-/// time, continuing from the `state` it produced for the first of the
-/// `regions`. Yields the frames for the regions after the first one.
-pub fn layout_remaining<'r>(
-    mut regions: Regions<'r>,
-    mut state: Option<MultiState>,
-    mut step: impl FnMut(Regions<'r>, &MultiState) -> SourceResult<MultiStep>,
-) -> impl Iterator<Item = SourceResult<Frame>> {
-    std::iter::from_fn(move || {
-        let current = state.take()?;
-        regions.next();
-        Some(step(regions, &current).map(|MultiStep { frame, next, .. }| {
-            state = next;
-            frame
-        }))
-    })
-}
-
-/// Lays out the remaining regions like [`layout_remaining`], but only to
-/// inspect the frames, up to and including the first one for which `stop`
-/// returns `true`.
+/// Lays out the regions after the first one of a multi-region layouter, one
+/// region at a time, continuing from the `state` it produced for the first
+/// region. This is only to inspect the frames, up to and including the first
+/// one for which `stop` returns `true`.
 ///
 /// The side effects of laying them out are dropped, since the actual layout
 /// records them.
 pub fn peek_remaining(
     engine: &mut Engine,
-    regions: Regions,
-    state: Option<MultiState>,
+    mut regions: Regions,
+    mut state: Option<MultiState>,
     mut step: impl FnMut(&mut Engine, Regions, &MultiState) -> SourceResult<MultiStep>,
     mut stop: impl FnMut(&Frame) -> bool,
 ) -> SourceResult<Vec<Frame>> {
     engine
         .isolate(|engine| {
             let mut frames = vec![];
-            for frame in layout_remaining(regions, state, |regions, state| {
-                step(engine, regions, state)
-            }) {
-                let frame = frame?;
+            while let Some(current) = state.take() {
+                regions.next();
+                let MultiStep { frame, next, .. } = step(engine, regions, &current)?;
                 let done = stop(&frame);
                 frames.push(frame);
                 if done {
                     break;
                 }
+                state = next;
             }
             Ok(frames)
         })
@@ -266,12 +203,16 @@ fn layout_content_step(
             check_expansion(regions, content.span())?;
 
             let flow = prepare_flow(
-                &mut engine,
+                engine.world,
+                engine.library,
+                engine.introspector.into_raw(),
+                engine.traced,
+                TrackedMut::reborrow_mut(&mut engine.sink),
+                engine.route.track(),
                 content,
                 locator,
                 styles,
-                column.width(regions),
-                regions.full(),
+                Size::new(column.width(regions), regions.full),
                 regions.expand.x,
             )?;
             (flow, None)
@@ -285,118 +226,10 @@ fn layout_content_step(
     Ok(MultiStep::new(frame, next))
 }
 
-/// The regions that a multi-region layout already produced frames for.
-///
-/// Allows reconstructing the regions the whole layout would have been laid out
-/// into, for layouts that can't proceed region by region.
-#[derive(Debug, Clone, Default, Hash)]
-pub(crate) struct RegionHistory {
-    /// The full height of the first region.
-    full: Abs,
-    /// The heights of the regions, in order.
-    heights: Vec<Abs>,
-}
-
-impl RegionHistory {
-    /// The number of regions.
-    pub fn len(&self) -> usize {
-        self.heights.len()
-    }
-
-    /// The history with the first of the `regions` added to it.
-    pub fn then(&self, regions: Regions) -> Self {
-        let mut heights = self.heights.clone();
-        heights.push(regions.height());
-        let full = if self.heights.is_empty() { regions.full() } else { self.full };
-        Self { full, heights }
-    }
-
-    /// The regions starting with the first region in the history, followed by
-    /// the given `regions`.
-    pub fn regions<'a>(
-        &self,
-        regions: Regions<'a>,
-        buf: &'a mut Followup,
-    ) -> Regions<'a> {
-        let Some((&first, rest)) = self.heights.split_first() else {
-            return regions;
-        };
-        let current = std::iter::once(regions.height());
-        *buf = regions.followup().prepend(rest.iter().copied().chain(current));
-        Regions::new(
-            Size::new(regions.width(), first),
-            self.full,
-            &[],
-            None,
-            regions.expand,
-        )
-        .with_followup(buf)
-    }
-}
-
 /// The cached, internal implementation of [`layout_fragment`].
 #[comemo::memoize]
 #[expect(clippy::too_many_arguments)]
 fn layout_fragment_impl(
-    world: Tracked<dyn World + '_>,
-    library: &LazyHash<Library>,
-    introspector: Tracked<dyn Introspector + '_>,
-    traced: Tracked<Traced>,
-    sink: TrackedMut<Sink>,
-    route: Tracked<Route>,
-    content: &Content,
-    locator: Tracked<Locator>,
-    styles: StyleChain,
-    regions: Regions,
-) -> SourceResult<Fragment> {
-    layout_fragment_inner(
-        world,
-        library,
-        introspector,
-        traced,
-        sink,
-        route,
-        content,
-        locator,
-        styles,
-        regions,
-    )
-}
-
-/// The cached, internal implementation of [`layout_fragment_tracked`].
-#[comemo::memoize]
-#[expect(clippy::too_many_arguments)]
-fn layout_fragment_tracked_impl(
-    world: Tracked<dyn World + '_>,
-    library: &LazyHash<Library>,
-    introspector: Tracked<dyn Introspector + '_>,
-    traced: Tracked<Traced>,
-    sink: TrackedMut<Sink>,
-    route: Tracked<Route>,
-    content: &Content,
-    locator: Tracked<Locator>,
-    styles: StyleChain,
-    regions: Tracked<Regions>,
-) -> SourceResult<Fragment> {
-    let link = RegionsLink::new(regions);
-    layout_fragment_inner(
-        world,
-        library,
-        introspector,
-        traced,
-        sink,
-        route,
-        content,
-        locator,
-        styles,
-        Regions::link(&link),
-    )
-}
-
-/// The shared implementation of [`layout_fragment_impl`] and
-/// [`layout_fragment_tracked_impl`].
-#[expect(clippy::too_many_arguments)]
-fn layout_fragment_inner(
     world: Tracked<dyn World + '_>,
     library: &LazyHash<Library>,
     introspector: Tracked<dyn Introspector + '_>,
@@ -422,36 +255,24 @@ fn layout_fragment_inner(
         route: Route::extend(route),
     };
 
-    engine.route.check_layout_depth().at(content.span())?;
-
-    let mut kind = FragmentKind::Block;
-    let arenas = Arenas::default();
-    let children = (engine.library.routines.realize)(
-        RealizationKind::Fragment { kind: &mut kind },
+    let flow = prepare(
         &mut engine,
-        &mut locator,
-        &arenas,
         content,
-        styles,
-    )?;
-
-    layout_flow(
-        &mut engine,
-        &children,
         &mut locator,
         styles,
-        regions,
-        ColumnOptions::single(),
-        kind.into(),
-    )
+        regions.base(),
+        regions.expand.x,
+    )?;
+    let config = configuration(styles, regions, ColumnOptions::single(), flow.mode);
+    layout_prepared_flow(&mut engine, &flow, &locator, styles, &config, regions)
 }
 
 /// Ensures that the regions are finite along the axes content is expanded to.
 fn check_expansion(regions: Regions, span: Span) -> SourceResult<()> {
-    if regions.expand.x && !regions.width().is_finite() {
+    if regions.expand.x && !regions.size.x.is_finite() {
         bail!(span, "cannot expand into infinite width");
     }
-    if regions.expand.y && !regions.is_finite() {
+    if regions.expand.y && !regions.size.y.is_finite() {
         bail!(span, "cannot expand into infinite height");
     }
     Ok(())
@@ -491,6 +312,55 @@ pub(super) struct PreparedFlow {
     region_locators: usize,
 }
 
+impl PreparedFlow {
+    /// Collects realized children for a flow into columns with the given
+    /// base size (see [`Regions::base`]) and horizontal expansion. The
+    /// children's styles are stored relative to the given styles.
+    fn new(
+        engine: &mut Engine,
+        children: &[Pair],
+        locator: &mut SplitLocator,
+        styles: StyleChain,
+        base: Size,
+        expand: bool,
+        mode: FlowMode,
+    ) -> SourceResult<Self> {
+        let children =
+            collect(engine, children, locator.next(&()), styles, base, expand, mode)?;
+        Ok(Self {
+            children,
+            mode,
+            region_locators: locator.count(&()),
+        })
+    }
+}
+
+/// Realizes and collects content for a flow into columns with the given base
+/// size and horizontal expansion.
+fn prepare(
+    engine: &mut Engine,
+    content: &Content,
+    locator: &mut SplitLocator,
+    styles: StyleChain,
+    base: Size,
+    expand: bool,
+) -> SourceResult<PreparedFlow> {
+    engine.route.check_layout_depth().at(content.span())?;
+
+    let mut kind = FragmentKind::Block;
+    let arenas = Arenas::default();
+    let children = (engine.library.routines.realize)(
+        RealizationKind::Fragment { kind: &mut kind },
+        engine,
+        locator,
+        &arenas,
+        content,
+        styles,
+    )?;
+
+    PreparedFlow::new(engine, &children, locator, styles, base, expand, kind.into())
+}
+
 /// Where a [`PreparedFlow`] continues.
 #[derive(Clone)]
 pub(super) struct FlowState {
@@ -500,40 +370,11 @@ pub(super) struct FlowState {
     region: usize,
 }
 
-/// Realizes and collects content for layout with [`layout_flow_step`].
-///
-/// This performs the same preparation as [`layout_fragment_impl`] for a flow
-/// into regions with the given column width, full height, and horizontal
-/// expansion.
-fn prepare_flow(
-    engine: &mut Engine,
-    content: &Content,
-    locator: Tracked<Locator>,
-    styles: StyleChain,
-    width: Abs,
-    full: Abs,
-    expand: bool,
-) -> SourceResult<Arc<PreparedFlow>> {
-    prepare_flow_impl(
-        engine.world,
-        engine.library,
-        engine.introspector.into_raw(),
-        engine.traced,
-        TrackedMut::reborrow_mut(&mut engine.sink),
-        engine.route.track(),
-        content,
-        locator,
-        styles,
-        width,
-        full,
-        expand,
-    )
-}
-
-/// The cached, internal implementation of [`prepare_flow`].
+/// Realizes and collects content for layout with [`layout_flow_step`], like
+/// [`layout_fragment`] does.
 #[comemo::memoize]
 #[expect(clippy::too_many_arguments)]
-fn prepare_flow_impl(
+fn prepare_flow(
     world: Tracked<dyn World + '_>,
     library: &LazyHash<Library>,
     introspector: Tracked<dyn Introspector + '_>,
@@ -543,8 +384,7 @@ fn prepare_flow_impl(
     content: &Content,
     locator: Tracked<Locator>,
     styles: StyleChain,
-    width: Abs,
-    full: Abs,
+    base: Size,
     expand: bool,
 ) -> SourceResult<Arc<PreparedFlow>> {
     let introspector = Protected::from_raw(introspector);
@@ -558,55 +398,17 @@ fn prepare_flow_impl(
         sink,
         route: Route::extend(route),
     };
-
-    engine.route.check_layout_depth().at(content.span())?;
-
-    let mut kind = FragmentKind::Block;
-    let arenas = Arenas::default();
-    let children = (engine.library.routines.realize)(
-        RealizationKind::Fragment { kind: &mut kind },
-        &mut engine,
-        &mut locator,
-        &arenas,
-        content,
-        styles,
-    )?;
-
-    let mode = FlowMode::from(kind);
-    // The children's styles are stored relative to the styles, since the flow
-    // is laid out with them in later calls, after the realized content is gone.
-    let children = collect(
-        &mut engine,
-        &children,
-        locator.next(&()),
-        styles,
-        Size::new(width, full),
-        expand,
-        mode,
-    )?;
-
-    Ok(Arc::new(PreparedFlow {
-        children,
-        mode,
-        region_locators: locator.count(&()),
-    }))
+    prepare(&mut engine, content, &mut locator, styles, base, expand).map(Arc::new)
 }
 
-/// Lays out the next region of a prepared flow.
+/// Lays out the next region of a prepared flow. Returns the frame for the first
+/// of the `regions` and, if the flow isn't done, where it continues.
 ///
-/// Must be called with the same locator, styles, and column options the flow
-/// was prepared with. The regions should have the same width, too: The lines
-/// of the flow's paragraphs were already laid out with it. In regions with a
-/// different width, they keep their width and are only aligned, while
-/// everything else is laid out with the regions' width. (Breakable blocks use
-/// this to give a frame the same width as earlier ones.) Like
-/// [`layout_fragment`], the caller must ensure that the first regions are
-/// finite along expanded axes. Returns the frame for the first of the
-/// `regions` and, if the flow isn't done, where it continues. Unlike
-/// [`layout_flow`], this cannot restart earlier regions, since they were
-/// already handed out. Breakable children whose last frame turns out to be
-/// inconsistent with the actual regions continue from the state that frame was
-/// laid out with instead.
+/// Must be called with the locator, styles, and column options the flow was
+/// prepared with. In regions of another width, the lines of the flow's
+/// paragraphs keep the width they were prepared with and are only aligned.
+/// Unlike [`layout_prepared_flow`], this can't restart at an earlier region,
+/// since it was already handed out.
 fn layout_flow_step(
     engine: &mut Engine,
     prepared: &PreparedFlow,
@@ -616,31 +418,20 @@ fn layout_flow_step(
     regions: Regions,
     column: ColumnOptions,
 ) -> SourceResult<(Frame, Option<FlowState>)> {
-    let config = configuration(styles, regions, column, prepared.mode);
-
     let link = LocatorLink::new(locator);
-    let base = Locator::link(&link);
-    let region_locator = base
-        .relayout()
-        .split()
-        .nth(&(), prepared.region_locators + state.map_or(0, |s| s.region));
-
-    let cx = FlowCx {
-        children: &prepared.children,
-        styles,
-        locator: base,
-    };
-
+    let locator = Locator::link(&link).split();
     let region = state.map_or(0, |s| s.region);
     let mut work =
         state.map_or_else(|| Work::new(prepared.children.len()), |s| s.work.clone());
+    let config = configuration(styles, regions, column, prepared.mode);
     let predictions = Predictions::disabled();
-    let frame = match compose(
+    let frame = match compose_region(
         engine,
+        prepared,
         &mut work,
-        &cx,
+        &locator,
+        styles,
         &config,
-        region_locator,
         regions,
         region,
         &predictions,
@@ -662,63 +453,61 @@ pub fn layout_flow<'a>(
     children: &[Pair<'a>],
     locator: &mut SplitLocator<'a>,
     shared: StyleChain<'a>,
-    mut regions: Regions,
+    regions: Regions,
     column: ColumnOptions,
     mode: FlowMode,
 ) -> SourceResult<Fragment> {
     // Prepare configuration that is shared across the whole flow.
     let config = configuration(shared, regions, column, mode);
-
-    // Collect the elements into pre-processed children. These are much easier
-    // to handle than the raw elements.
-    let collect_locator = locator.next(&());
-    let base_locator = collect_locator.relayout();
-    let base_styles = base_styles(children, shared);
-    let children = collect(
+    let styles = base_styles(children, shared);
+    let base = Size::new(config.columns.width, regions.full);
+    let flow = PreparedFlow::new(
         engine,
         children,
-        collect_locator,
-        base_styles,
-        Size::new(config.columns.width, regions.full()),
+        locator,
+        styles,
+        base,
         regions.expand.x,
         mode,
     )?;
+    layout_prepared_flow(engine, &flow, locator, styles, &config, regions)
+}
 
-    let cx = FlowCx {
-        children: &children,
-        styles: base_styles,
-        locator: base_locator,
-    };
-
-    let mut work = Work::new(children.len());
+/// Lays out a prepared flow into regions, all at once. Unlike
+/// [`layout_flow_step`], this can restart at an earlier region.
+fn layout_prepared_flow(
+    engine: &mut Engine,
+    flow: &PreparedFlow,
+    locator: &SplitLocator,
+    styles: StyleChain,
+    config: &Config,
+    mut regions: Regions,
+) -> SourceResult<Fragment> {
+    let mut work = Work::new(flow.children.len());
     let mut finished = vec![];
 
     // State for restarting at an earlier region: What was learned about the
-    // space in upcoming subregions and, per region, the locator as well as the
-    // work and regions at its start. The side effects of each region's layout
-    // are only recorded once no restart can discard it anymore.
+    // space in upcoming subregions and, per region, the work and regions at
+    // its start. The side effects of each region's layout are only recorded
+    // once no restart can discard it anymore.
     let mut predictions = Predictions::default();
-    let mut locators = vec![];
     let mut checkpoints = vec![];
     let mut sinks = vec![];
 
     // This loop runs once per region produced by the flow layout.
     loop {
         let index = finished.len();
-        if index == locators.len() {
-            locators.push(locator.next(&()));
-        }
         checkpoints.truncate(index);
         checkpoints.push((work.clone(), regions));
 
-        let locator = locators[index].relayout();
         let (result, sink) = engine.isolate(|engine| {
-            compose(
+            compose_region(
                 engine,
+                flow,
                 &mut work,
-                &cx,
-                &config,
                 locator,
+                styles,
+                config,
                 regions,
                 index,
                 &predictions,
@@ -757,6 +546,31 @@ pub fn layout_flow<'a>(
     }
 
     Ok(Fragment::frames(finished))
+}
+
+/// Composes region `index` of a prepared flow, continuing with the `work`.
+///
+/// The `locator` and `styles` must be the ones the flow was prepared with.
+#[expect(clippy::too_many_arguments)]
+fn compose_region(
+    engine: &mut Engine,
+    flow: &PreparedFlow,
+    work: &mut Work,
+    locator: &SplitLocator,
+    styles: StyleChain,
+    config: &Config,
+    regions: Regions,
+    index: usize,
+    predictions: &Predictions,
+) -> Result<Frame, RelayoutStop<Infallible>> {
+    // The children's locators only need the link of the flow's locator.
+    let cx = FlowCx {
+        children: &flow.children,
+        styles,
+        locator: locator.nth(&(), 0),
+    };
+    let locator = locator.nth(&(), flow.region_locators + index);
+    compose(engine, work, &cx, config, locator, regions, index, predictions)
 }
 
 /// Determine the flow's configuration.
@@ -958,42 +772,43 @@ impl Predictions {
         Self { disabled: true, ..Self::default() }
     }
 
-    /// Whether any predictions exist for subregions from `first` onwards.
-    fn affects(&self, first: usize) -> bool {
-        self.heights.range(first..).next().is_some()
-    }
-
-    /// Applies the predictions to followup regions whose first one is
-    /// subregion `first`: To the heights in the backlog and to the predicted
-    /// remaining heights of the repetitions of the final region after it,
-    /// which are extended if necessary. The repetitions are not moved into
-    /// the backlog, since that would make moving on to them count as progress
-    /// (see [`Regions::with_predicted`]).
-    fn apply(&self, followup: &mut Followup, first: usize) {
+    /// Applies the predictions to the regions after the first of the
+    /// `regions`, the first of which is subregion `first`: To the heights in
+    /// the backlog and to the predicted remaining heights of the repetitions of
+    /// the final region after it, which are added to the backlog as predicted
+    /// repetitions if necessary. They are not added as other backlog regions,
+    /// since that would make moving on to them count as progress (see
+    /// [`Regions::predicted`]).
+    fn apply<'a>(
+        &self,
+        regions: Regions<'a>,
+        first: usize,
+        buf: &'a mut Vec<Abs>,
+    ) -> Regions<'a> {
         let Some((&max, _)) = self.heights.range(first..).next_back() else {
-            return;
+            return regions;
         };
-        let Followup { backlog, predicted, last } = followup;
 
-        let start = first + backlog.len();
-        if let Some(last) = *last
-            && max >= start
-            && predicted.len() <= max - start
-        {
-            predicted.resize(max - start + 1, last);
+        buf.clear();
+        buf.extend_from_slice(regions.backlog);
+        let mut predicted = regions.predicted;
+        if let Some(last) = regions.last {
+            while first + buf.len() <= max {
+                buf.push(last);
+                predicted += 1;
+            }
         }
 
         for (&subregion, &learned) in self.heights.range(first..) {
-            let i = subregion - first;
-            let height = match i.checked_sub(backlog.len()) {
-                None => &mut backlog[i],
-                Some(j) => match predicted.get_mut(j) {
-                    Some(height) => height,
-                    None => break,
-                },
-            };
-            height.set_min(learned);
+            match buf.get_mut(subregion - first) {
+                Some(height) => height.set_min(learned),
+                None => break,
+            }
         }
+
+        let mut regions = Regions { backlog: buf, predicted, ..regions };
+        regions.trim_predicted();
+        regions
     }
 }
 
@@ -1029,11 +844,11 @@ impl ColumnOptions {
     /// given regions.
     fn resolve(&self, regions: Regions) -> (usize, Abs, Abs) {
         let mut count = self.count.get();
-        if !regions.width().is_finite() {
+        if !regions.size.x.is_finite() {
             count = 1;
         }
         let gutter = self.gutter.relative_to(regions.base().x);
-        let width = (regions.width() - gutter * (count - 1) as f64) / count as f64;
+        let width = (regions.size.x - gutter * (count - 1) as f64) / count as f64;
         (count, gutter, width)
     }
 }

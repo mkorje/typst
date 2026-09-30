@@ -8,7 +8,7 @@ use typst_library::foundations::{Content, Packed, Resolve, StyleChain, StyledEle
 use typst_library::introspection::Locator;
 use typst_library::layout::{
     Abs, AlignElem, Axes, Axis, Dir, FixedAlignment, Fr, Frame, HElem, MultiState,
-    MultiStep, Point, Regions, Spacing, StackChild, StackElem, VElem,
+    MultiStep, Point, Regions, Size, Spacing, StackChild, StackElem, VElem,
 };
 use typst_syntax::Span;
 use typst_utils::{Get, Numeric};
@@ -81,19 +81,12 @@ where
 struct StackState {
     /// The index of the child to continue with.
     child: usize,
-    /// How to continue with the child.
-    resume: Resume,
+    /// Where the child continues if it broke across regions. If it is
+    /// `None`, the child is laid out from the start, and the spacing before
+    /// it was already laid out.
+    inner: Option<MultiState>,
     /// The local hashes of the children's locators (see [`Locator::local`]).
     locals: Arc<[u128]>,
-}
-
-/// How a stack continues with a child.
-enum Resume {
-    /// The child is laid out from the start, directly in the region. The
-    /// spacing before it was already laid out.
-    Start,
-    /// The child broke across regions and continues from the given state.
-    Continue(MultiState),
 }
 
 /// Layout multiple cells like a stack, one region at a time. Requires only the
@@ -174,8 +167,8 @@ where
     let mut deferred = None;
 
     for (i, child) in (start..).zip(children) {
-        // How to lay out the child if it's the one we continue with.
-        let resume = if i == start { state.map(|s| &s.resume) } else { None };
+        // Where the child continues if it's the one we continue with.
+        let resume = if i == start { state.map(|s| s.inner.as_ref()) } else { None };
 
         let step = match child {
             StackLayoutChild::StackChild(StackChild::Spacing(kind)) => {
@@ -236,7 +229,7 @@ where
             let frame = layouter.finish_region()?;
             let next = StackState {
                 child: i,
-                resume: Resume::Continue(next),
+                inner: Some(next),
                 locals: locals.clone(),
             };
             return Ok(MultiStep { frame, next: Some(MultiState::new(next)), ahead });
@@ -274,8 +267,8 @@ struct StackLayouter<'a> {
     regions: Regions<'a>,
     /// Whether the stack itself should expand to fill the region.
     expand: Axes<bool>,
-    /// The regions before we started using up the current region.
-    initial: Regions<'a>,
+    /// The initial size of the current region before we started subtracting.
+    initial: Size,
     /// The generic size used by the frames for the current region.
     used: GenericSize<Abs>,
     /// The sum of fractions in the current region.
@@ -318,7 +311,7 @@ impl<'a> StackLayouter<'a> {
             styles,
             regions,
             expand,
-            initial: regions,
+            initial: regions.size,
             used: GenericSize::zero(),
             fr: Fr::zero(),
             items: vec![],
@@ -333,12 +326,10 @@ impl<'a> StackLayouter<'a> {
                 let resolved = v
                     .resolve(self.styles)
                     .relative_to(self.regions.base().get(self.axis));
-                let limited = match self.axis {
-                    Axis::X => resolved.min(self.regions.width()),
-                    Axis::Y => self.regions.limited(resolved),
-                };
+                let remaining = self.regions.size.get_mut(self.axis);
+                let limited = resolved.min(*remaining);
                 if self.dir.axis() == Axis::Y {
-                    self.regions.consume(limited);
+                    *remaining -= limited;
                 }
                 self.used.main += limited;
                 self.items.push(StackItem::Absolute(resolved));
@@ -350,27 +341,25 @@ impl<'a> StackLayouter<'a> {
         }
     }
 
-    /// Prepares for laying out a block or custom layouter child, given how to
-    /// resume it.
+    /// Prepares for laying out a block or custom layouter child, which is
+    /// `resume`d from the given state if the stack continues with it.
     ///
-    /// Lays out the `deferred` spacing and returns the state to lay out the
-    /// child from, if it should be laid out in this region. Returns `None` if
-    /// the region is full and the child must be laid out in the next one.
+    /// Otherwise, lays out the `deferred` spacing. Returns the state to lay
+    /// out the child from, if it should be laid out in this region. Returns
+    /// `None` if the region is full and the child must be laid out in the next
+    /// one.
     fn prepare<'s>(
         &mut self,
         deferred: &mut Option<Spacing>,
-        resume: Option<&'s Resume>,
+        resume: Option<Option<&'s MultiState>>,
     ) -> Option<Option<&'s MultiState>> {
-        match resume {
-            Some(Resume::Start) => Some(None),
-            Some(Resume::Continue(inner)) => Some(Some(inner)),
-            None => {
-                if let Some(kind) = deferred.take() {
-                    self.layout_spacing(kind);
-                }
-                if self.regions.is_full() { None } else { Some(None) }
-            }
+        if resume.is_some() {
+            return resume;
         }
+        if let Some(kind) = deferred.take() {
+            self.layout_spacing(kind);
+        }
+        if self.regions.is_full() { None } else { Some(None) }
     }
 
     /// Finishes the region before laying out the `child`-th child, which then
@@ -381,7 +370,7 @@ impl<'a> StackLayouter<'a> {
         locals: Arc<[u128]>,
     ) -> SourceResult<MultiStep> {
         let frame = self.finish_region()?;
-        let next = StackState { child, resume: Resume::Start, locals };
+        let next = StackState { child, inner: None, locals };
         Ok(MultiStep::new(frame, Some(MultiState::new(next))))
     }
 
@@ -391,7 +380,7 @@ impl<'a> StackLayouter<'a> {
         // Grow our size, shrink the region and save the frame for later.
         let specific_size = frame.size();
         if self.dir.axis() == Axis::Y {
-            self.regions.consume(specific_size.y);
+            self.regions.size.y -= specific_size.y;
         }
 
         let generic_size = match self.axis {
@@ -409,23 +398,17 @@ impl<'a> StackLayouter<'a> {
     fn finish_region(&mut self) -> SourceResult<Frame> {
         // Determine the size of the stack in this region depending on whether
         // the region expands.
-        let used = self.used.into_axes(self.axis);
-        let initial = self.initial;
-        let mut size = initial.fit(used, self.expand);
+        let mut size = self
+            .expand
+            .select(self.initial, self.used.into_axes(self.axis))
+            .min(self.initial);
 
-        // Expand fully if there are fr spacings. The remaining space only
-        // matters then.
-        let mut remaining = Abs::zero();
-        if self.fr.get() > 0.0 {
-            let full = match self.axis {
-                Axis::X => initial.width(),
-                Axis::Y => initial.height(),
-            };
-            remaining = full - self.used.main;
-            if full.is_finite() {
-                self.used.main = full;
-                size.set(self.axis, full);
-            }
+        // Expand fully if there are fr spacings.
+        let full = self.initial.get(self.axis);
+        let remaining = full - self.used.main;
+        if self.fr.get() > 0.0 && full.is_finite() {
+            self.used.main = full;
+            size.set(self.axis, full);
         }
 
         if !size.is_finite() {

@@ -14,10 +14,10 @@ impl<'a> GridLayouter<'a> {
     ///
     /// 1. If we could progress at the top of the region, that indicates the
     ///    region has a backlog, or (if we're at the first region) a region break
-    ///    is at all possible (`regions.last()` is `Some()`), so that's sufficient.
+    ///    is at all possible (`regions.last` is `Some()`), so that's sufficient.
     ///
     /// 2. Otherwise, we may progress if another region break is possible
-    ///    (`regions.last()` is still `Some()`) and non-repeating rows have been
+    ///    (`regions.last` is still `Some()`) and non-repeating rows have been
     ///    placed, since that means the space they occupy will be available in the
     ///    next region.
     #[inline]
@@ -26,7 +26,7 @@ impl<'a> GridLayouter<'a> {
         // footers... we can also change 'initial_after_repeats' to stop being
         // calculated if there were any non-repeating footers.
         self.current.could_progress_at_top
-            || self.regions.last().is_some() && self.used_since_repeats()
+            || self.regions.last.is_some() && self.used_since_repeats()
     }
 
     pub fn place_new_headers(
@@ -224,7 +224,7 @@ impl<'a> GridLayouter<'a> {
         // re-calculated until the end.
         let mut skipped_region = false;
         while self.unbreakable_rows_left == 0
-            && !self.regions.fits(header_height)
+            && !self.regions.size.y.fits(header_height)
             && self.may_progress_with_repeats()
         {
             // Advance regions without any output until we can place the
@@ -380,7 +380,7 @@ impl<'a> GridLayouter<'a> {
         )?;
 
         while self.unbreakable_rows_left == 0
-            && !self.regions.fits(header_height)
+            && !self.regions.size.y.fits(header_height)
             && self.may_progress_with_repeats()
         {
             // Note that, after the first region skip, the new headers will go
@@ -483,7 +483,7 @@ impl<'a> GridLayouter<'a> {
             .height;
         let mut skipped_region = false;
         while self.unbreakable_rows_left == 0
-            && !self.regions.fits(footer_height)
+            && !self.regions.size.y.fits(footer_height)
             && self.regions.may_progress()
         {
             // Advance regions without any output until we can place the

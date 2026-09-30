@@ -3996,3 +3996,178 @@ Results of A:
 1. Rowspans laid out one region at a time (§57.1).
 2. Lockstep for rows with rowspan cells, with the rowspan's continuation as a cell of its last row. Replace the rowspan simulation where possible.
 3. Once every frame is final when its region is finished, remove `MultiStep::ahead`, the step window and the recomputation (§55).
+
+# 58. What tracked regions buy (benchmark)
+
+**Variant:** block steps are memoized on the materialized regions (hashed like any argument, as on `main`), instead of tracking the questions asked about them. Footnote entries use `layout_fragment` instead of `layout_fragment_tracked`. Nothing else changes.
+
+**Output:**
+* Corpus: identical in all 15,382 documents.
+* Tests: 1 of 3,796 changes. In `grid-subheaders-too-large-repeating-orphan-before-auto`, too-large repeating headers spill over three pages instead of one. Materializing changes how the repeated final region is represented, and the grid's exact `may_progress` then sees progress.
+
+**Full compiles** (hyperfine, untracked ÷ tracked):
+
+| Documents | Time | Peak memory |
+|---|---|---|
+| Nested blocks (`nest-*`, depth series) | 0.49–0.76× | 0.54–0.63× |
+| Tables | 0.91–0.95× | 0.89–0.98× |
+| Lists, stacks, small tables, mixed nesting | 0.87–0.98× | 0.88–0.95× |
+| Everyday documents | 0.99–1.00× | 0.98–1.02× |
+| Whole document in a grid cell (`bigcell-*`) | 1.08–1.09× | 1.21–1.25× |
+| `restart-storm`, `float-storm`, rowspans | 1.02–1.09× | 1.01–1.05× |
+
+**Incremental compiles** (34 documents, `typst watch`, geometric mean of untracked ÷ tracked):
+* By edit: trivial 1.00, end 0.91, top 0.95, inside 0.84; peak memory 0.96.
+* Tracking is faster for long footnoted content in blocks and cells:
+  * `block-fn`: top 1.64, inside 1.47;
+  * `bigcell-*`: top 1.12–1.42, memory 1.33–1.39;
+  * `fn-storm` and `list-fn`: top 1.11–1.12.
+* It's slower for nesting (top and inside 0.47–0.56) and tables (end 0.79–0.84).
+
+**Why.** Counting block step calls and executions shows that tracking does what it was designed for. Regions that differ but give the same answers are frequent: tracking avoids 38–77% of step executions (`table-400`: 5,673 instead of 10,349; `bigcell-600`: 3,655 instead of 15,787). But a step execution is cheap, since it composes one region whose lines are memoized separately. Tracking pays on every question instead:
+* each question is a recorded comemo call;
+* in nested content, it is forwarded and recorded again at every enclosing level;
+* every cache hit asks all recorded questions again to validate them.
+
+`nest-8` forwards 440,000 questions to save 544 executions. Tracking only wins where re-executing is expensive and frequent: long content with footnotes inside a cell or block, laid out again at slightly different heights.
+
+# 59. Floating-point exactness dropped, tracked regions removed
+
+The user decided that output doesn't need to be byte-identical down to floating-point rounding, and that tracked regions go (§58).
+
+## 59.1 Floating-point exactness
+
+Code that existed only to reproduce `main`'s arithmetic bit for bit:
+* **`Regions::may_progress`** compared the remaining height of a repetition with the final region's height with exact `!=` (inherited from `main`). It now uses `approx_eq`.
+* **The grid's log of consumed heights** was replayed when restoring a snapshot and for `height_after_repeats`, so that the heights were subtracted in the same order. Now the grid keeps only the sum `used`: restoring consumes it at once, and `height_after_repeats` is `initial - used_after_repeats`.
+* **Header and footer heights were subtracted one after the other,** since subtracting their sum rounded differently. Lockstep rows now keep their sum (`PendingRow::repeats`), `followup_without_repeats` takes it, and `repeats_height()` computes it in one place.
+
+Output:
+* Corpus (15,382), stress documents (23,060) and grid stress documents (2 × 2,000): all identical.
+* One test changes: in `grid-header-too-large-repeating-orphan-with-footer`, a repeating header that's too large filled 4 pages, because an exact comparison kept reporting progress until the rounding happened to match. It now fills 2 pages, and the extra pages had only repeated the header.
+
+## 59.2 Tracked regions removed
+
+`Regions` is a plain value again: the width, the first region's remaining and full height, and the regions after it. Those are a backlog, then predicted repetitions of the final region (§49, needed for restarts), then the final region, repeated. Removed:
+* the derived kind with its interval bounds;
+* `Outer`, `RegionsLink`, `Regions::link` and the eleven tracked questions;
+* `materialize`, and the special case of `shrink` for derived regions;
+* `layout_fragment_tracked`, whose only caller was footnote entries, which use `layout_fragment` now.
+
+Consequences:
+* **Block steps are memoized on their regions,** hashed like any other argument (`layout_multi_step_impl` takes `Regions`).
+* **Frames are compared exactly again** (`Frame::identical`). The tolerance only absorbed rounding differences between derived regions and their explicit copies, which no longer exist, and the `approx` helpers are gone.
+* **`SpillTarget::available` is always set.** It was only computed when a restart was possible, since reading the height used to be a "blunt question".
+* **The public methods of `Regions` stay** (`fits`, `limited`, `fit`, `fits_next`, `may_progress`, …), so callers didn't change. They're now plain computations on the fields. The distinction between "blunt" and precise questions is gone from their documentation.
+
+`regions.rs` shrinks from 1,096 to 557 lines. Together with §59.1, that's 899 lines removed and 160 added in the crates.
+
+Output:
+* Corpus (15,382), stress documents (23,060), grid stress documents (2 × 2,000), restart cap documents (317) and review reproducers (20): all identical to the build before §59.
+* All 3,796 tests pass. `grid-subheaders-too-large-repeating-orphan-before-auto`, which changed with the untracked variant of §58, is unchanged, because the tolerance of §59.1 covers it.
+
+**Performance against the build before §59:**
+* **Full compiles** (hyperfine, 40 documents):
+  * nesting: 0.49–0.78×;
+  * tables: 0.90–0.96×;
+  * stacks, lists, `nested-mix`: 0.88–0.99×;
+  * everyday documents: within ±1.5%;
+  * slower: `bigcell-*` 1.08–1.10×, one rowspan over 400 rows 1.10×, `rowspan-30` 1.05×, `float-storm` 1.04×.
+* **Peak memory:** nesting 0.54–0.62×, tables 0.89–0.98×, `bigcell` 1.22–1.25×, others within ±4%.
+* **Incremental compiles** (34 documents, geometric means): trivial 1.00, end 0.93, top 0.96, inside 0.85; peak memory 0.96.
+  * Best: nesting, 0.48–0.67×.
+  * Worst: long footnoted content in blocks and cells: `block-fn` top 1.59 and inside 1.45; `bigcell-*` top 1.20–1.30; `fn-storm` and `columns-fn` top 1.13.
+  * This is the pattern of §58: pages are laid out again at slightly different heights, which tracked steps survived.
+
+## 59.3 Review fixes
+
+* **Content laid out ahead under relative insets.** `pad::grow_ahead` resolved a relative vertical inset against the current region and added it to every height laid out ahead. But `grow` sizes each frame with the inverse `(h + abs) / (1 - rel)`, so a child using 180pt of a later 200pt region under 10% padding was declared as 190pt instead of 200pt. The spill could then accept a region that doesn't fit. Both now use the same function (`grown`), which also no longer needs the regions. A unit test checks that a declared height grows exactly like the frame.
+* **Side effects of a rejected recomputation.** `MultiSpill::redo` laid the steps out again directly into the engine. When the recomputation was rejected and the spill continued from the old state (no restart possible), its introspections, delayed errors and values were recorded anyway. The recomputation now runs isolated, and its sink is committed only if the spill continues from the new state, following §54.3. If it does, some side effects of the replaced layout may be recorded twice, as before.
+
+Output is identical in the corpus (15,382), stress documents (23,060) and grid stress documents (4,000). All 3,796 tests pass.
+
+# 60. Simplification pass
+
+The user asked for the code of the last two commits to get the same treatment as `block.rs`: fewer functions, simpler models, less code. Every change here was validated to leave output unchanged, except where noted.
+
+## 60.1 Blocks
+
+`layout_multi_block` is one step function for every region. It:
+* reconstructs the regions of a block with a fixed height from its `RegionHistory`;
+* lays out the body with `step_body`;
+* for auto-width content bodies, looks ahead once with `peek_remaining` to find a consistent width;
+* detects orphans with the same peek.
+
+Removed: `layout_multi_block_first`, `layout_rest` and `finish_multi_frame`, plus the separate first-region and continuation paths. `finish_frame` decorates both single and multi-region frames. `block.rs` went from 749 to 562 lines.
+
+## 60.2 Flow driver
+
+Eager layout and one-region-at-a-time layout now share the prepared flow:
+* `PreparedFlow::new` collects realized children.
+* `prepare` realizes content and calls it. It backs both `layout_fragment_impl` and the memoized `prepare_flow` of content steps.
+* `layout_flow` (the root flow) calls `PreparedFlow::new` directly.
+* `layout_prepared_flow` runs the restart loop.
+* `layout_flow_step` lays out one region and can't restart.
+* Both lay out a region with `compose_region`. Region locators come from `SplitLocator::nth`.
+
+Removed: `layout_steps`, `layout_remaining`, `layout_fragment_tracked`, `layout_fragment_inner` and the `prepare_flow` wrapper. `peek_remaining` is a plain loop.
+
+Two bugs came up while validating, and both are fixed:
+* **Footnote styles.** The root flow built its configuration from the children's base styles instead of the page's styles. So footnote entries inherited a document-wide `#show: align.with(center)`: 9 corpus documents (touying) changed. Callers now build the `Config` once, as before. Test: `footnote-entry-outside-show-everything`.
+* **Restart target.** The restart loop divided the subregion by the requested column count, instead of the resolved one, which is 1 in infinite width.
+
+**Performance pitfall.** Merging the preparation code made `prepare_flow` take the whole `Regions` as a memo key. The key then included the predicted regions after the first one, so the first step of almost every cell missed the cache. Output was identical, but tables, rowspans and big cells were 1.6–2.4× slower. The key is the column base size and horizontal expansion again, which is all that `collect` reads.
+
+## 60.3 Regions
+
+`Regions` is `main`'s struct again: public `size`, `expand`, `full`, `backlog` and `last`, plus one new field, `predicted: usize`. It counts the entries at the end of the backlog that are predicted repetitions of `last`:
+* their full height is `last`;
+* `has_backlog()` doesn't count them;
+* `may_progress` only reports progress into them if the current height differs from `last` (§49.3).
+
+Readers of the heights see predictions without special handling. Code that creates predictions (`Predictions::apply`, `RegionsDesc::followed_by`) calls `trim_predicted`, so that a prediction equal to `last` isn't one.
+
+What went:
+* the accessor API from before §59: `width`, `height`, `consume`, `limit`, `limited`, `fit`, `fits`, `fits_next`, `at_least`, `with_*`, `shrink`, `backlog()`, `followup`;
+* the `Future` and `Slot` machinery;
+* the `Followup` type in the library. The grid keeps a small owned copy for its measurement regions.
+
+Most call sites read as on `main` again, and `pad` and `breakable_pod` use `main`'s `map` and `shrink_multiple`. `regions.rs` went from 557 to 238 lines.
+
+## 60.4 Spills
+
+Verifying the last step and recomputing the steps that laid out content ahead were two code paths with two restart rules. Now both are `settle(start)`: it lays out the steps from `start` again with the actual regions, unless none of them changes. If a frame changes, it restarts or keeps the old state. A spill settles:
+1. the last step;
+2. then, if the content laid out ahead into the region still doesn't fit, the steps from the earliest one that laid it out.
+
+There's one restart rule. The prediction of the region from the first re-laid step is compared with the available height, as verification did before.
+
+**Rejected:** settling all unsettled steps whenever the regions differ. This also lays out content ahead again when it fits, which changes the grid's decisions for that region. 7 of 4,317 grid stress documents changed. One got a page holding only a footnote entry, whose reference had moved to the next page after the region was laid out again for footnotes.
+
+## 60.5 Stacks, lists, grid
+
+* **Stacks:** the `Resume` enum is gone. The state holds `inner: Option<MultiState>`, which is `None` when the child starts afresh after the spacing was already laid out.
+* **Lists:** `BodyStart` is gone. `layout_body` returns the first step and the frame the marker is placed on, keeping `main`'s sticky `first_frame`.
+* **Grid:** the seven lockstep functions are down to four. `lockstep_row` prepares a row. `layout_lockstep_row` lays out its part in the current region, whether it's the first region, with the skip, or a continuation. `step_lockstep_cell` and `is_lockstep_row` stay. The grid's architecture is unchanged (§60.7).
+
+## 60.6 Validation and performance
+
+**Output:**
+* Corpus (15,382), stress documents (23,060) and grid stress documents (4,317): identical to the build before this pass, after the fixes of §60.2.
+* All 3,797 tests pass (one new).
+
+**Full compiles against the build before this pass** (hyperfine, 23 documents):
+* within ±3% for everyday documents, tables, big cells, lists, stacks and footnote and float stress documents;
+* faster: `nest-12` 0.87–0.94×, `cx-span-fn-400` 0.94×, `rowspan-*` 0.97×;
+* slower: `nested-mix` 1.02–1.05×, with 5% more peak memory, which was already the case after the block rewrite.
+
+**Lines in the crates since the build before this pass:** 1,733 removed and 1,053 added. Against `main`, the branch now adds 4,097 lines and removes 1,469, down from 4,912 and 1,604.
+
+## 60.7 What's left: the grid's architecture
+
+The grid remains the least uniform layouter. Its steps resume from snapshots taken between rows, and a region's frame is only final once its rowspans end. So a step can lay out rows into the next region, which is why `MultiStep::ahead` and the spill's window of unsettled steps exist. Removing that needs three changes:
+1. **Rowspans laid out one region at a time** (§57.1), so that frames are final when their region is finished.
+2. **Steps that end at a region break.** `finish_region` stops the step instead of starting the next region. The interrupted row is laid out again from its start in the next region, so the work done before the break must be repeatable (for example, registering rowspans).
+3. **Lockstep for rows with rowspan cells.** Otherwise their later parts are content laid out ahead. This includes measuring a rowspan that ends in the row by continuing its state, and it touches the rowspan simulation.
+
+Then `MultiStep::ahead`, `grow_ahead`, the window in `MultiSpill`, and the grid's `offset`, `discard_until`, `is_final` and `used_in` would go. The output of rowspan-heavy tables would change (§57.1: 39 of 2,000 rowspan simulation documents, mostly identical-looking).

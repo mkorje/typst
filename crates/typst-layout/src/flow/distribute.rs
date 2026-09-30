@@ -77,8 +77,9 @@ pub fn distribute(
         Err(Stop::Restart(restart)) => return Err(RelayoutStop::Restart(restart)),
         Err(Stop::Error(error)) => return Err(RelayoutStop::Error(error)),
     };
+    let region = Region::new(regions.size, regions.expand);
     distributor
-        .finalize(regions, init, forced)
+        .finalize(region, init, forced)
         .map_err(RelayoutStop::Error)
 }
 
@@ -221,7 +222,7 @@ impl<'b> Distributor<'_, 'b, '_, '_, '_> {
 
     /// Mark the amount of height used and reduce the region height accordingly.
     fn use_height(&mut self, amount: Abs) {
-        self.regions.consume(amount);
+        self.regions.size.y -= amount;
         self.used.y += amount;
     }
 
@@ -342,7 +343,7 @@ impl<'b> Distributor<'_, 'b, '_, '_, '_> {
     /// Whether the amount fits into the remaining region, taking into account
     /// column balancing limits.
     pub fn fits(&self, amount: Abs) -> bool {
-        self.regions.fits(amount)
+        self.regions.size.y.fits(amount)
             && self
                 .target
                 // Add elements as long as the balancing target is not reached. By not including
@@ -362,7 +363,13 @@ impl<'b> Distributor<'_, 'b, '_, '_, '_> {
         // following lines grouped by widow/orphan prevention, does not fit into
         // the current region, but does fit into the next region, finish the
         // region.
-        if !self.fits(line.need) && self.regions.fits_next(line.need) {
+        if !self.fits(line.need)
+            && self
+                .regions
+                .iter()
+                .nth(1)
+                .is_some_and(|region| region.y.fits(line.need))
+        {
             return Err(Stop::Finish(Finish::Soft));
         }
 
@@ -408,7 +415,7 @@ impl<'b> Distributor<'_, 'b, '_, '_, '_> {
         // For column balancing, reduce the region size for layout.
         if let Some(lim) = self.target {
             let remaining = lim - self.used.y;
-            pod.limit(remaining);
+            pod.size.y.set_min(remaining);
         }
 
         // Skip directly if the region is already (over)full. `line` and
@@ -419,18 +426,14 @@ impl<'b> Distributor<'_, 'b, '_, '_, '_> {
 
         // Lay out the block.
         let subregion = self.composer.subregion();
-        let (frame, spill, exist_non_empty_frame) = multi.layout(
+        let (frame, spill, orphan) = multi.layout(
             self.composer.engine,
             self.composer.cx,
             pod,
             index,
             subregion,
         )?;
-        if frame.is_empty()
-            && spill.is_some()
-            && exist_non_empty_frame
-            && self.regions.may_progress()
-        {
+        if frame.is_empty() && orphan && self.regions.may_progress() {
             // If the first frame is empty, but there are non-empty frames in
             // the spill, the whole child should be put in the next region to
             // avoid any invisible orphans at the end of this region.
@@ -457,7 +460,7 @@ impl<'b> Distributor<'_, 'b, '_, '_, '_> {
         // For column balancing, reduce the region size for layout.
         if let Some(lim) = self.target {
             let remaining = lim - self.used.y;
-            pod.limit(remaining);
+            pod.size.y.set_min(remaining);
         }
 
         let multi = match &self.composer.cx.children[spill.index] {
@@ -470,7 +473,7 @@ impl<'b> Distributor<'_, 'b, '_, '_, '_> {
         let target = SpillTarget {
             subregion,
             restarts,
-            available: (restarts > 0).then(|| self.regions.height().max(Abs::zero())),
+            available: self.regions.size.y.max(Abs::zero()),
         };
 
         // Skip directly if the region is already (over)full.
@@ -482,10 +485,10 @@ impl<'b> Distributor<'_, 'b, '_, '_, '_> {
         }
 
         // Lay out the spilled remains.
-        let (frame, spill) = spill
+        let (step, spill) = spill
             .layout(multi, self.composer.engine, self.composer.cx, pod, target)?
             .map_err(Stop::Restart)?;
-        self.frame(frame, align, false, true)?;
+        self.frame(step.frame, align, false, true)?;
 
         // If there's still more, save it into the `spill` and finish the
         // region.
@@ -608,7 +611,9 @@ impl<'b> Distributor<'_, 'b, '_, '_, '_> {
     /// Processes a column break.
     fn break_(&mut self, weak: bool) -> Result<(), Stop> {
         // If there is a region to break into, break into it.
-        if (!weak || !self.items.is_empty()) && self.regions.may_break() {
+        if (!weak || !self.items.is_empty())
+            && (!self.regions.backlog.is_empty() || self.regions.last.is_some())
+        {
             self.composer.work.advance();
             return Err(Stop::Finish(Finish::Forced));
         }
@@ -620,7 +625,7 @@ impl<'b> Distributor<'_, 'b, '_, '_, '_> {
     /// This performs alignment and resolves fractional spacing and blocks.
     fn finalize(
         mut self,
-        regions: Regions,
+        region: Region,
         init: DistributionSnapshot,
         forced: bool,
     ) -> SourceResult<(Frame, Abs)> {
@@ -660,9 +665,9 @@ impl<'b> Distributor<'_, 'b, '_, '_, '_> {
 
         // When we have fractional spacing, occupy the remaining space with it.
         let mut fr_space = Abs::zero();
-        if frs.get() > 0.0 && regions.is_finite() {
-            fr_space = regions.height() - self.used.y;
-            self.used.y = regions.height();
+        if frs.get() > 0.0 && region.size.y.is_finite() {
+            fr_space = region.size.y - self.used.y;
+            self.used.y = region.size.y;
         }
 
         // Lay out fractionally sized blocks.
@@ -671,7 +676,7 @@ impl<'b> Distributor<'_, 'b, '_, '_, '_> {
             for item in &self.items {
                 let Item::Fr(v, _, Some(single)) = item else { continue };
                 let length = v.share(frs, fr_space);
-                let pod = Region::new(Size::new(regions.width(), length), regions.expand);
+                let pod = Region::new(Size::new(region.size.x, length), region.expand);
                 let frame = single.layout(self.composer.engine, self.composer.cx, pod)?;
                 self.used.x.set_max(frame.width());
                 fr_frames.push(frame);
@@ -679,13 +684,12 @@ impl<'b> Distributor<'_, 'b, '_, '_, '_> {
         }
 
         // Also consider the width of insertions for alignment.
-        if !regions.expand.x {
+        if !region.expand.x {
             self.used.x.set_max(self.composer.insertion_width());
         }
 
-        // Determine the region's size. Only reveal the region's height if
-        // necessary.
-        let size = regions.fit(self.used, regions.expand);
+        // Determine the region's size.
+        let size = region.expand.select(region.size, self.used.min(region.size));
         let free = size.y - self.used.y;
 
         let mut output = Frame::soft(size);

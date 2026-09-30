@@ -148,7 +148,7 @@ pub fn layout_equation_block(
             // we placed at least one line _or_ we still have non-last
             // regions. Crucially, we don't want to infinitely create
             // new regions which are too small.
-            if !regions.fits(sub.height() + pos.y)
+            if !regions.size.y.fits(sub.height() + pos.y)
                 && (regions.may_progress() || (regions.may_break() && !frames.is_empty()))
             {
                 break;
@@ -276,7 +276,7 @@ fn prepare_equation(
                 frame: number,
                 number_align: number_align.resolve(styles),
                 equation_align: styles.get(AlignElem::alignment).resolve(styles).x,
-                region_width: regions.width(),
+                region_width: regions.size.x,
                 full_width,
             })
         }

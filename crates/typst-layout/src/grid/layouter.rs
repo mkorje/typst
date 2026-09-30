@@ -11,8 +11,8 @@ use typst_library::layout::grid::resolve::{
 };
 use typst_library::layout::resolve::Entry;
 use typst_library::layout::{
-    Abs, Axes, Dir, Followup, Fr, Fragment, Frame, FrameItem, Length, MultiState,
-    MultiStep, Point, Region, Regions, Rel, Size, Sizing,
+    Abs, Axes, Dir, Fr, Fragment, Frame, FrameItem, Length, MultiState, MultiStep, Point,
+    Region, Regions, Rel, Size, Sizing,
 };
 use typst_library::text::TextElem;
 use typst_library::visualize::Geometry;
@@ -20,7 +20,7 @@ use typst_syntax::Span;
 use typst_utils::Numeric;
 
 use super::{
-    LineSegment, Rowspan, UnbreakableRowGroup, generate_line_segments,
+    Followup, LineSegment, Rowspan, UnbreakableRowGroup, generate_line_segments,
     hline_stroke_at_column, layout_cell, layout_cell_step, vline_stroke_at_row,
 };
 
@@ -30,9 +30,8 @@ pub struct GridLayouter<'a> {
     pub(super) grid: &'a CellGrid,
     /// The regions to layout children into.
     pub(super) regions: Regions<'a>,
-    /// The regions at the start of the current region, before any of it was
-    /// used up.
-    pub(super) initial: Regions<'a>,
+    /// The initial size of the current region before we started subtracting.
+    pub(super) initial: Size,
     /// The grid's locator, whose link the cells' locators share.
     locator: Locator<'a>,
     /// The local hashes of the cells' locators, by position (see
@@ -112,10 +111,8 @@ pub(super) struct PendingRow {
     /// Whether the regions after the first are measured without the space for
     /// repeating headers and footers.
     subtract: bool,
-    /// The height of repeating headers when the row started.
-    header_height: Abs,
-    /// The height of the footer when the row started.
-    footer_height: Abs,
+    /// The height of repeating headers and the footer when the row started.
+    repeats: Abs,
     /// Whether the row may expand in its first region. It doesn't if the
     /// region contains fractional rows.
     expand_first: bool,
@@ -171,11 +168,8 @@ pub(super) struct GridSnapshot {
 /// on each region break.
 #[derive(Clone)]
 pub(super) struct Current {
-    /// The heights used up in the current region, in order. Together with the
-    /// regions at the start of the region, these determine the remaining
-    /// regions, without the grid having to know the heights.
-    pub(super) consumed: Vec<Abs>,
-    /// The sum of `consumed`.
+    /// The height used up in the current region. Together with the regions
+    /// at the start of the region, it determines the remaining regions.
     pub(super) used: Abs,
     /// The height used up in the region when repeated headers were placed and
     /// footers prepared. This also includes pending repeating headers from
@@ -187,8 +181,6 @@ pub(super) struct Current {
     /// available after a region break (see
     /// [`GridLayouter::may_progress_with_repeats`]).
     pub(super) used_after_repeats: Abs,
-    /// The length of `consumed` at the same time as `used_after_repeats`.
-    pub(super) consumed_after_repeats: usize,
     /// Whether `layouter.regions.may_progress()` was `true` at the top of the
     /// region.
     pub(super) could_progress_at_top: bool,
@@ -380,7 +372,7 @@ impl<'a> GridLayouter<'a> {
         Self {
             grid,
             regions,
-            initial: regions,
+            initial: regions.size,
             locator,
             cell_locals,
             styles,
@@ -398,10 +390,8 @@ impl<'a> GridLayouter<'a> {
             pending_headers: Default::default(),
             row_state: RowState::default(),
             current: Current {
-                consumed: vec![],
                 used: Abs::zero(),
                 used_after_repeats: Abs::zero(),
-                consumed_after_repeats: 0,
                 could_progress_at_top: regions.may_progress(),
                 lrows: vec![],
                 repeated_header_rows: 0,
@@ -473,10 +463,8 @@ impl<'a> GridLayouter<'a> {
             pending_row,
             ..Self::with_cell_locals(grid, regions, locator, cell_locals, styles, span)
         };
-        // Use up the same heights of the region as before.
-        for &height in &layouter.current.consumed {
-            layouter.regions.consume(height);
-        }
+        // Use up the same height of the region as before.
+        layouter.regions.size.y -= layouter.current.used;
         layouter
     }
 
@@ -539,8 +527,7 @@ impl<'a> GridLayouter<'a> {
 
     /// Uses up the given height of the current region.
     pub(super) fn consume(&mut self, height: Abs) {
-        self.regions.consume(height);
-        self.current.consumed.push(height);
+        self.regions.size.y -= height;
         self.current.used += height;
     }
 
@@ -548,7 +535,6 @@ impl<'a> GridLayouter<'a> {
     /// current region.
     pub(super) fn mark_repeats(&mut self) {
         self.current.used_after_repeats = self.current.used;
-        self.current.consumed_after_repeats = self.current.consumed.len();
     }
 
     /// Whether space was used up in the current region since repeated headers
@@ -559,14 +545,8 @@ impl<'a> GridLayouter<'a> {
 
     /// The remaining height of the current region when repeated headers were
     /// placed and footers prepared.
-    ///
-    /// This is a blunt question about the regions.
     pub(super) fn height_after_repeats(&self) -> Abs {
-        let mut regions = self.initial;
-        for &height in &self.current.consumed[..self.current.consumed_after_repeats] {
-            regions.consume(height);
-        }
-        regions.height()
+        self.initial.y - self.current.used_after_repeats
     }
 
     /// The index of the current region.
@@ -644,7 +624,7 @@ impl<'a> GridLayouter<'a> {
     /// out, finishes layout.
     pub fn advance(&mut self, engine: &mut Engine) -> SourceResult<()> {
         if let Some(row) = self.pending_row.take() {
-            return self.continue_lockstep_row(engine, row);
+            return self.layout_lockstep_row(engine, row, false);
         }
 
         let y = self.y;
@@ -1259,7 +1239,7 @@ impl<'a> GridLayouter<'a> {
         }
 
         // Size that is not used by fixed-size columns.
-        let available = self.regions.width() - rel;
+        let available = self.regions.size.x - rel;
         if available >= Abs::zero() {
             // Determine size of auto columns.
             let (auto, count) = self.measure_auto_columns(engine, available)?;
@@ -1343,7 +1323,7 @@ impl<'a> GridLayouter<'a> {
                 }
 
                 if colspan > 1
-                    && self.regions.width().is_finite()
+                    && self.regions.size.x.is_finite()
                     && !all_frac_cols.is_empty()
                     && all_frac_cols
                         .iter()
@@ -1477,7 +1457,7 @@ impl<'a> GridLayouter<'a> {
         y: usize,
     ) -> SourceResult<()> {
         if self.is_lockstep_row(y, disambiguator) {
-            return self.layout_lockstep_row(engine, y);
+            return self.layout_lockstep_row(engine, self.lockstep_row(y), true);
         }
 
         // Determine the size for each region of the row. If the first region
@@ -1526,7 +1506,7 @@ impl<'a> GridLayouter<'a> {
         // Expand all but the last region.
         // Skip the first region if the space is eaten up by an fr row.
         let len = resolved.len();
-        let repeats = self.current.repeating_header_height + self.current.footer_height;
+        let repeats = self.repeats_height();
         for ((i, region), target) in
             self.regions
                 .iter()
@@ -1566,14 +1546,16 @@ impl<'a> GridLayouter<'a> {
             || matches!(&self.grid.footer, Some(footer) if footer.repeated)
     }
 
-    /// The regions after the current one, without the space for repeating
-    /// headers and footers of the given heights.
-    ///
-    /// The heights are subtracted one after the other, since the result
-    /// feeds exact comparisons of heights (see [`Regions::may_progress`]) and
-    /// subtracting their sum rounds differently.
-    pub(super) fn followup_without_repeats(&self, header: Abs, footer: Abs) -> Followup {
-        self.regions.followup().map(|h| h - header - footer)
+    /// The height of the repeating headers and the footer in the current
+    /// region.
+    pub(super) fn repeats_height(&self) -> Abs {
+        self.current.repeating_header_height + self.current.footer_height
+    }
+
+    /// The regions after the current one, without the given height for
+    /// repeating headers and footers.
+    pub(super) fn followup_without_repeats(&self, repeats: Abs) -> Followup {
+        Followup::of(&self.regions).map(|h| h - repeats)
     }
 
     /// Whether an auto row can be laid out one region at a time. This is the
@@ -1598,121 +1580,118 @@ impl<'a> GridLayouter<'a> {
             })
     }
 
-    /// Lays out a breakable auto row one region at a time. See
-    /// [`PendingRow`].
+    /// Prepares a breakable auto row that starts in the current region to be
+    /// laid out one region at a time, like `measure_auto_row` and
+    /// `layout_auto_row` prepare it.
+    fn lockstep_row(&self, y: usize) -> PendingRow {
+        let mut cells = vec![];
+        let mut dx = Abs::zero();
+        for (x, &rcol) in self.rcols.iter().enumerate() {
+            if let Some(cell) = self.grid.cell(x, y) {
+                let width = self.cell_spanned_width(cell, x);
+                cells.push(PendingCell { x, width, dx, measure: None, output: None });
+            }
+            dx += rcol;
+        }
+
+        PendingRow {
+            y,
+            index: 0,
+            subtract: self.has_repeats(),
+            repeats: self.repeats_height(),
+            expand_first: !self
+                .current
+                .lrows
+                .iter()
+                .any(|row| matches!(row, Row::Fr(..))),
+            cells,
+        }
+    }
+
+    /// Lays out the part of a row laid out one region at a time in the current
+    /// region. See [`PendingRow`]. If the row continues, it is stored in
+    /// `pending_row` and continued by [`Self::advance`].
     ///
-    /// This lays out the part of the row in the current region. If the row
-    /// continues, it is stored in `pending_row` and continued by
-    /// [`Self::advance`].
-    fn layout_lockstep_row(&mut self, engine: &mut Engine, y: usize) -> SourceResult<()> {
-        let mut can_skip = true;
-        loop {
-            // Prepare the row in the same way as `measure_auto_row` and
-            // `layout_auto_row`.
-            let mut cells = vec![];
-            let mut dx = Abs::zero();
-            for (x, &rcol) in self.rcols.iter().enumerate() {
-                if let Some(cell) = self.grid.cell(x, y) {
-                    let width = self.cell_spanned_width(cell, x);
-                    cells.push(PendingCell { x, width, dx, measure: None, output: None });
-                }
-                dx += rcol;
+    /// In the row's first region, the region may be skipped like in
+    /// `layout_auto_row` if `can_skip` is `true`.
+    fn layout_lockstep_row(
+        &mut self,
+        engine: &mut Engine,
+        mut row: PendingRow,
+        can_skip: bool,
+    ) -> SourceResult<()> {
+        let y = row.y;
+        let index = row.index;
+
+        // Measure the cells like `measure_auto_row`: in the remaining current
+        // region at first and then in the region the measurement of the whole
+        // row would have continued in.
+        let mut pod = self.regions;
+        if index > 0 {
+            let raw = self.initial.y;
+            let height = if row.subtract { raw - row.repeats } else { raw };
+            pod.size.y = height;
+            pod.full = height;
+        }
+        let followup = row.subtract.then(|| self.followup_without_repeats(row.repeats));
+        let pod = match &followup {
+            Some(followup) => followup.after(pod),
+            None => pod,
+        };
+        let cell_pod = |cell: &PendingCell| Regions {
+            size: Size::new(cell.width, pod.size.y),
+            ..pod
+        };
+
+        // Cells whose measurement ended don't need any more space.
+        let mut measured = vec![];
+        for cell in &row.cells {
+            let state = cell.measure.as_ref();
+            if index > 0 && state.is_none() {
+                measured.push(None);
+                continue;
             }
+            let step = self.step_lockstep_cell(engine, y, cell, cell_pod(cell), state)?;
+            measured.push(Some(step));
+        }
 
-            let row = PendingRow {
-                y,
-                index: 0,
-                subtract: self.has_repeats(),
-                header_height: self.current.repeating_header_height,
-                footer_height: self.current.footer_height,
-                expand_first: !self
-                    .current
-                    .lrows
-                    .iter()
-                    .any(|row| matches!(row, Row::Fr(..))),
-                cells,
-            };
-
-            // Measure the cells in the current region.
-            let mut buf = Followup::default();
-            let pod = self.lockstep_pod(&row, None, &mut buf);
-            let mut measured = vec![];
-            for cell in &row.cells {
-                let pod = pod.with_width(cell.width);
-                measured.push(self.step_lockstep_cell(engine, y, cell, pod, None)?);
-            }
-
+        if index == 0 {
             // Skip the first region if one cell in it is empty, but not in the
-            // following ones. Then, remeasure.
+            // following ones, which are measured in the predicted regions.
+            // Then, remeasure.
             if can_skip {
-                let mut skip = false;
-                for (cell, step) in row.cells.iter().zip(&measured) {
-                    if is_empty_frame(&step.frame)
-                        && self.lockstep_rest_non_empty(engine, pod, y, cell, step)?
-                    {
-                        skip = true;
-                        break;
+                for (cell, step) in row.cells.iter().zip(measured.iter().flatten()) {
+                    if !is_empty_frame(&step.frame) {
+                        continue;
                     }
-                }
-
-                if skip {
-                    self.finish_region(engine, false)?;
-                    can_skip = false;
-                    continue;
+                    let rest = crate::flow::peek_remaining(
+                        engine,
+                        cell_pod(cell),
+                        step.next.clone(),
+                        |engine, pod, state| {
+                            self.step_lockstep_cell(engine, y, cell, pod, Some(state))
+                        },
+                        |frame| !is_empty_frame(frame),
+                    )?;
+                    if rest.last().is_some_and(|frame| !is_empty_frame(frame)) {
+                        self.finish_region(engine, false)?;
+                        return self.layout_lockstep_row(
+                            engine,
+                            self.lockstep_row(y),
+                            false,
+                        );
+                    }
                 }
             }
 
             // Lay out into a single region, like `layout_auto_row`.
-            if measured.iter().all(|step| step.next.is_none()) {
-                let height = measured_height(&measured);
+            if measured.iter().flatten().all(|step| step.next.is_none()) {
+                let height = measured_height(measured.iter().flatten());
                 let frame = self.layout_single_row(engine, 0, height, y)?;
                 self.push_row(frame, y, true);
                 return Ok(());
             }
-
-            let measured = measured.into_iter().map(Some).collect();
-            return self.finish_lockstep_region(engine, row, measured);
         }
-    }
-
-    /// Continues a row laid out one region at a time in the current region.
-    fn continue_lockstep_row(
-        &mut self,
-        engine: &mut Engine,
-        row: PendingRow,
-    ) -> SourceResult<()> {
-        // Measure in the region the measurement of the whole row would have
-        // continued in.
-        let raw = self.initial.height();
-        let height =
-            if row.subtract { raw - row.header_height - row.footer_height } else { raw };
-
-        let mut buf = Followup::default();
-        let pod = self.lockstep_pod(&row, Some(height), &mut buf);
-        let mut measured = vec![];
-        for cell in &row.cells {
-            let Some(state) = &cell.measure else {
-                measured.push(None);
-                continue;
-            };
-            let pod = pod.with_width(cell.width);
-            let step = self.step_lockstep_cell(engine, row.y, cell, pod, Some(state))?;
-            measured.push(Some(step));
-        }
-
-        self.finish_lockstep_region(engine, row, measured)
-    }
-
-    /// Lays out the part of a row laid out one region at a time in the
-    /// current region, given the measurements of its cells.
-    fn finish_lockstep_region(
-        &mut self,
-        engine: &mut Engine,
-        mut row: PendingRow,
-        measured: Vec<Option<MultiStep>>,
-    ) -> SourceResult<()> {
-        let y = row.y;
-        let index = row.index;
 
         // The row ends in this region if no cell continues.
         let last = measured.iter().flatten().all(|step| step.next.is_none());
@@ -1720,10 +1699,9 @@ impl<'a> GridLayouter<'a> {
         // Determine the row's height in this region, expanding all but the
         // last region like `layout_auto_row`.
         let mut height = measured_height(measured.iter().flatten());
-        let repeats = row.header_height + row.footer_height;
+        let repeats = row.repeats;
         if !last && (index > 0 || row.expand_first) {
-            let available =
-                if index == 0 { self.regions.height() } else { self.initial.height() };
+            let available = if index == 0 { self.regions.size.y } else { self.initial.y };
             height.set_max(filled_height(available, index, repeats));
         }
 
@@ -1732,13 +1710,12 @@ impl<'a> GridLayouter<'a> {
         // prediction ends with a finite region.
         let mut heights = vec![height];
         if !last {
-            let Followup { backlog, predicted, last } = self.regions.followup();
-            heights.extend(backlog.iter().chain(&predicted).map(|&h| h - repeats));
+            heights.extend(self.regions.backlog.iter().map(|&h| h - repeats));
             if heights.len() == 1 {
-                heights.extend(last.map(|h| h - repeats));
+                heights.extend(self.regions.last.map(|h| h - repeats));
             }
         }
-        let full = if index == 0 { self.regions.full() } else { height };
+        let full = if index == 0 { self.regions.full } else { height };
 
         // Lay out the cells into the row's frame, like `layout_multi_row`.
         let mut output = Frame::soft(Size::new(self.width, height));
@@ -1770,45 +1747,7 @@ impl<'a> GridLayouter<'a> {
         Ok(())
     }
 
-    /// The regions to measure the cells of a row laid out one region at a time
-    /// in, like `measure_auto_row`, apart from the cells' widths.
-    ///
-    /// The first region is the remaining current region if `first` is `None`
-    /// and has the given height and full height otherwise.
-    fn lockstep_pod<'b>(
-        &self,
-        row: &PendingRow,
-        first: Option<Abs>,
-        buf: &'b mut Followup,
-    ) -> Regions<'b>
-    where
-        'a: 'b,
-    {
-        let subtracted =
-            || self.followup_without_repeats(row.header_height, row.footer_height);
-        match first {
-            // Ask about the remaining current region instead of reading its
-            // height.
-            None if row.subtract => {
-                *buf = subtracted();
-                self.regions.with_followup(buf)
-            }
-            None => self.regions,
-            Some(height) => {
-                *buf = if row.subtract { subtracted() } else { self.regions.followup() };
-                Regions::new(
-                    Size::new(self.regions.width(), height),
-                    height,
-                    &[],
-                    None,
-                    self.regions.expand,
-                )
-                .with_followup(buf)
-            }
-        }
-    }
-
-    /// Measures a cell of a row laid out one region at a time.
+    /// Lays out one region of a cell of a row laid out one region at a time.
     fn step_lockstep_cell(
         &self,
         engine: &mut Engine,
@@ -1828,29 +1767,6 @@ impl<'a> GridLayouter<'a> {
             self.row_state.is_being_repeated,
             state,
         )
-    }
-
-    /// Whether any measured frame of a cell after the first one is not
-    /// empty. This measures the cell in the predicted upcoming regions of the
-    /// row's `pod`.
-    fn lockstep_rest_non_empty(
-        &self,
-        engine: &mut Engine,
-        pod: Regions,
-        y: usize,
-        cell: &PendingCell,
-        first: &MultiStep,
-    ) -> SourceResult<bool> {
-        let frames = crate::flow::peek_remaining(
-            engine,
-            pod.with_width(cell.width),
-            first.next.clone(),
-            |engine, pod, state| {
-                self.step_lockstep_cell(engine, y, cell, pod, Some(state))
-            },
-            |frame| !is_empty_frame(frame),
-        )?;
-        Ok(frames.last().is_some_and(|frame| !is_empty_frame(frame)))
     }
 
     /// Measure the regions sizes of an auto row. The option is always `Some(_)`
@@ -1920,24 +1836,20 @@ impl<'a> GridLayouter<'a> {
                 row_group_data,
                 &followup,
             );
+            // Measure the cell with the initial height and upcoming regions
+            // determined previously. If the row is unbreakable, they force
+            // the cell to fit into a single region, even when it is a
+            // breakable rowspan, as a best effort. Best effort to conciliate
+            // a breakable rowspan which started at a previous region going
+            // through an unbreakable auto row. Ensure it goes through
+            // previously laid out regions, but stops at this one when
+            // measuring.
             let size = Axes::new(measurement_data.width, measurement_data.height);
-            let mut pod =
-                Regions::new(size, measurement_data.full, &[], None, self.regions.expand);
-
-            if breakable {
-                // This row is breakable, so measure the cell normally, with
-                // the initial height and upcoming regions determined
-                // previously.
-                pod = pod.with_followup(&measurement_data.followup);
-            } else if measurement_data.frames_in_previous_regions > 0 {
-                // Force cell to fit into a single region when the row is
-                // unbreakable, even when it is a breakable rowspan, as a best
-                // effort. Best effort to conciliate a breakable rowspan which
-                // started at a previous region going through an unbreakable
-                // auto row. Ensure it goes through previously laid out
-                // regions, but stops at this one when measuring.
-                pod = pod.with_future(&measurement_data.followup.backlog, None);
-            }
+            let pod = measurement_data.followup.after(Regions {
+                size,
+                full: measurement_data.full,
+                ..self.regions
+            });
 
             let locator = self.cell_locator(parent, disambiguator);
             let frames = layout_cell(
@@ -2055,7 +1967,7 @@ impl<'a> GridLayouter<'a> {
         // headers would be repeated.
         let height = frame.height();
         while self.unbreakable_rows_left == 0
-            && !self.regions.fits(height)
+            && !self.regions.size.y.fits(height)
             && self.may_progress_with_repeats()
         {
             self.finish_region(engine, false)?;
@@ -2103,7 +2015,7 @@ impl<'a> GridLayouter<'a> {
                         // Cells at breakable auto rows have lengths relative
                         // to the entire page, unlike cells in unbreakable auto
                         // rows.
-                        pod = pod.with_full(self.regions.full());
+                        pod.full = self.regions.full;
                     }
                     let locator = self.cell_locator(Axes::new(x, y), disambiguator);
                     let frame = layout_cell(
@@ -2141,7 +2053,7 @@ impl<'a> GridLayouter<'a> {
             .collect();
 
         // Layout the row.
-        let full = self.regions.full();
+        let full = self.regions.full;
         let mut offset = Point::zero();
         for (x, &rcol) in self.rcols.iter().enumerate() {
             if let Some(cell) = self.grid.cell(x, y) {
@@ -2265,10 +2177,9 @@ impl<'a> GridLayouter<'a> {
 
         // Determine the size of the grid in this region, expanding fully if
         // there are fr rows.
-        let mut size =
-            Size::new(self.width.min(self.initial.width()), self.initial.limited(used));
-        if fr.get() > 0.0 && self.initial.is_finite() {
-            size.y = self.initial.height();
+        let mut size = Size::new(self.width, used).min(self.initial);
+        if fr.get() > 0.0 && self.initial.y.is_finite() {
+            size.y = self.initial.y;
         }
 
         // The frame for the region.
@@ -2283,7 +2194,7 @@ impl<'a> GridLayouter<'a> {
             let (frame, y, is_last) = match row {
                 Row::Frame(frame, y, is_last) => (frame, y, is_last),
                 Row::Fr(v, y, disambiguator) => {
-                    let remaining = self.regions.full() - used;
+                    let remaining = self.regions.full - used;
                     let height = v.share(fr, remaining);
                     (self.layout_single_row(engine, disambiguator, height, y)?, y, true)
                 }
@@ -2315,7 +2226,7 @@ impl<'a> GridLayouter<'a> {
                     // When we layout the rowspan later, the full size of the
                     // pod must be equal to the full size of the first region
                     // it appears in.
-                    rowspan.region_full = self.regions.full();
+                    rowspan.region_full = self.regions.full;
                 }
                 let amount_missing_heights = (current_region + 1)
                     .saturating_sub(rowspan.heights.len() + rowspan.first_region);
@@ -2436,8 +2347,7 @@ impl<'a> GridLayouter<'a> {
         self.finished.push(output);
         self.rrows.push(resolved_rows);
         self.regions.next();
-        self.initial = self.regions;
-        self.current.consumed.clear();
+        self.initial = self.regions.size;
         self.current.used = Abs::zero();
 
         // Repeats haven't been laid out yet, so in the meantime, this will
@@ -2478,13 +2388,14 @@ fn filled_height(available: Abs, i: usize, repeats: Abs) -> Abs {
 /// The regions to lay out a cell of an auto row into, given the row's heights
 /// in its regions and the full height of its first region.
 pub(super) fn row_pod(width: Abs, heights: &[Abs], full: Abs) -> Regions<'_> {
-    Regions::new(
-        Size::new(width, heights[0]),
+    Regions {
+        size: Size::new(width, heights[0]),
         full,
-        &heights[1..],
-        None,
-        Axes::splat(true),
-    )
+        backlog: &heights[1..],
+        last: None,
+        predicted: 0,
+        expand: Axes::splat(true),
+    }
 }
 
 /// Turn an iterator of extents into an iterator of offsets before, in between,

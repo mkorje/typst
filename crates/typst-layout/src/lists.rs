@@ -317,7 +317,7 @@ fn layout_items(
             layouter.marker_width =
                 measure_markers(&layouter, &items, &locators, engine, styles, regions)?;
 
-            if regions.width().to_raw().is_infinite() || !regions.expand.x {
+            if regions.size.x.to_raw().is_infinite() || !regions.expand.x {
                 layouter.body_width = Some(measure_bodies(
                     &layouter, &items, &locators, engine, styles, regions,
                 )?);
@@ -402,7 +402,7 @@ fn measure_markers<'a>(
     styles: StyleChain,
     regions: Regions,
 ) -> SourceResult<Abs> {
-    let available_width = regions.width() - list.indent - list.body_indent;
+    let available_width = regions.size.x - list.indent - list.body_indent;
 
     // Measure markers, so we can align them horizontally relative to the
     // largest width.
@@ -438,7 +438,7 @@ fn measure_bodies(
     styles: StyleChain,
     regions: Regions,
 ) -> SourceResult<Abs> {
-    let available_width = regions.width() - list.indent - list.body_indent;
+    let available_width = regions.size.x - list.indent - list.body_indent;
     let mut measured_body_width = Abs::zero();
     for (item, (_, body_locator)) in items.iter().zip(locators) {
         let body = crate::layout_frame(
@@ -508,12 +508,13 @@ fn layout_item(
     if layouter.list.baseline_align {
         layouter.baseline_align(&marker, &mut body, engine)?;
     } else {
-        layouter.vertical_align(&mut marker, &body, engine)?;
+        layouter.vertical_align(&mut marker, body.1.as_ref(), engine)?;
     }
 
-    let frame = layouter.finish_frame(&marker, body.first.frame, 0);
-    let ahead = body.first.ahead;
-    let next = body.first.next.map(|body| {
+    let (first, _) = body;
+    let frame = layouter.finish_frame(&marker, first.frame, 0);
+    let ahead = first.ahead;
+    let next = first.next.map(|body| {
         MultiState::new(ItemState {
             marker,
             first_frame: layouter.first_frame,
@@ -541,26 +542,6 @@ struct ItemState {
     index: usize,
     /// Where the body continues.
     body: MultiState,
-}
-
-/// The start of a list item's body.
-struct BodyStart {
-    /// The body's first frame and where it continues.
-    first: MultiStep,
-    /// The body's frames after the first one, up to the first non-empty one,
-    /// as laid out into the predicted regions. Only known if the first frame
-    /// could be skipped.
-    rest: Vec<Frame>,
-}
-
-impl BodyStart {
-    /// The body's `i`-th frame, if known.
-    fn get(&self, i: usize) -> Option<&Frame> {
-        match i {
-            0 => Some(&self.first.frame),
-            _ => self.rest.get(i - 1),
-        }
-    }
 }
 
 /// Layout data for a specific item.
@@ -611,11 +592,10 @@ impl<'a> ItemLayouter<'a> {
         // Restrict the body to the available space.
         let mut body_regions = regions;
         if let Some(body_width) = list.body_width {
-            body_regions = body_regions.with_width(body_width);
+            body_regions.size.x = body_width;
             body_regions.expand.x = true;
         } else {
-            body_regions =
-                body_regions.with_width(body_regions.width() - total_body_indent);
+            body_regions.size.x -= total_body_indent;
         }
 
         Self {
@@ -642,12 +622,13 @@ impl<'a> ItemLayouter<'a> {
         )
     }
 
-    /// Layout the start of the list body with the given region data.
+    /// Layout the start of the list body with the given region data. Returns
+    /// the body's first step and, if known, the frame the marker is placed on.
     fn layout_body(
         &mut self,
         regions: Regions,
         engine: &mut Engine,
-    ) -> SourceResult<BodyStart> {
+    ) -> SourceResult<(MultiStep, Option<Frame>)> {
         let first = self.step_body(regions, engine, None)?;
 
         // Update the first non-empty frame (ignoring a frame with only tags due
@@ -668,7 +649,11 @@ impl<'a> ItemLayouter<'a> {
             }
         }
 
-        Ok(BodyStart { first, rest })
+        let marked = match self.first_frame {
+            0 => Some(first.frame.clone()),
+            _ => rest.into_iter().next(),
+        };
+        Ok((first, marked))
     }
 
     /// Layout one region of the list body.
@@ -695,7 +680,7 @@ impl<'a> ItemLayouter<'a> {
     fn baseline_align(
         &mut self,
         marker: &Frame,
-        body: &mut BodyStart,
+        body: &mut (MultiStep, Option<Frame>),
         engine: &mut Engine,
     ) -> SourceResult<()> {
         // Difference between marker and body baselines, for alignment. A
@@ -703,10 +688,10 @@ impl<'a> ItemLayouter<'a> {
         // whereas a negative 'diff' means that the marker is below, so the body
         // must be moved down instead.
         let diff = if marker.has_baseline()
-            && let Some(first) = body.get(self.first_frame)
-            && first.has_baseline()
+            && let Some(marked) = &body.1
+            && marked.has_baseline()
         {
-            first.baseline() - marker.baseline()
+            marked.baseline() - marker.baseline()
         } else {
             // One of the frames has no natural baseline, so baseline alignment
             // is disabled.
@@ -729,7 +714,7 @@ impl<'a> ItemLayouter<'a> {
             // there is only so much we can do with a finite number of
             // iterations.
             let mut regions = self.body_regions;
-            regions.consume(-diff);
+            regions.size.y -= -diff;
             *body = self.layout_body(regions, engine)?;
 
             self.body_offset.y = -diff;
@@ -744,13 +729,13 @@ impl<'a> ItemLayouter<'a> {
     fn vertical_align(
         &mut self,
         marker: &mut Frame,
-        body: &BodyStart,
+        marked: Option<&Frame>,
         engine: &mut Engine,
     ) -> SourceResult<()> {
         // 'Measuring' the height of an 'auto row'.
-        let height = if let Some(body_first) = body.get(self.first_frame) {
+        let height = if let Some(marked) = marked {
             // Don't align if the body is too short.
-            body_first.height().max(marker.height())
+            marked.height().max(marker.height())
         } else {
             // Body appears to be fully empty, so the marker should not align.
             marker.height()

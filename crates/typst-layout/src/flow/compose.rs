@@ -10,8 +10,8 @@ use typst_library::introspection::{
     SplitLocator, Tag,
 };
 use typst_library::layout::{
-    Abs, Axes, Dir, FixedAlignment, Followup, Fragment, Frame, FrameItem, FrameParent,
-    Inherit, OuterHAlignment, PlacementScope, Point, Region, Regions, Rel, Size,
+    Abs, Axes, Dir, FixedAlignment, Fragment, Frame, FrameItem, FrameParent, Inherit,
+    OuterHAlignment, PlacementScope, Point, Region, Regions, Rel, Size,
 };
 use typst_library::model::ArtifactKind;
 use typst_library::model::{
@@ -241,7 +241,7 @@ impl<'b> Composer<'_, 'b, '_, '_> {
             // Shrink the available space by the space used by page
             // insertions.
             let mut pod = regions;
-            pod.consume(self.page_insertions.height());
+            pod.size.y -= self.page_insertions.height();
 
             match self.page_contents(locator.relayout(), pod) {
                 Ok(frame) => break frame,
@@ -266,38 +266,34 @@ impl<'b> Composer<'_, 'b, '_, '_> {
         let first = self.region * self.config.columns.count + 1;
 
         // No point in create column regions, if there's just one!
+        let mut buf = vec![];
         if self.config.columns.count == 1 {
-            let mut followup = Followup::default();
-            let regions = self.predict(regions, first, &mut followup);
+            let regions = self.predictions.apply(regions, first, &mut buf);
             return self.column(locator, regions).map(|(frame, ..)| frame);
         }
 
-        // Create the followup subregions for multi-column layout.
-        let count = self.config.columns.count;
-        let column_height = regions.height();
-        let columns = |heights: &[Abs]| {
-            heights.iter().flat_map(|&h| std::iter::repeat_n(h, count)).collect()
-        };
-        let Followup { backlog, predicted, last } = regions.followup();
-        let mut followup = Followup {
-            backlog: std::iter::repeat_n(column_height, count - 1)
-                .chain(columns(&backlog))
-                .collect(),
-            predicted: columns(&predicted),
-            last,
-        };
-        self.predictions.apply(&mut followup, first);
+        // Create a backlog for multi-column layout.
+        let column_height = regions.size.y;
+        let backlog: Vec<_> = std::iter::once(&column_height)
+            .chain(regions.backlog)
+            .flat_map(|&h| std::iter::repeat_n(h, self.config.columns.count))
+            .skip(1)
+            .collect();
 
         // Subregions for column layout.
-        let mut inner = regions
-            .with_width(self.config.columns.width)
-            .with_followup(&followup)
-            .with_expand(Axes::new(true, regions.expand.y));
+        let inner = Regions {
+            size: Size::new(self.config.columns.width, column_height),
+            backlog: &backlog,
+            predicted: regions.predicted * self.config.columns.count,
+            expand: Axes::new(true, regions.expand.y),
+            ..regions
+        };
+        let mut inner = self.predictions.apply(inner, first, &mut buf);
 
         // The size of the merged frame hosting multiple columns.
         let size = Size::new(
-            regions.width(),
-            if regions.expand.y { regions.height() } else { Abs::zero() },
+            regions.size.x,
+            if regions.expand.y { regions.size.y } else { Abs::zero() },
         );
 
         let mut output = Frame::hard(size);
@@ -326,7 +322,7 @@ impl<'b> Composer<'_, 'b, '_, '_> {
                 let x = if self.config.columns.dir == Dir::LTR {
                     mid
                 } else {
-                    regions.width() - mid
+                    regions.size.x - mid
                 };
                 let height = column_separator_height.max(last_separator_height);
                 let frame = layout_column_separator(
@@ -350,7 +346,7 @@ impl<'b> Composer<'_, 'b, '_, '_> {
             let x = if self.config.columns.dir == Dir::LTR {
                 offset
             } else {
-                regions.width() - offset - width
+                regions.size.x - offset - width
             };
             offset += width;
 
@@ -406,7 +402,7 @@ impl<'b> Composer<'_, 'b, '_, '_> {
             // Shrink the available space by the space used by column
             // insertions.
             let mut pod = regions;
-            pod.consume(self.column_insertions.height());
+            pod.size.y -= self.column_insertions.height();
 
             // For column balancing, only consider space taken by floats, not footnotes
             let float_height = self.column_insertions.float_height();
@@ -545,7 +541,7 @@ impl<'b> Composer<'_, 'b, '_, '_> {
         let columns = self.config.columns.count;
         let column = self.column;
         let remaining = || match placed.scope {
-            PlacementScope::Column => regions.height(),
+            PlacementScope::Column => regions.size.y,
             PlacementScope::Parent => {
                 let remaining: Abs =
                     regions.iter().map(|size| size.y).take(columns - column).sum();
@@ -555,7 +551,7 @@ impl<'b> Composer<'_, 'b, '_, '_> {
 
         // Determine whether the float fits into the remaining space.
         let fits = match placed.scope {
-            PlacementScope::Column => regions.fits(need),
+            PlacementScope::Column => regions.size.y.fits(need),
             PlacementScope::Parent => remaining().fits(need),
         };
 
@@ -709,7 +705,7 @@ impl<'b> Composer<'_, 'b, '_, '_> {
         // Prepare regions for the footnote.
         let mut pod = *regions;
         pod.expand.y = false;
-        pod.consume(flow_need + separator_need + self.config.footnote.gap);
+        pod.size.y -= flow_need + separator_need + self.config.footnote.gap;
 
         // Layout the footnote entry.
         let frames = layout_footnote(self.engine, self.config, &elem, pod)?.into_frames();
@@ -767,13 +763,13 @@ impl<'b> Composer<'_, 'b, '_, '_> {
         // Save the separator.
         if let Some(frame) = separator {
             area.push_footnote_separator(self.config, frame);
-            regions.consume(separator_need);
+            regions.size.y -= separator_need;
         }
 
         // Save the footnote's frame.
         area.push_footnote(self.config, first);
         area.skips.push(loc);
-        regions.consume(note_need);
+        regions.size.y -= note_need;
 
         // Save the spill.
         if !iter.as_slice().is_empty() {
@@ -859,22 +855,6 @@ impl<'b> Composer<'_, 'b, '_, '_> {
     pub fn restarts(&self, subregion: usize) -> usize {
         self.predictions.restarts(subregion)
     }
-
-    /// Applies the learned predictions to the followup regions of `regions`,
-    /// the first of which is subregion `first`.
-    fn predict<'r>(
-        &self,
-        regions: Regions<'r>,
-        first: usize,
-        buf: &'r mut Followup,
-    ) -> Regions<'r> {
-        if !self.predictions.affects(first) {
-            return regions;
-        }
-        *buf = regions.followup();
-        self.predictions.apply(buf, first);
-        regions.with_followup(buf)
-    }
 }
 
 /// Lay out the footnote separator, typically a line.
@@ -900,8 +880,7 @@ fn layout_footnote(
     pod: Regions,
 ) -> SourceResult<Fragment> {
     let loc = elem.location().unwrap();
-    // The regions depend on the position of the footnote's reference.
-    crate::flow::layout_fragment_tracked(
+    crate::flow::layout_fragment(
         engine,
         &FootnoteEntry::new(elem.clone())
             .pack()

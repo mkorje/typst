@@ -24,7 +24,7 @@ use self::layouter::{GridSnapshot, RowPiece};
 use self::lines::{
     LineSegment, generate_line_segments, hline_stroke_at_column, vline_stroke_at_row,
 };
-use self::rowspans::{Rowspan, UnbreakableRowGroup};
+use self::rowspans::{Followup, Rowspan, UnbreakableRowGroup};
 
 /// Layout the cell into the given regions.
 ///

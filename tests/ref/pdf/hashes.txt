@@ -278,6 +278,7 @@ f4d189d1ed0c39cca0c90381ced86b8f footnote-break-across-pages-block
 4e156086ad265809f0512540c64be27a footnote-break-across-pages-nested
 50e341e0f5aff18a0846af5dca858d84 footnote-duplicate
 d323e5c6fc0c7f7f156c382289ba853b footnote-entry
+e606945fec9686d8e55c07135e047e9b footnote-entry-outside-show-everything
 41776db382c7705f5a5e97e349df7596 footnote-float-priority
 92cefcf8f0818008b8a6f987a33b54fa footnote-in-caption
 f23f7a0a0411586163a27c7aff1cb297 footnote-in-columns
@@ -463,7 +464,7 @@ d0e1206057290c398eeb98ab18151297 grid-header-stroke-edge-cases
 02301d3e3bd02115ddc3010f0bf6629e grid-header-too-large-non-repeating-orphan
 c19a48b7f92557e1af7c0320628003ce grid-header-too-large-repeating-orphan
 40c613e5d3cfebc76fcc14f715c1eb01 grid-header-too-large-repeating-orphan-not-at-first-row
-fac0f7bf42d6e67239fd0323db19847c grid-header-too-large-repeating-orphan-with-footer
+1a808626dd7d9bf8ebe71a2f2c8c93cc grid-header-too-large-repeating-orphan-with-footer
 01abe0d8d87c9a5e40a6ac8610c7b644 grid-headers
 9facda8e4bd8cf9328f964e3fc1db0a9 grid-headers-gutter
 ad3bbeddcfd7092956c36c245791b748 grid-headers-no-repeat

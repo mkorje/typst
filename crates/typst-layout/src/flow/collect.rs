@@ -13,8 +13,8 @@ use typst_library::introspection::{
 };
 use typst_library::layout::{
     Abs, AlignElem, Alignment, Axes, BlockElem, ColbreakElem, FixedAlignment, FlushElem,
-    Followup, Fr, Frame, FrameParent, Inherit, PagebreakElem, PlaceElem, PlacementScope,
-    Ratio, Region, Regions, RegionsLink, Rel, Size, Sizing, Spacing, VElem,
+    Fr, Frame, FrameParent, Inherit, PagebreakElem, PlaceElem, PlacementScope, Ratio,
+    Region, Regions, Rel, Size, Sizing, Spacing, VElem,
 };
 use typst_library::model::ParElem;
 use typst_library::routines::Pair;
@@ -566,7 +566,9 @@ pub struct MultiChild {
 }
 
 impl MultiChild {
-    /// Build the child's frames given regions.
+    /// Build the child's first frame given regions. Also returns the spill
+    /// if the child continues, and whether the frame is an orphan (see
+    /// [`BlockStep::orphan`]).
     ///
     /// The `index` is the child's index in the flow and the `subregion` is the
     /// index of the flow subregion into which the first frame will be placed.
@@ -600,7 +602,7 @@ impl MultiChild {
                 None
             }
         };
-        Ok((step.frame, spill, step.exist_non_empty_frame))
+        Ok((step.frame, spill, step.orphan))
     }
 
     /// The regions the block is laid out into, given the regions offered by
@@ -621,7 +623,6 @@ impl MultiChild {
         state: Option<&BlockState>,
     ) -> SourceResult<BlockStep> {
         let regions = self.pod(regions);
-        let regions = regions.track();
         self.styles.with(cx.styles, |styles| {
             layout_multi_step_impl(
                 engine.world,
@@ -656,14 +657,12 @@ fn layout_multi_step_impl(
     elem: &Packed<BlockElem>,
     locator: Tracked<Locator>,
     styles: StyleChain,
-    regions: Tracked<Regions>,
+    regions: Regions,
     state: Option<&BlockState>,
 ) -> SourceResult<BlockStep> {
     let introspector = Protected::from_raw(introspector);
     let link = LocatorLink::new(locator);
     let locator = Locator::link(&link);
-    let regions_link = RegionsLink::new(regions);
-    let regions = Regions::link(&regions_link);
     let mut engine = Engine {
         library,
         world,
@@ -681,29 +680,22 @@ fn layout_multi_step_impl(
 /// The spilled remains of a `MultiChild` that broke across two regions.
 ///
 /// The child is laid out one region at a time. The frame emitted for a region
-/// may depend on predictions of the upcoming regions. When the next region is
-/// laid out and it (or the ones after it) differ from the prediction, the
-/// previous region is laid out again with the actual regions to verify that
-/// the emitted frame doesn't change. If it does, the child continues from
-/// the state it was laid out with rather than from the one of the new layout,
-/// since gluing a changed frame together with the next one could lose or
-/// duplicate content. As the frame's decisions were based on mispredicted
-/// regions, the spill first requests a [`Restart`] of flow layout if
-/// possible. See DESIGN.md §53 for why this is sound.
-///
-/// A step may also have laid out content into the upcoming regions already,
-/// with their predicted heights, and declare how much of them it uses up
-/// ([`BlockStep::ahead`]). Verification doesn't cover such content if an
-/// earlier step laid it out, or if the verification fails. So when the spill
-/// reaches a region that doesn't fit the content laid out into it, it lays
-/// out the steps since the earliest one that laid out content into the region
-/// again, each with the regions it was laid out with, up to this region, and
-/// the actual regions from there on. If the emitted frames stay the same, the
-/// child continues from the new state. Otherwise, it restarts at the region
-/// of the earliest frame, or continues from the old state if it can't.
+/// may depend on predictions of the upcoming regions, and so may content that
+/// the step already laid out into them ([`BlockStep::ahead`]). The steps whose
+/// predictions cover the region the next frame goes into are *unsettled*: the
+/// last one and those whose content ahead reaches the region. When that
+/// region is laid out with other regions than predicted, the last step is laid
+/// out again with the actual regions. If the content laid out ahead into the
+/// region then still doesn't fit, so are the unsettled steps. If the emitted
+/// frames stay the same, the child continues from the new state. Otherwise,
+/// gluing a changed frame together with the next one could lose or duplicate
+/// content, so the spill requests a [`Restart`] of flow layout at the region
+/// of the earliest of these frames, now knowing this region's space. If it
+/// can't, the child continues from the old state, which is consistent with
+/// the emitted frames. See DESIGN.md §53 for why this is sound.
 ///
 /// The side effects of laying out the last emitted frame are held back until
-/// it is verified, since the layout that verifies it may replace the state it
+/// it is settled, since laying it out again may replace the state it
 /// continues from. Then, only the side effects of the layout whose state is
 /// kept are recorded, including those of any work it did ahead.
 #[derive(Clone)]
@@ -712,11 +704,10 @@ pub struct MultiSpill {
     pub(super) index: usize,
     /// Where the block continues.
     state: BlockState,
-    /// The emitted steps that may have to be laid out again: the last one and
-    /// those whose content ahead reaches the next region, in order.
+    /// The unsettled steps, in order.
     steps: Vec<Emitted>,
     /// The side effects of laying out the last emitted frame, which are
-    /// recorded once it is verified.
+    /// recorded once it is settled.
     pending: Sink,
     /// The flow subregion into which the first frame was placed.
     origin: usize,
@@ -729,24 +720,58 @@ pub struct MultiSpill {
 }
 
 impl MultiSpill {
-    /// Build the spill's next frame given regions, returning it and, if there
-    /// is more, the remaining spill. If the frames that were already emitted
-    /// are inconsistent with the actual size of this region, requests a
-    /// restart of flow layout instead.
+    /// Lays out the spill's next frame given regions, returning the step and,
+    /// if there is more, the remaining spill. If the frames that were already
+    /// emitted are inconsistent with the actual size of this region, requests
+    /// a restart of flow layout instead.
     ///
     /// The `target` describes the flow subregion into which the frame will be
     /// placed.
     pub fn layout(
-        self,
+        mut self,
         multi: &MultiChild,
         engine: &mut Engine,
         cx: &FlowCx,
         regions: Regions,
         target: SpillTarget,
-    ) -> SourceResult<Result<(Frame, Option<MultiSpill>), Restart>> {
-        Ok(self
-            .advance(multi, engine, cx, regions, target)?
-            .map(|(step, spill)| (step.frame, spill)))
+    ) -> SourceResult<Result<(BlockStep, Option<MultiSpill>), Restart>> {
+        // The next frame is always laid out with the actual regions.
+        let used = RegionsDesc::new(regions);
+
+        // Settle the last step. Then, if the content it laid out ahead into
+        // this region still doesn't fit, settle the steps since the earliest
+        // one that laid out content into the region, too.
+        let last = self.steps.len() - 1;
+        if let Some(restart) = self.settle(multi, engine, cx, &used, target, last)? {
+            return Ok(Err(restart));
+        }
+        if self.steps[last].ahead.first().is_some_and(|&h| !used.size.y.fits(h)) {
+            let start = self.reaching(self.count);
+            if let Some(restart) = self.settle(multi, engine, cx, &used, target, start)? {
+                return Ok(Err(restart));
+            }
+        }
+
+        let (step, sink) = engine
+            .isolate(|engine| multi.step(engine, cx, used.regions(), Some(&self.state)));
+        let mut step = step?;
+        let Some(state) = step.next.take() else {
+            engine.commit(sink);
+            return Ok(Ok((step, None)));
+        };
+
+        // Keep the unsettled steps for the next region: the new one and those
+        // whose content ahead reaches it.
+        self.steps.push(Emitted {
+            state: Some(std::mem::replace(&mut self.state, state)),
+            regions: used,
+            frame: step.frame.clone(),
+            ahead: step.ahead.clone(),
+        });
+        self.count += 1;
+        self.steps.drain(..self.reaching(self.count));
+        self.pending = sink;
+        Ok(Ok((step, Some(self))))
     }
 
     /// Skips a subregion that is already full.
@@ -768,10 +793,10 @@ impl MultiSpill {
         target: SpillTarget,
     ) -> SourceResult<Result<Option<MultiSpill>, Restart>> {
         if self.aligned {
-            regions.at_least(Abs::zero());
+            regions.size.y.set_max(Abs::zero());
             // The side effects of the layout only count if its result is kept.
             let (trial, sink) = engine.isolate(|engine| {
-                self.clone().advance(multi, engine, cx, regions, target)
+                self.clone().layout(multi, engine, cx, regions, target)
             });
             match trial? {
                 Ok((step, Some(spill)))
@@ -788,178 +813,108 @@ impl MultiSpill {
         Ok(Ok(Some(self)))
     }
 
-    /// Lays out the spill's next frame, returning the step and the remaining
-    /// spill or a request to restart.
-    fn advance(
-        mut self,
-        multi: &MultiChild,
-        engine: &mut Engine,
-        cx: &FlowCx,
-        regions: Regions,
-        target: SpillTarget,
-    ) -> SourceResult<Result<(BlockStep, Option<MultiSpill>), Restart>> {
-        // The next frame is always laid out with the actual regions.
-        let used = RegionsDesc::new(regions);
-
-        // Verify that the last frame doesn't change when laid out with the
-        // regions it would have been laid out with if the upcoming regions
-        // had been predicted correctly. Since steps are memoized, this is a
-        // cache hit that returns the very same frame if the layout of the last
-        // frame gets the same answers to its questions about the regions from
-        // the actual ones. The regions are recreated from their description,
-        // while those of the first frame may have been derived from the
-        // flow's regions, so the frames may differ by floating-point error.
-        let last = self.steps.last().unwrap();
-        let verify = last.regions.followed_by(1, &used);
-        if verify == last.regions {
-            // If the upcoming regions were predicted correctly, the frame
-            // would be laid out with the same regions again. That's a cache
-            // hit, except for the first frame, whose regions may have been
-            // derived from the flow's regions. Then, the frame could only
-            // differ by floating-point error, which verification accepts.
-            engine.commit(std::mem::take(&mut self.pending));
-        } else {
-            // Only the side effects of the layout whose state is kept are
-            // recorded. Recording both would record the side effects of the
-            // last frame again for each region, and for each level of nested
-            // breakable blocks.
-            let (verification, sink) = engine.isolate(|engine| {
-                multi.step(engine, cx, verify.regions(), last.state.as_ref())
-            });
-            let verification = verification?;
-            match verification.next {
-                Some(next) if verification.frame.approx_identical(&last.frame) => {
-                    self.state = next;
-                    let last = self.steps.last_mut().unwrap();
-                    last.regions = verify;
-                    last.ahead = verification.ahead;
-                    engine.commit(sink);
-                }
-                _ => {
-                    // If the space in this subregion was mispredicted, restart
-                    // with a better prediction. The subregion has more space
-                    // than predicted if the prediction was learned from an
-                    // earlier restart and insertions have moved since then.
-                    // Raising the prediction requires that a restart is left to
-                    // lower it again: If the layout alternates between two
-                    // predictions, the last restart thus lowers it.
-                    if self.aligned
-                        && let Some(available) = target.available
-                    {
-                        let needed = match last.regions.prediction() {
-                            Some(p) if !available.fits(p) => 1,
-                            Some(p) if !p.fits(available) => 2,
-                            _ => usize::MAX,
-                        };
-                        if target.restarts >= needed {
-                            return Ok(Err(Restart {
-                                from: self.origin + self.count - 1,
-                                at: target.subregion,
-                                height: available,
-                            }));
-                        }
-                    }
-
-                    // Otherwise, continue from the state the last frame was
-                    // laid out with, which is consistent with it. Its decisions
-                    // were based on the mispredicted regions, but continuing it
-                    // with any regions neither loses nor duplicates content.
-                    // And with the actual regions, the next frame fits and its
-                    // lookahead uses every prediction learned so far.
-                    engine.commit(std::mem::take(&mut self.pending));
-                }
-            }
-        }
-
-        // If the state already laid out content into this region that doesn't
-        // fit, lay out the steps since the one that laid it out again. If that
-        // changes an emitted frame, restart at its region, now knowing this
-        // region's space. If that's not possible either, continue from the
-        // state as is, whose content then overflows this region.
-        if let Some(&needed) = self.steps.last().unwrap().ahead.first()
-            && !regions.fits(needed)
-            && let Err(start) = self.redo(multi, engine, cx, &used)?
-            && self.aligned
-            && let Some(available) = target.available
-            && target.restarts >= 1
-        {
-            return Ok(Err(Restart {
-                from: self.origin + start,
-                at: target.subregion,
-                height: available,
-            }));
-        }
-
-        let (step, sink) = engine
-            .isolate(|engine| multi.step(engine, cx, used.regions(), Some(&self.state)));
-        let mut step = step?;
-        let Some(state) = step.next.take() else {
-            engine.commit(sink);
-            return Ok(Ok((step, None)));
-        };
-
-        // Keep the steps that may have to be laid out again for the next
-        // region: the new one and those whose content ahead reaches it.
-        self.steps.push(Emitted {
-            state: Some(std::mem::replace(&mut self.state, state)),
-            regions: used,
-            frame: step.frame.clone(),
-            ahead: step.ahead.clone(),
-        });
-        self.count += 1;
-        self.steps.drain(..self.reaching(self.count));
-        self.pending = sink;
-        Ok(Ok((step, Some(self))))
-    }
-
-    /// Lays out the steps since the earliest one that laid out content into
-    /// the region the next frame goes into again, each with the regions it
-    /// was laid out with up to that region, and the actual ones described by
-    /// `used` from there on.
+    /// Settles the steps from the one at position `start` in `steps` for the
+    /// region the next frame goes into, whose actual regions are described by
+    /// `used`: Lays them out again, each with the regions it was laid out with
+    /// up to that region, and the actual ones from there on, unless none of
+    /// them changes.
     ///
-    /// The regions in between are the actual ones if the step was verified.
+    /// The regions in between are the actual ones if the step was settled.
     /// Otherwise, they are the predictions that it was laid out with, which
-    /// reproduce its frame, while the actual ones wouldn't.
+    /// reproduce its frame, while the actual ones might not.
     ///
     /// If the emitted frames don't change, the spill continues from the new
-    /// state. Otherwise, returns the index of the earliest step's frame.
-    fn redo(
+    /// state. Otherwise, returns a request to restart at the region of the
+    /// frame at `start` if the space in the `target` subregion was
+    /// mispredicted and a restart is left, and continues from the old state
+    /// otherwise.
+    ///
+    /// The side effects of laying the steps out again are only recorded if
+    /// the spill continues from the new state. Those of the steps before the
+    /// last one were recorded before, so some may be recorded twice, like
+    /// warnings, which are deduplicated.
+    fn settle(
         &mut self,
         multi: &MultiChild,
         engine: &mut Engine,
         cx: &FlowCx,
         used: &RegionsDesc,
-    ) -> SourceResult<Result<(), usize>> {
+        target: SpillTarget,
+        start: usize,
+    ) -> SourceResult<Option<Restart>> {
         // The index of the next frame and of the frame of the first step.
         let next = self.count;
         let first = self.count - self.steps.len();
-        let start = self.reaching(next);
 
-        let mut state = self.steps[start].state.clone();
-        let mut redone = Vec::with_capacity(self.steps.len() - start);
-        for (i, emitted) in self.steps.iter().enumerate().skip(start) {
-            let regions = emitted.regions.followed_by(next - (first + i), used);
-            let step = multi.step(engine, cx, regions.regions(), state.as_ref())?;
-            // The step's regions are recreated from their description now,
-            // while they may have been derived from the flow's regions before,
-            // so the frames may differ by floating-point error.
-            let (Some(next_state), true) =
-                (step.next, step.frame.approx_identical(&emitted.frame))
-            else {
-                return Ok(Err(first + start));
-            };
-            redone.push(Emitted {
-                state,
-                regions,
-                frame: emitted.frame.clone(),
-                ahead: step.ahead,
-            });
-            state = Some(next_state);
+        let actual: Vec<_> = (start..self.steps.len())
+            .map(|i| self.steps[i].regions.followed_by(next - (first + i), used))
+            .collect();
+        if actual.iter().zip(&self.steps[start..]).all(|(a, e)| *a == e.regions) {
+            // If the upcoming regions were predicted correctly, the steps
+            // would be laid out with the same regions again, which are cache
+            // hits.
+            engine.commit(std::mem::take(&mut self.pending));
+            return Ok(None);
         }
 
-        self.steps.splice(start.., redone);
-        self.state = state.unwrap();
-        Ok(Ok(()))
+        let steps = &self.steps;
+        let (redone, sink) = engine.isolate(|engine| {
+            let mut state = steps[start].state.clone();
+            let mut redone = Vec::with_capacity(steps.len() - start);
+            for (emitted, regions) in steps[start..].iter().zip(actual) {
+                let step = multi.step(engine, cx, regions.regions(), state.as_ref())?;
+                let (Some(next_state), true) =
+                    (step.next, step.frame.identical(&emitted.frame))
+                else {
+                    return Ok(None);
+                };
+                redone.push(Emitted {
+                    state,
+                    regions,
+                    frame: emitted.frame.clone(),
+                    ahead: step.ahead,
+                });
+                state = Some(next_state);
+            }
+            SourceResult::Ok(Some((redone, state.unwrap())))
+        });
+
+        if let Some((redone, state)) = redone? {
+            engine.commit(sink);
+            self.pending = Sink::default();
+            self.steps.splice(start.., redone);
+            self.state = state;
+            return Ok(None);
+        }
+
+        // If the space in this subregion was mispredicted, restart with a
+        // better prediction. The subregion has more space than predicted if
+        // the prediction was learned from an earlier restart and insertions
+        // have moved since then. Raising the prediction requires that a
+        // restart is left to lower it again: If the layout alternates between
+        // two predictions, the last restart thus lowers it.
+        let available = target.available;
+        let needed = match self.steps[start].regions.prediction(next - (first + start)) {
+            Some(p) if !available.fits(p) => 1,
+            Some(p) if !p.fits(available) => 2,
+            _ => usize::MAX,
+        };
+        if self.aligned && target.restarts >= needed {
+            return Ok(Some(Restart {
+                from: self.origin + first + start,
+                at: target.subregion,
+                height: available,
+            }));
+        }
+
+        // Otherwise, continue from the old state, which is consistent with the
+        // emitted frames. Their decisions were based on the mispredicted
+        // regions, but continuing with any regions neither loses nor
+        // duplicates content. And with the actual regions, the next frame fits
+        // and its lookahead uses every prediction learned so far. Content laid
+        // out ahead into this region may overflow it.
+        engine.commit(std::mem::take(&mut self.pending));
+        Ok(None)
     }
 
     /// The position in `steps` of the earliest step whose content ahead
@@ -990,12 +945,11 @@ pub struct SpillTarget {
     /// How many more restarts may be requested because the space in the
     /// subregion was mispredicted.
     pub restarts: usize,
-    /// The height available in the subregion, if a restart may be requested.
-    /// Unlike the height of the regions the spill is laid out into, this isn't
-    /// limited by column balancing, since it serves as a prediction for the
-    /// subregion when restarting. It isn't read otherwise, since that's a
-    /// blunt question about the regions.
-    pub available: Option<Abs>,
+    /// The height available in the subregion. Unlike the height of the
+    /// regions the spill is laid out into, this isn't limited by column
+    /// balancing, since it serves as a prediction for the subregion when
+    /// restarting.
+    pub available: Abs,
 }
 
 /// An emitted step of a [`MultiSpill`].
@@ -1011,62 +965,79 @@ struct Emitted {
     ahead: Vec<Abs>,
 }
 
-/// An owned description of [`Regions`].
+/// An owned copy of [`Regions`].
 #[derive(Debug, Clone, PartialEq)]
 struct RegionsDesc {
     size: Size,
     expand: Axes<bool>,
     full: Abs,
-    followup: Followup,
+    backlog: Vec<Abs>,
+    last: Option<Abs>,
+    predicted: usize,
 }
 
 impl RegionsDesc {
     /// Describe the given regions.
     fn new(regions: Regions) -> Self {
         Self {
-            size: regions.size(),
+            size: regions.size,
             expand: regions.expand,
-            full: regions.full(),
-            followup: regions.followup(),
+            full: regions.full,
+            backlog: regions.backlog.to_vec(),
+            last: regions.last,
+            predicted: regions.predicted,
         }
     }
 
     /// Recreate the regions.
     fn regions(&self) -> Regions<'_> {
-        Regions::new(self.size, self.full, &[], None, self.expand)
-            .with_followup(&self.followup)
+        Regions {
+            size: self.size,
+            expand: self.expand,
+            full: self.full,
+            backlog: &self.backlog,
+            last: self.last,
+            predicted: self.predicted,
+        }
     }
 
     /// The same regions up to the one `at` breaks after the first one,
     /// followed by the given regions instead of the ones from there on.
     ///
     /// The given regions take on the kind of the region they replace: If it
-    /// is a repetition of the final region, they are repetitions, too, since
-    /// that affects whether moving on to them counts as progress.
+    /// is a repetition of the final region, they are predicted repetitions,
+    /// too, since that affects whether moving on to them counts as progress.
     fn followed_by(&self, at: usize, regions: &RegionsDesc) -> Self {
-        let Followup { backlog, predicted, last } = &self.followup;
         let kept = at - 1;
-        let mut followup = regions.followup.clone().prepend([regions.size.y]);
-        match last {
-            Some(last) if kept >= backlog.len() => {
-                let repeated = predicted
-                    .iter()
-                    .copied()
-                    .chain(std::iter::repeat(*last))
-                    .take(kept - backlog.len());
-                followup.backlog.append(&mut followup.predicted);
-                followup.predicted = repeated.chain(followup.backlog.drain(..)).collect();
-                followup.backlog = backlog.clone();
-            }
-            _ => followup = followup.prepend(backlog.iter().take(kept).copied()),
-        }
-        Self { followup, ..self.clone() }
+        let finite = self.backlog.len() - self.predicted;
+        let mut backlog: Vec<Abs> = self
+            .backlog
+            .iter()
+            .chain(self.last.iter().cycle())
+            .take(kept)
+            .copied()
+            .collect();
+        backlog.push(regions.size.y);
+        backlog.extend(&regions.backlog);
+        let predicted = if self.last.is_some() && kept >= finite {
+            backlog.len() - finite
+        } else {
+            regions.predicted
+        };
+        let mut followed = Regions {
+            backlog: &backlog,
+            last: regions.last,
+            predicted,
+            ..self.regions()
+        };
+        followed.trim_predicted();
+        Self::new(followed)
     }
 
-    /// The predicted remaining height of the next region.
-    fn prediction(&self) -> Option<Abs> {
-        let Followup { backlog, predicted, last } = &self.followup;
-        backlog.first().or(predicted.first()).copied().or(*last)
+    /// The predicted remaining height of the region `at` breaks after the
+    /// first one.
+    fn prediction(&self, at: usize) -> Option<Abs> {
+        self.backlog.get(at - 1).copied().or(self.last)
     }
 }
 
@@ -1143,11 +1114,9 @@ mod tests {
             size: Size::new(pt(100.0), pt(height)),
             expand: Axes::splat(true),
             full: pt(100.0),
-            followup: Followup {
-                backlog: backlog.iter().copied().map(pt).collect(),
-                predicted: predicted.iter().copied().map(pt).collect(),
-                last: last.map(pt),
-            },
+            backlog: backlog.iter().chain(predicted).copied().map(pt).collect(),
+            last: last.map(pt),
+            predicted: predicted.len(),
         }
     }
 
